@@ -2571,6 +2571,7 @@ def build_app():
         layout=Layout(
             FloatContainer(
                 content=HSplit([st.output_window, Window(height=1, char="─", style="#444444"), st.input_box,
+                                Window(height=1, char="─", style="#444444"),
                                 Window(FormattedTextControl(status_text), height=1)]),
                 floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=8, scroll_offset=1))],
             ),
