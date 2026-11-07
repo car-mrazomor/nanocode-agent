@@ -851,3 +851,73 @@ def test_at_file_completion(sandbox):
         nested = [c.text for c in completer.get_completions(Document("@src/"), None)]
     assert found == ["@setup.py", "@src/"]
     assert nested == ["@src/app.py"]
+
+
+# --- precise key reporting (kitty protocol / modifyOtherKeys) and ↑/↓ in long prompts ---
+
+def test_translate_keys():
+    t = nc.translate_keys
+    assert t("\x1b[13;2u") == "\n"            # Shift+Enter (kitty protocol)
+    assert t("\x1b[27;2;13~") == "\n"         # Shift+Enter (modifyOtherKeys)
+    assert t("\x1b[13;3u") == "\x1b\r"        # Alt+Enter
+    assert t("\x1b[127;9u") == "\x15"         # Cmd+Backspace → delete to start
+    assert t("\x1b[127;3u") == "\x1b\x7f"     # Option+Backspace → delete word
+    assert t("\x1b[1;9D") == "\x01" and t("\x1b[1;9C") == "\x05"  # Cmd+←/→
+    assert t("\x1b[1;3D") == "\x1b[1;3D"      # Option+← untouched (already understood)
+    assert t("\x1b[99;5u") == "\x03"          # Ctrl+C
+    assert t("\x1b[97;7u") == "\x1b\x01"      # Ctrl+Alt+A
+    assert t("\x1b[98;3u") == "\x1bb"         # Alt+B
+    assert t("\x1b[97:65;4u") == "\x1bA"      # Shift+Alt+A, with the shifted key reported
+    assert t("\x1b[27u") == "\x1b"            # Esc
+    assert t("\x1b[57441;2u") == ""           # a lone modifier key: ignored
+    assert t("\x1b[115;9u") == ""             # Cmd+S: left to the terminal
+    assert t("plain text ü") == "plain text ü"
+
+
+def test_kitty_keys_and_vertical_moves_in_the_input(sandbox):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    nc.install_key_translation()
+    seen = {}
+
+    async def scenario():
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = nc.build_app()
+            box = nc.st.input_box
+            box.accept_handler = lambda buff: False
+            task = asyncio.ensure_future(app.run_async())
+            await asyncio.sleep(0.2)
+
+            async def keys(text, wait=0.15):
+                inp.send_text(text)
+                await asyncio.sleep(wait)
+
+            await keys("older prompt\r")
+            await keys("one\x1b[13;2utwo\x1b[27;2;13~three")
+            seen["newlines"] = box.text
+            await keys("\x1b[1;9D")
+            seen["cmd_left"] = box.document.text_after_cursor
+            await keys("\x1b[1;9C\x1b[127;9u")
+            seen["cmd_backspace"] = box.text
+            await keys("some text\x1b[99;5u")
+            seen["ctrl_c_clears"] = box.text
+            long = "x" * 230
+            await keys(long)
+            width = box.window.render_info.window_width
+            await keys("\x1b[A")                  # ↑ inside a wrapped line
+            seen["up_moved"] = (box.text == long, len(box.text) - box.buffer.cursor_position == width)
+            for _ in range(5):
+                await keys("\x1b[A", 0.1)
+            seen["history"] = box.text
+            app.exit()
+            await task
+
+    run(scenario())
+    assert seen["newlines"] == "one\ntwo\nthree"
+    assert seen["cmd_left"] == "three"
+    assert seen["cmd_backspace"] == ""
+    assert seen["ctrl_c_clears"] == ""
+    assert seen["up_moved"] == (True, True)
+    assert seen["history"] == "older prompt"

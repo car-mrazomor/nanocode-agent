@@ -2704,6 +2704,79 @@ def start_input(text):
     return True
 
 
+# Precise key reporting (like Claude Code): the kitty keyboard protocol (level 5) plus xterm's modifyOtherKeys.
+# Terminals that support them then report Shift+Enter, Cmd+Backspace etc. distinctly; translate_keys turns
+# those reports back into the plain keys prompt_toolkit understands.
+KEYS_ON = "\x1b[>5u\x1b[>4;2m"
+KEYS_OFF = "\x1b[<u\x1b[>4m"
+CSI_U = re.compile(r"\x1b\[(\d+)(?::(\d*))?(?::\d+)?(?:;(\d+)(?::\d+)?)?(?:;[\d:]*)?u")
+MODIFY_OTHER_KEYS = re.compile(r"\x1b\[27;(\d+);(\d+)~")
+MODIFIED_ARROW = re.compile(r"\x1b\[1;(\d+)([ABCDHF])")
+CTRL_SYMBOLS = {" ": "\x00", "[": "\x1b", "\\": "\x1c", "]": "\x1d", "^": "\x1e", "_": "\x1f", "/": "\x1f"}
+
+
+def keyboard_protocol_enabled():
+    setting = st.config.get("keyboard_protocol", "auto")
+    if setting in ("on", "off"):
+        return setting == "on"
+    if os.name == "nt" or os.environ.get("TMUX") or os.environ.get("STY"):
+        return False
+    return detect_terminal() in ("kitty", "ghostty", "wezterm") or os.environ.get("TERM", "").startswith("foot")
+
+
+def legacy_key(code, shifted, mods):
+    m = max(0, mods - 1)
+    shift, alt, ctrl, cmd = m & 1, m & 2, m & 4, m & 8
+    if code == 13:
+        return "\n" if shift or ctrl else "\x1b\r" if alt else "\r"
+    if code == 9:
+        return "\x1b[Z" if shift else "\t"
+    if code in (8, 127):
+        return "\x15" if cmd else "\x17" if ctrl else "\x1b\x7f" if alt else "\x7f"
+    if code == 27:
+        return "\x1b"
+    if cmd or 57344 <= code <= 63743:  # Cmd+letter stays with the terminal; private-use = keypad/modifier keys
+        return ""
+    char = chr(shifted) if shift and shifted else chr(code)
+    if ctrl:
+        lower = char.lower()
+        char = chr(ord(lower) - 96) if "a" <= lower <= "z" else CTRL_SYMBOLS.get(char, char)
+    return "\x1b" + char if alt else char
+
+
+def translate_keys(data):
+    def csi_u(match):
+        code, shifted, mods = match.groups()
+        return legacy_key(int(code), int(shifted) if shifted else 0, int(mods or 1))
+
+    def modify_other(match):
+        mods, code = match.groups()
+        return legacy_key(int(code), 0, int(mods))
+
+    def arrow(match):
+        mods, final = int(match.group(1)), match.group(2)
+        if (mods - 1) & 8:  # Cmd+arrows: line start / end
+            return {"D": "\x01", "H": "\x01", "C": "\x05", "F": "\x05"}.get(final, "")
+        return match.group(0)
+
+    if "\x1b[" not in data:
+        return data
+    return MODIFIED_ARROW.sub(arrow, MODIFY_OTHER_KEYS.sub(modify_other, CSI_U.sub(csi_u, data)))
+
+
+def install_key_translation():
+    from prompt_toolkit.input.vt100_parser import Vt100Parser
+    if getattr(Vt100Parser.feed, "_nanocode", False):
+        return
+    original = Vt100Parser.feed
+
+    def feed(self, data):
+        return original(self, translate_keys(data))
+
+    feed._nanocode = True
+    Vt100Parser.feed = feed
+
+
 def build_app():
     from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
     from prompt_toolkit.keys import Keys
@@ -3130,6 +3203,43 @@ def build_app():
         info = st.output_window.render_info
         return max(1, info.window_height - 2) if info else 10
 
+    def visual_move(buff, direction):
+        """Moves the cursor one screen line up/down inside the prompt. False when already on the first/last."""
+        info = st.input_box.window.render_info
+        width = max(1, info.window_width if info else 80)
+        doc = buff.document
+        row, col, lines = doc.cursor_position_row, doc.cursor_position_col, doc.lines
+        line = lines[row]
+        if direction < 0:
+            if col >= width:
+                buff.cursor_position -= width
+                return True
+            if row == 0:
+                return False
+            above = lines[row - 1]
+            start = (max(len(above) - 1, 0) // width) * width
+            buff.cursor_position = doc.translate_row_col_to_index(row - 1, min(start + col, len(above)))
+            return True
+        if col // width < max(len(line) - 1, 0) // width:
+            buff.cursor_position += min(width, len(line) - col)
+            return True
+        if row == len(lines) - 1:
+            return False
+        buff.cursor_position = doc.translate_row_col_to_index(row + 1, min(col % width, len(lines[row + 1])))
+        return True
+
+    @kb.add("up", filter=no_dialog & ~has_completions)
+    def _(event):
+        buff = event.current_buffer
+        if not visual_move(buff, -1):
+            buff.history_backward()
+
+    @kb.add("down", filter=no_dialog & ~has_completions)
+    def _(event):
+        buff = event.current_buffer
+        if not visual_move(buff, 1):
+            buff.history_forward()
+
     @kb.add("pageup", filter=no_dialog)
     def _(event):
         st.scroll = min(st.scroll + page(), (st.output + st.live).count("\n"))
@@ -3513,8 +3623,16 @@ async def run_interactive(resume_last=False):
     app = build_app()
     new_session()
 
+    keys = keyboard_protocol_enabled()
+    if keys:
+        install_key_translation()
+
     async def startup():
         try:
+            if keys:
+                await asyncio.sleep(0.05)  # after the switch to the full-screen buffer, which has its own key modes
+                app.output.write_raw(KEYS_ON)
+                app.output.flush()
             if st.backend == "sdk":
                 st.client = await make_client()
             if resume_last:
@@ -3533,6 +3651,9 @@ async def run_interactive(resume_last=False):
     try:
         await app.run_async()
     finally:
+        if keys:
+            sys.stdout.write(KEYS_OFF)
+            sys.stdout.flush()
         if st.task and not st.task.done():
             st.task.cancel()
         await stop_all_shells()
