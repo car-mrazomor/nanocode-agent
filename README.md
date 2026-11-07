@@ -88,6 +88,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/shells` | Background shells: list them, or `/shells stop <name>` |
 | `/auto` | Toggle auto-approve for edits and commands |
 | `/rea` | Reverse-engineering tools: status, `/rea on`, `/rea off` |
+| `/terminal-setup` | Make Shift+Enter, Cmd+Backspace and Cmd+arrows work in your terminal |
 | `/cost`, `/config`, `/help` | Usage, settings, help |
 | `/c`, `/q` | New chat, quit |
 | `# note` | Save a note to project memory |
@@ -99,11 +100,22 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | Key | Action |
 |---|---|
 | Enter | Send |
-| Alt+Enter | New line |
-| Esc / Ctrl+C | Stop the reply (Ctrl+C when idle quits) |
+| Shift+Enter, Alt+Enter, Ctrl+J | New line |
+| Ctrl+U (Cmd+Backspace on macOS) | Delete everything before the cursor |
+| Ctrl+← →, Alt/Option+← → | Jump by word |
+| Home / End, Ctrl+A / Ctrl+E (Cmd+← → on macOS) | Start / end of line |
+| Esc | Stop the reply |
+| Ctrl+C | Stop the reply, clear the input, or quit |
 | ↑ / ↓ | History |
 | PageUp / PageDown | Scroll |
 | Tab | Complete |
+
+Most terminals send the same thing for Shift+Enter as for Enter, and many don't pass Cmd shortcuts to apps at all. Run **`/terminal-setup`** once to fix that:
+
+- **kitty, Ghostty, VS Code, Cursor, Windsurf:** it adds the mappings to the terminal's config. It asks first and makes a backup.
+- **iTerm2, WezTerm, Alacritty, Windows Terminal, Terminal.app:** it shows the steps.
+
+Alt+Enter and Ctrl+J insert a new line in every terminal.
 
 **In scripts:**
 

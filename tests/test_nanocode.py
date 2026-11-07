@@ -670,3 +670,80 @@ def test_recap_survives_resume_and_titles_are_tidy(sandbox, monkeypatch):
     run(nc.resume_session("1"))
     assert nc.st.usage["cost"] == 0.5 and nc.st.changed == {"a.txt": [1, 1]}
     assert nc.st.activity and nc.st.activity[0][0] == "edit"
+
+
+# --- keys and /terminal-setup ---
+
+def test_editing_keys(sandbox):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    sent = []
+
+    async def scenario():
+        with create_pipe_input() as inp:
+            app = nc.build_app()
+            app.input, app.output = inp, DummyOutput()
+            nc.st.input_box.accept_handler = lambda buff: sent.append(buff.text) or False
+            task = asyncio.ensure_future(app.run_async())
+            await asyncio.sleep(0.2)
+            box = nc.st.input_box
+
+            async def keys(text):
+                inp.send_text(text)
+                await asyncio.sleep(0.15)
+
+            await keys("first line")
+            await keys("\x1b[13;2u")          # Shift+Enter (kitty protocol / CSI u)
+            await keys("second\x1b[27;2;13~")  # Shift+Enter (xterm modifyOtherKeys)
+            await keys("third\n")              # Ctrl+J
+            await keys("fourth\x1b\r")         # Alt+Enter
+            lines = box.text
+            await keys("fifth word")
+            await keys("\x1b[1;3D")            # Alt+Left: to the start of "word"
+            word_jump = box.document.text_after_cursor
+            await keys("\x1b[1;5D")            # Ctrl+Left: to the start of "fifth"
+            ctrl_jump = box.document.text_after_cursor
+            await keys("\x05")                 # Ctrl+E: end of line
+            await keys("\x15")                 # Ctrl+U: delete everything before the cursor
+            cleared = box.text
+            await keys("hi\r")                 # Enter sends
+            app.exit()
+            await task
+            return lines, word_jump, ctrl_jump, cleared
+
+    lines, word_jump, ctrl_jump, cleared = run(scenario())
+    assert lines == "first line\nsecond\nthird\nfourth\n"
+    assert word_jump == "word" and ctrl_jump == "fifth word"
+    assert cleared == ""
+    assert sent == ["hi"]
+
+
+def test_terminal_setup_kitty(sandbox, tmp_path, monkeypatch):
+    monkeypatch.setenv("KITTY_WINDOW_ID", "1")
+    monkeypatch.delenv("KITTY_CONFIG_DIRECTORY", raising=False)
+    conf = tmp_path / "userhome" / ".config" / "kitty" / "kitty.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("font_size 14\n")
+    run(nc.terminal_setup())
+    text = conf.read_text()
+    assert text.startswith("font_size 14\n") and "map shift+enter send_text all \\x1b\\r" in text
+    assert conf.with_name("kitty.conf.nanocode-backup").read_text() == "font_size 14\n"
+    run(nc.terminal_setup())
+    assert conf.read_text().count("shift+enter") == 1 and "already set up" in plain(nc.st.output)
+
+
+def test_terminal_setup_vscode_and_manual(sandbox, tmp_path, monkeypatch):
+    for var in ("KITTY_WINDOW_ID", "GHOSTTY_RESOURCES_DIR", "WT_SESSION", "ALACRITTY_WINDOW_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("TERM_PROGRAM", "vscode")
+    keybindings = tmp_path / "keybindings.json"
+    keybindings.write_text('[{"key": "ctrl+k", "command": "x"}]')
+    monkeypatch.setattr(nc, "editor_keybindings_path", lambda terminal: keybindings)
+    run(nc.terminal_setup())
+    data = json.loads(keybindings.read_text())
+    assert data[0]["key"] == "ctrl+k" and data[1]["key"] == "shift+enter" and data[1]["args"]["text"] == "\u001b\r"
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+    run(nc.terminal_setup())
+    assert "Option+Enter" in plain(nc.st.output)

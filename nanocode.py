@@ -2092,20 +2092,24 @@ COMMANDS = {
     "/shells": "background shells: list, or /shells stop <name>",
     "/cost": "tokens and cost this session",
     "/config": "show settings (change: nanocode setup)",
+    "/terminal-setup": "make Shift+Enter, Cmd+Backspace and Cmd+arrows work in this terminal",
     "/c": "new chat (old one stays saved)",
     "/q": "quit",
 }
 ALIASES = {"/clear": "/c", "/new": "/c", "/exit": "/q", "/quit": "/q"}
-KEYS_HELP = [("Enter", "send"), ("Alt+Enter", "new line"), ("Esc", "stop the reply"),
-             ("Ctrl+C", "stop the reply, or quit"), ("↑ / ↓", "input history"),
-             ("PageUp / PageDown", "scroll"), ("Tab", "complete commands, models, @files")]
+KEYS_HELP = [("Enter", "send"), ("Shift+Enter / Alt+Enter / Ctrl+J", "new line"),
+             ("Ctrl+U (Cmd+Backspace)", "delete everything before the cursor"),
+             ("Ctrl/Alt+← →", "jump by word"), ("Home/End, Ctrl+A/E", "start/end of line"),
+             ("Esc", "stop the reply"), ("Ctrl+C", "stop the reply, clear the input, or quit"),
+             ("↑ / ↓", "input history"), ("PageUp / PageDown", "scroll"), ("Tab", "complete commands, models, @files")]
 
 
 def show_help():
     lines = [f"{BOLD}Commands{RESET}"]
     lines += [f"  {CYAN}{cmd:<9}{RESET} {DIM}{desc}{RESET}" for cmd, desc in COMMANDS.items()]
     lines += ["", f"{BOLD}Keys{RESET}"]
-    lines += [f"  {CYAN}{key:<18}{RESET} {DIM}{desc}{RESET}" for key, desc in KEYS_HELP]
+    lines += [f"  {CYAN}{key:<34}{RESET} {DIM}{desc}{RESET}" for key, desc in KEYS_HELP]
+    lines += ["", f"  {DIM}Shift+Enter or Cmd+Backspace not working? /terminal-setup configures your terminal{RESET}"]
     lines += ["", f"  {DIM}@path      attach a file to your message{RESET}",
               f"  {DIM}# note     save a note to project memory{RESET}",
               f"  {DIM}/<skill>   run a skill, e.g. /review app.py{RESET}"]
@@ -2162,6 +2166,126 @@ def cmd_undo():
     if st.backend != "sdk":
         st.messages.append({"role": "user", "content": f"[I undid your last change to {path}.]"})
         st.messages.append({"role": "assistant", "content": "Noted."})
+
+
+TERMINAL_MARK = "nanocode: Shift+Enter = new line, Cmd+Backspace = delete line, Cmd+arrows = line start/end"
+
+
+def detect_terminal():
+    env = os.environ
+    if env.get("KITTY_WINDOW_ID") or env.get("TERM") == "xterm-kitty":
+        return "kitty"
+    if env.get("GHOSTTY_RESOURCES_DIR") or env.get("TERM_PROGRAM") == "ghostty":
+        return "ghostty"
+    if env.get("TERM_PROGRAM") == "vscode":
+        hint = (env.get("VSCODE_GIT_ASKPASS_MAIN", "") + env.get("VSCODE_IPC_HOOK_CLI", "")).lower()
+        return "cursor" if "cursor" in hint else "windsurf" if "windsurf" in hint else "vscode"
+    if env.get("TERM_PROGRAM") == "WezTerm":
+        return "wezterm"
+    if env.get("TERM_PROGRAM") == "iTerm.app":
+        return "iterm2"
+    if env.get("TERM_PROGRAM") == "Apple_Terminal":
+        return "terminal.app"
+    if env.get("ALACRITTY_WINDOW_ID") or env.get("ALACRITTY_SOCKET"):
+        return "alacritty"
+    if env.get("WT_SESSION"):
+        return "windows-terminal"
+    return None
+
+
+def terminal_config_change(terminal):
+    """(config file, text to append) for terminals whose config nanocode can safely add to, else None."""
+    mac = sys.platform == "darwin"
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    if terminal == "kitty":
+        path = Path(os.environ["KITTY_CONFIG_DIRECTORY"]) / "kitty.conf" if os.environ.get("KITTY_CONFIG_DIRECTORY") \
+            else config_home / "kitty" / "kitty.conf"
+        lines = ["map shift+enter send_text all \\x1b\\r"]
+        if mac:
+            lines += ["map cmd+backspace send_text all \\x15", "map cmd+left send_text all \\x01",
+                      "map cmd+right send_text all \\x05"]
+        return path, f"\n# {TERMINAL_MARK}\n" + "\n".join(lines) + "\n"
+    if terminal == "ghostty":
+        path = config_home / "ghostty" / "config"
+        if mac and not path.exists() and (Path.home() / "Library/Application Support/com.mitchellh.ghostty/config").exists():
+            path = Path.home() / "Library/Application Support/com.mitchellh.ghostty/config"
+        lines = ["keybind = shift+enter=text:\\x1b\\r"]
+        if mac:
+            lines += ["keybind = super+backspace=text:\\x15", "keybind = super+left=text:\\x01",
+                      "keybind = super+right=text:\\x05"]
+        return path, f"\n# {TERMINAL_MARK}\n" + "\n".join(lines) + "\n"
+    return None
+
+
+def editor_keybindings_path(terminal):
+    app = {"vscode": "Code", "cursor": "Cursor", "windsurf": "Windsurf"}[terminal]
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / app / "User" / "keybindings.json"
+    if os.name == "nt":
+        return Path(os.environ.get("APPDATA", "")) / app / "User" / "keybindings.json"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / app / "User" / "keybindings.json"
+
+
+MANUAL_TERMINAL_SETUP = {
+    "iterm2": "iTerm2 → Settings → Profiles → Keys → Key Mappings → + : Shift+Enter → 'Send Escape Sequence' → \\r. "
+              "For Cmd+Backspace and Cmd/Option+arrows, pick Presets → 'Natural Text Editing'.",
+    "terminal.app": "Terminal.app can't remap Shift+Enter: use Option+Enter (Settings → Profiles → Keyboard → "
+                    "'Use Option as Meta key') or Ctrl+J for new lines.",
+    "wezterm": "add to ~/.wezterm.lua keys: { key = 'Enter', mods = 'SHIFT', action = wezterm.action.SendString '\\x1b\\r' }",
+    "alacritty": "add to alacritty.toml: [[keyboard.bindings]] key = \"Return\" mods = \"Shift\" chars = \"\\u001b\\r\"",
+    "windows-terminal": "Settings → Open JSON file → actions: { \"command\": { \"action\": \"sendInput\", "
+                        "\"input\": \"\\u001b\\r\" }, \"keys\": \"shift+enter\" }",
+}
+
+
+async def terminal_setup():
+    terminal = detect_terminal()
+    if terminal is None:
+        out(f"{DIM}couldn't tell which terminal this is. New lines always work with Alt+Enter or Ctrl+J; "
+            f"Ctrl+U deletes everything before the cursor.{RESET}\n")
+        return
+    if terminal in MANUAL_TERMINAL_SETUP:
+        out(f"⏺ {terminal}: {MANUAL_TERMINAL_SETUP[terminal]}\n  {DIM}Meanwhile, Alt+Enter and Ctrl+J insert new lines.{RESET}\n")
+        return
+    if terminal in ("vscode", "cursor", "windsurf"):
+        path = editor_keybindings_path(terminal)
+        entry = {"key": "shift+enter", "command": "workbench.action.terminal.sendSequence",
+                 "args": {"text": "\u001b\r"}, "when": "terminalFocus"}
+        try:
+            current = json.loads(path.read_text(encoding="utf-8")) if path.exists() and path.read_text().strip() else []
+        except (OSError, json.JSONDecodeError):
+            out(f"⏺ {terminal}: add this to {tilde(path)} (it has comments, so I won't edit it):\n  {json.dumps(entry)}\n")
+            return
+        if any(e.get("key") == "shift+enter" and "terminal" in str(e.get("when", "")) for e in current if isinstance(e, dict)):
+            out(f"⏺ {terminal} already sends something for Shift+Enter in the terminal ({tilde(path)})\n")
+            return
+        if not await allowed("terminal-setup", f"add Shift+Enter = new line to {tilde(path)}"):
+            return
+        if path.exists():
+            shutil.copy2(path, path.with_name(path.name + ".nanocode-backup"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(current + [entry], indent=2) + "\n", encoding="utf-8")
+        out(f"{GREEN}⏺ Done:{RESET} Shift+Enter now inserts a new line in {terminal}'s terminal {DIM}(backup: "
+            f"{path.name}.nanocode-backup){RESET}\n")
+        return
+    path, text = terminal_config_change(terminal)
+    existing = read_text(path) if path.exists() else ""
+    if TERMINAL_MARK in existing:
+        out(f"⏺ {terminal} is already set up {DIM}({tilde(path)}){RESET}\n")
+        return
+    summary = "Shift+Enter = new line" + (", Cmd+Backspace = delete line, Cmd+←/→ = line start/end"
+                                          if sys.platform == "darwin" else "")
+    if not await allowed("terminal-setup", f"add to {tilde(path)}: {summary}"):
+        return
+    if path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".nanocode-backup"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(text)
+    reload = {"kitty": "reload kitty's config (Ctrl+Shift+F5, or Cmd+Ctrl+, on macOS) or open a new window",
+              "ghostty": "reload Ghostty's config (Cmd+Shift+, on macOS) or open a new window"}[terminal]
+    out(f"{GREEN}⏺ Done:{RESET} {summary} in {terminal}. To apply it, {reload}. "
+        f"{DIM}(backup: {path.name}.nanocode-backup){RESET}\n")
 
 
 async def cmd_shells(arg):
@@ -2326,6 +2450,8 @@ async def run_input(text):
             u = st.usage
             cost = f" · ${u['cost']:.4f}" if u["cost"] else ""
             out(f"{DIM}session: {fmt_tokens(u['input'])} in · {fmt_tokens(u['output'])} out{cost}{RESET}\n")
+        elif word == "/terminal-setup":
+            await terminal_setup()
         elif word == "/config":
             out(show_config() + "\n")
         elif word == "/c":
@@ -2410,6 +2536,13 @@ def banner():
 
 
 def build_app():
+    from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+    from prompt_toolkit.keys import Keys
+
+    # Shift/Ctrl+Enter in terminals that report them distinctly (kitty protocol, xterm modifyOtherKeys):
+    # treat them as Ctrl+J, which inserts a new line. Plain Enter (\r) still sends.
+    for seq in ("\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;5u", "\x1b[27;5;13~"):
+        ANSI_SEQUENCES[seq] = Keys.ControlJ
     from prompt_toolkit.application import Application
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.data_structures import Point
@@ -2536,8 +2669,24 @@ def build_app():
         event.current_buffer.validate_and_handle()
 
     @kb.add("escape", "enter")
+    @kb.add("c-j")
     def _(event):
         event.current_buffer.insert_text("\n")
+
+    @kb.add("c-u")
+    def _(event):
+        buff = event.current_buffer
+        buff.delete_before_cursor(len(buff.document.text_before_cursor))
+
+    @kb.add("escape", "left")
+    def _(event):
+        buff = event.current_buffer
+        buff.cursor_position += buff.document.find_previous_word_beginning(count=1) or -buff.cursor_position
+
+    @kb.add("escape", "right")
+    def _(event):
+        buff = event.current_buffer
+        buff.cursor_position += buff.document.find_next_word_ending(count=1) or len(buff.document.text_after_cursor)
 
     @kb.add("escape")
     def _(event):
