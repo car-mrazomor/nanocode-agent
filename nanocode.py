@@ -18,8 +18,10 @@ import io
 import json
 import os
 import platform
+import random
 import re
 import shutil
+import shlex
 import signal
 import stat
 import subprocess
@@ -107,6 +109,10 @@ LEARN_PROMPT = (
     "if it applies to all projects) and each reusable procedure with `save_skill`. Skip anything trivial or "
     "one-off, and don't save duplicates of what's already in memory. Finish with a short list of what you saved."
 )
+RECAP_PROMPT = (
+    "Give me a short recap of this session: what I asked for, what you did (files changed, commands run, results), "
+    "and what's still open or worth doing next. A few short bullet points. Don't use any tools."
+)
 COMPACT_PROMPT = (
     "Summarize our conversation so far so we can continue the work with a fresh context: the goal, key decisions, "
     "files created or changed, current state, and next steps. Be concise and concrete; include exact file paths."
@@ -160,8 +166,14 @@ def ensure_project_dir():
     """Creates .nanocode/ with its own .gitignore so memory and chats never get pushed, in any repo."""
     project_dir().mkdir(parents=True, exist_ok=True)
     ignore = project_dir() / ".gitignore"
-    if not ignore.exists():
-        ignore.write_text("# nanocode: private, not committed (skills/ can be)\nsessions/\nmemory.md\nundo/\n")
+    wanted = ["sessions/", "memory.md", "undo/", "shells/"]
+    try:
+        current = ignore.read_text().splitlines() if ignore.exists() else ["# nanocode: private, not committed (skills/ can be)"]
+        missing = [w for w in wanted if w not in current]
+        if missing:
+            ignore.write_text("\n".join(current + missing) + "\n")
+    except OSError:
+        pass
 
 
 def migrate_legacy():
@@ -272,6 +284,9 @@ class State:
         self.output_window = None
         self.input_box = None
         self.rea = None
+        self.activity = []  # (tool, preview, is_error) this session, for /recap
+        self.changed = {}  # path -> [lines added, lines removed] this session
+        self.shells = {}  # name -> shell info, see Shells
 
 
 st = State()
@@ -366,14 +381,36 @@ def fmt_tokens(n):
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
+DONE_VERBS = ["Cooked", "Brewed", "Baked", "Crafted", "Forged", "Simmered", "Whisked", "Tinkered", "Hammered",
+              "Conjured", "Churned", "Stirred", "Sculpted", "Polished", "Assembled", "Wrangled", "Distilled",
+              "Kneaded", "Toasted", "Steeped", "Shaped", "Stitched", "Tuned", "Seasoned"]
+
+
+def fmt_duration(seconds):
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {seconds % 3600 // 60}m"
+
+
+def fmt_cost(cost):
+    if st.backend == "ollama":
+        return "free (local)"
+    cost = cost or 0
+    amount = f"${cost:.4f}" if cost < 1 else f"${cost:.2f}"
+    return f"{amount} (in your plan)" if st.backend == "sdk" else amount
+
+
 def show_usage(tokens_in, tokens_out, cost, seconds):
+    """The dim line after every response: time, tokens and cost."""
     st.usage["input"] += tokens_in
     st.usage["output"] += tokens_out
     st.usage["cost"] += cost or 0
-    parts = [f"{fmt_tokens(tokens_in)} in", f"{fmt_tokens(tokens_out)} out"]
-    if cost:
-        parts.append(f"${cost:.4f}")
-    parts.append(f"{seconds:.1f}s")
+    verb = random.choice(DONE_VERBS)
+    parts = [f"✻ {verb} for {fmt_duration(seconds)}", f"{fmt_tokens(tokens_in)} in", f"{fmt_tokens(tokens_out)} out",
+             fmt_cost(cost), f"done {time.strftime('%H:%M')}"]
     out(f"\n  {DIM}{' · '.join(parts)}{RESET}")
 
 
@@ -393,7 +430,7 @@ def answer_permission(key):
 
 
 async def allowed(tool_name, preview):
-    dangerous = tool_name == "bash" and bool(DANGEROUS.search(preview))
+    dangerous = tool_name in ("bash", "shell") and bool(DANGEROUS.search(preview))
     if not dangerous and (st.auto_approve or tool_name in st.always_allow):
         return True
     if st.headless:
@@ -425,7 +462,7 @@ class ToolError(Exception):
 TOOLS = {}
 TOOL_PREVIEW = {"rea_search": "query", "rea_schema": "tool", "rea_call": "tool",
                 "read": "path", "write": "path", "edit": "path", "glob": "pattern", "grep": "pattern",
-                "bash": "command", "remember": "fact", "skill": "name", "save_skill": "name"}
+                "bash": "command", "shell": "command", "remember": "fact", "skill": "name", "save_skill": "name"}
 DENIED = "error: the user denied this action. Ask what they want instead, or try a different approach."
 
 
@@ -447,6 +484,9 @@ def cap(text, limit=MAX_TOOL_OUTPUT):
 def show_tool_call(name, args):
     key = TOOL_PREVIEW.get(name)
     preview = str(args.get(key, "")) if key else (str(next(iter(args.values()), "")) if args else "")
+    if name == "shell":
+        preview = " ".join(str(x) for x in (args.get("action"), args.get("name")) if x) + \
+            (f": {preview}" if preview else "")
     preview = preview.replace("\n", " ")
     if len(preview) > 70:
         preview = preview[:67] + "…"
@@ -486,6 +526,8 @@ async def run_tool(name, args):
                 text, is_error = f"error: {type(e).__name__}: {e}", True
     if is_error:
         st.turn_errors += 1
+    key = TOOL_PREVIEW.get(name)
+    st.activity.append((name, str(args.get(key, "")) if key else "", is_error))
     text = cap(text)
     show_tool_result(text, is_error)
     return text, is_error
@@ -531,6 +573,13 @@ def not_found(path):
     except OSError:
         pass
     return ToolError(f"{path} not found{hint}")
+
+
+def track_change(path, old, new):
+    added, removed = diff_stats(old or "", new)
+    total = st.changed.setdefault(display_path(path), [0, 0])
+    total[0] += added
+    total[1] += removed
 
 
 def record_undo(path, previous):
@@ -607,6 +656,7 @@ async def tool_write(args):
     record_undo(path, old)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text(path, content)
+    track_change(path, old, content)
     added, removed = diff_stats(old or "", content)
     verb = "created" if old is None else "wrote"
     return f"{verb} {path} ({len(content.splitlines())} lines, +{added} -{removed})"
@@ -637,6 +687,7 @@ async def tool_edit(args):
         return DENIED
     record_undo(path, text)
     write_text(path, updated)
+    track_change(path, text, updated)
     return f"edited {path} ({count if replace_all else 1} replacement{'s' if replace_all and count > 1 else ''})"
 
 
@@ -785,6 +836,18 @@ async def tool_grep(args):
     return "\n".join(lines[:150]) + more
 
 
+async def reap(proc, grace=3):
+    """Stops a process (and its children), waits for it and closes its stdin, so nothing lingers."""
+    if proc.stdin and not proc.stdin.is_closing():
+        proc.stdin.close()
+    if proc.returncode is None:
+        kill_tree(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), grace)
+        except asyncio.TimeoutError:
+            pass
+
+
 def kill_tree(proc):
     try:
         if os.name != "nt":
@@ -847,7 +910,8 @@ async def tool_bash(args):
             await asyncio.wait_for(proc.wait(), 5)
         except asyncio.TimeoutError:
             pass
-        status = f"[timed out after {timeout}s and was stopped]"
+        status = (f"[timed out after {timeout}s and was stopped. If it's meant to keep running, start it with "
+                  "the `shell` tool instead]")
     except asyncio.CancelledError:
         kill_tree(proc)
         raise
@@ -855,6 +919,219 @@ async def tool_bash(args):
     if status is None:
         status = f"[exit code {proc.returncode}]"
     return f"{output}\n{status}"
+
+
+# --- Background shells: commands that keep running (dev servers, watchers, long builds) ---
+# Backends: tmux (you can watch: tmux attach -t nanocode-<name>), then screen, then nanocode itself
+# (works everywhere, incl. Windows). Shells stop when nanocode exits.
+
+SHELL_KEYS = {"enter": ("Enter", "\r"), "ctrl-c": ("C-c", "\x03"), "ctrl-d": ("C-d", "\x04"),
+              "escape": ("Escape", "\x1b"), "none": (None, "")}
+CONTROL_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]|\x1b[=>78]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def shell_backend():
+    choice = st.config.get("shell_backend", "auto")
+    if choice in ("tmux", "screen", "builtin"):
+        return choice if choice == "builtin" or shutil.which(choice) else "builtin"
+    if os.name != "nt":
+        for name in ("tmux", "screen"):
+            if shutil.which(name):
+                return name
+    return "builtin"
+
+
+async def run_cmd(*cmd, timeout=15):
+    proc = await asyncio.create_subprocess_exec(*cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                stderr=subprocess.STDOUT)
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        kill_tree(proc)
+        raise ToolError(f"{cmd[0]} didn't respond within {timeout}s")
+    return proc.returncode, stdout.decode(errors="replace")
+
+
+def clean_terminal_text(text):
+    lines = []
+    for line in CONTROL_RE.sub("", text.replace("\r\n", "\n")).split("\n"):
+        lines.append(line.rsplit("\r", 1)[-1].rstrip())
+    return "\n".join(lines).strip("\n")
+
+
+def tail_file(path, n):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 200_000))
+            data = f.read().decode(errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(clean_terminal_text(data).split("\n")[-n:])
+
+
+async def shell_start(name, command):
+    backend, cwd = shell_backend(), os.getcwd()
+    ensure_project_dir()
+    log = project_dir() / "shells" / f"{name}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("")
+    info = {"name": name, "command": command, "backend": backend, "log": str(log), "started": time.time()}
+    session = f"nanocode-{name}"
+    if backend == "tmux":
+        await run_cmd("tmux", "kill-session", "-t", session)
+        rc, output = await run_cmd("tmux", "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", cwd)
+        if rc != 0:
+            raise ToolError(f"tmux couldn't start: {output.strip()}")
+        await run_cmd("tmux", "send-keys", "-t", session, "-l", command)
+        await run_cmd("tmux", "send-keys", "-t", session, "Enter")
+        info["attach"] = f"tmux attach -t {session}"
+    elif backend == "screen":
+        # Logging set in a config file at startup and plain `sh` inside: works the same on screen 4.0 (macOS) to 5.x.
+        await run_cmd("screen", "-S", session, "-X", "quit")
+        rc_file = log.with_suffix(".screenrc")
+        rc_file.write_text(f"logfile {log}\nlogfile flush 1\ndeflog on\n")
+        rc, output = await run_cmd("screen", "-c", str(rc_file), "-dmS", session, "sh")
+        if rc != 0:
+            raise ToolError(f"screen couldn't start: {output.strip()}")
+        await asyncio.sleep(0.3)
+        await run_cmd("screen", "-S", session, "-p", "0", "-X", "stuff", f"cd {shlex.quote(cwd)} && {command}\r")
+        info["attach"] = f"screen -r {session}"
+    else:
+        extra = {"start_new_session": True} if os.name != "nt" else {}
+        handle = open(log, "ab")
+        info["proc"] = await asyncio.create_subprocess_shell(
+            command, stdin=subprocess.PIPE, stdout=handle, stderr=subprocess.STDOUT, cwd=cwd,
+            env={**os.environ, "PAGER": "cat", "GIT_PAGER": "cat"}, **extra)
+        info["handle"] = handle
+    st.shells[name] = info
+    return info
+
+
+async def shell_alive(info):
+    session = f"nanocode-{info['name']}"
+    if info["backend"] == "tmux":
+        rc, output = await run_cmd("tmux", "list-panes", "-t", session, "-F", "#{pane_current_command}")
+        shell_names = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh"}
+        return rc == 0 and output.strip().split("\n")[0] not in shell_names
+    if info["backend"] == "screen":
+        rc, output = await run_cmd("screen", "-ls")
+        return session in output
+    return info["proc"].returncode is None
+
+
+async def shell_output(info, lines):
+    if info["backend"] == "tmux":
+        rc, output = await run_cmd("tmux", "capture-pane", "-p", "-J", "-t", f"nanocode-{info['name']}",
+                                   "-S", f"-{max(lines, 50)}")
+        if rc == 0:
+            return "\n".join(clean_terminal_text(output).split("\n")[-lines:])
+        return ""
+    return tail_file(info["log"], lines)
+
+
+async def shell_stop(info):
+    session = f"nanocode-{info['name']}"
+    try:
+        if info["backend"] == "tmux":
+            await run_cmd("tmux", "kill-session", "-t", session)
+        elif info["backend"] == "screen":
+            await run_cmd("screen", "-S", session, "-X", "quit")
+        else:
+            await reap(info["proc"])
+    except ToolError:
+        pass
+    if info.get("handle"):
+        info["handle"].close()
+    st.shells.pop(info["name"], None)
+
+
+async def stop_all_shells():
+    for info in list(st.shells.values()):
+        await shell_stop(info)
+
+
+@tool("shell", "Background shells for commands that keep running: dev servers, watchers, long builds, REPLs. "
+      "action=start (name, command), read (name, lines), send (name, text and/or key), stop (name), list. "
+      "Use bash for commands that finish on their own.",
+      {"action": {"type": "string", "enum": ["start", "read", "send", "stop", "list"]},
+       "name": {"type": "string", "description": "short name, e.g. dev or tests"},
+       "command": {"type": "string", "description": "for start"},
+       "text": {"type": "string", "description": "for send: text to type"},
+       "key": {"type": "string", "enum": list(SHELL_KEYS), "description": "for send: key after the text (default enter)"},
+       "lines": {"type": "integer", "description": "for read: how many recent lines (default 60)"}},
+      ["action"])
+async def tool_shell(args):
+    action = args["action"]
+    if action == "list":
+        if not st.shells:
+            return "no background shells running"
+        rows = []
+        for info in st.shells.values():
+            state = "running" if await shell_alive(info) else "finished"
+            rows.append(f"{info['name']}: {state} · {info['command']} · started {fmt_duration(time.time() - info['started'])} ago")
+        return "\n".join(rows)
+    name = re.sub(r"[^A-Za-z0-9_-]+", "-", str(args.get("name") or "")).strip("-")[:40]
+    if not name:
+        raise ToolError("`name` is required (e.g. dev)")
+    if action == "start":
+        command = args.get("command")
+        if not command:
+            raise ToolError("`command` is required to start a shell")
+        if name in st.shells:
+            if await shell_alive(st.shells[name]):
+                raise ToolError(f"shell '{name}' is already running; read it, stop it, or pick another name")
+            await shell_stop(st.shells[name])
+        if not await allowed("shell", command):
+            return DENIED
+        info = await shell_start(name, command)
+        await asyncio.sleep(2)
+        state = "running" if await shell_alive(info) else "already finished"
+        output = await shell_output(info, 20)
+        attach = f"\n(the user can watch it: {info['attach']})" if info.get("attach") else ""
+        return f"started '{name}' ({info['backend']}), {state}. First output:\n{output or '(none yet)'}{attach}"
+    info = st.shells.get(name)
+    if info is None:
+        known = ", ".join(st.shells) or "none"
+        raise ToolError(f"no shell named '{name}' (running: {known})")
+    if action == "read":
+        lines = min(max(int(args.get("lines") or 60), 1), 500)
+        state = "running" if await shell_alive(info) else "finished"
+        return f"[{name}: {state}]\n" + (await shell_output(info, lines) or "(no output yet)")
+    if action == "send":
+        text, key = args.get("text") or "", (args.get("key") or "enter").lower()
+        if key not in SHELL_KEYS:
+            raise ToolError(f"unknown key '{key}' (use: {', '.join(SHELL_KEYS)})")
+        if text and not await allowed("shell", f"{name} ← {text}"):
+            return DENIED
+        tmux_key, raw = SHELL_KEYS[key]
+        session = f"nanocode-{name}"
+        if info["backend"] == "tmux":
+            if text:
+                await run_cmd("tmux", "send-keys", "-t", session, "-l", text)
+            if tmux_key:
+                await run_cmd("tmux", "send-keys", "-t", session, tmux_key)
+        elif info["backend"] == "screen":
+            await run_cmd("screen", "-S", session, "-p", "0", "-X", "stuff", text + raw)
+        else:
+            proc = info["proc"]
+            if key == "ctrl-c" and proc.returncode is None:
+                try:
+                    if os.name != "nt":
+                        os.killpg(proc.pid, signal.SIGINT)
+                    else:
+                        proc.terminate()
+                except (ProcessLookupError, OSError):
+                    pass
+            elif proc.returncode is None and proc.stdin:
+                proc.stdin.write((text + ("\n" if key == "enter" else raw)).encode())
+                await proc.stdin.drain()
+        await asyncio.sleep(1)
+        return f"sent. Recent output:\n{await shell_output(info, 15) or '(none)'}"
+    if action == "stop":
+        await shell_stop(info)
+        return f"stopped '{name}'"
+    raise ToolError(f"unknown action '{action}'")
 
 
 @tool("remember", "Save a lasting fact, preference or lesson to memory so it's known in future chats. "
@@ -1149,12 +1426,15 @@ class ReaClient:
         if self.reader:
             self.reader.cancel()
             self.reader = None
-        if self.proc is not None and self.proc.returncode is None:
-            try:
-                self.proc.terminate()
-                await asyncio.wait_for(self.proc.wait(), 3)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                kill_tree(self.proc)
+        if self.proc is not None:
+            if self.proc.stdin and not self.proc.stdin.is_closing():
+                self.proc.stdin.close()
+            if self.proc.returncode is None:
+                try:
+                    self.proc.terminate()
+                    await asyncio.wait_for(self.proc.wait(), 3)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    await reap(self.proc)
         self.proc = None
         if self.log:
             self.log.close()
@@ -1250,7 +1530,7 @@ def build_system_prompt():
         "You are nanocode, a coding agent working in the user's terminal.\n"
         f"cwd: {os.getcwd()}\nOS: {platform.system()} {platform.release()}\ndate: {time.strftime('%Y-%m-%d')}\n\n"
         "Be concise. Read files before editing them and prefer `edit` over rewriting whole files. Use `bash` for "
-        "git, tests and builds. Do only what was asked; after changing code, run the relevant tests if there are "
+        "git, tests and builds; use `shell` for anything that keeps running (dev servers, watchers). Do only what was asked; after changing code, run the relevant tests if there are "
         "any. If a tool returns an error, read it carefully and fix the cause instead of repeating the same call."
     ]
     memories = memory_files()
@@ -1354,8 +1634,7 @@ async def sdk_query(text):
                 if "login" in str(detail).lower() or "api key" in str(detail).lower():
                     detail = f"{detail}. Log in with `claude` → /login, or switch provider: nanocode setup"
                 raise RuntimeError(detail)
-            show_usage(tokens_in, usage.get("output_tokens") or 0, msg.total_cost_usd,
-                       (msg.duration_ms or (time.time() - started) * 1000) / 1000)
+            show_usage(tokens_in, usage.get("output_tokens") or 0, msg.total_cost_usd, time.time() - started)
 
 
 # --- OpenRouter and Ollama (we run the agent loop ourselves) ---
@@ -1678,10 +1957,40 @@ async def compact():
     out(f"{GREEN}⏺ Compacted{RESET} {DIM}{fmt_tokens(before)} → {fmt_tokens(estimate_tokens(st.messages))} tokens{RESET}\n")
 
 
+async def recap():
+    """Facts nanocode tracked itself (instant, free), then a short recap written by the model."""
+    if not st.session.get("title"):
+        out(f"{DIM}nothing to recap yet: this chat is empty{RESET}\n")
+        return
+    lines = [f"{BOLD}Recap{RESET} {DIM}· {st.session['title']} · {fmt_duration(time.time() - st.session['created'])} "
+             f"· {fmt_tokens(st.usage['input'])} in · {fmt_tokens(st.usage['output'])} out · "
+             f"{fmt_cost(st.usage['cost'])}{RESET}"]
+    if st.changed:
+        lines.append(f"  {BOLD}files changed{RESET}")
+        lines += [f"    {path}  {GREEN}+{a}{RESET} {RED}-{r}{RESET}" for path, (a, r) in st.changed.items()]
+    commands = list(dict.fromkeys(p for name, p, _ in st.activity if name in ("bash", "shell") and p))
+    if commands:
+        lines.append(f"  {BOLD}commands{RESET}")
+        lines += [f"    {DIM}${RESET} {c[:100]}" for c in commands[-8:]]
+    if st.activity:
+        errors = sum(1 for *_, err in st.activity if err)
+        lines.append(f"  {DIM}{len(st.activity)} tool calls{f', {errors} failed' if errors else ''}{RESET}")
+    out("\n".join(lines))
+    started = time.time()
+    if st.backend == "sdk":
+        await sdk_query(RECAP_PROMPT)
+        return
+    history, _ = fit_history(st.messages + [{"role": "user", "content": RECAP_PROMPT}],
+                             context_budget(build_system_prompt()))
+    _, usage = await model_call(build_system_prompt(), history, use_tools=False)
+    show_usage(usage.get("input") or 0, usage.get("output") or 0, usage.get("cost"), time.time() - started)
+
+
 # --- Sessions: .nanocode/sessions/<id>.json ---
 
 def new_session():
     st.session = {"id": time.strftime("%Y%m%d-%H%M%S"), "title": None, "created": time.time(), "sdk_session_id": None}
+    st.activity, st.changed = [], {}
 
 
 def save_session():
@@ -1694,6 +2003,7 @@ def save_session():
         sessions_dir().mkdir(parents=True, exist_ok=True)
         data = {**st.session, "backend": st.backend, "model": st.model, "updated": time.time(),
                 "version": __version__, "messages": st.messages if st.backend != "sdk" else [],
+                "usage": st.usage, "activity": st.activity[-500:], "changed": st.changed,
                 "screen": st.output[-200_000:]}
         path = sessions_dir() / f"{st.session['id']}.json"
         tmp = path.with_suffix(".tmp")
@@ -1753,6 +2063,9 @@ async def resume_session(arg):
         st.messages[:] = match.get("messages") or []
     st.session = {k: match.get(k) for k in ("id", "title", "created", "sdk_session_id")}
     st.usage.update(input=0, output=0, cost=0.0)
+    st.usage.update({k: v for k, v in (match.get("usage") or {}).items() if k in st.usage})
+    st.activity = [tuple(a) for a in match.get("activity") or []]
+    st.changed = {k: list(v) for k, v in (match.get("changed") or {}).items()}
     st.output = match.get("screen", "") if not st.headless else ""
     st.trim_notice = False
     out(f"{GREEN}⏺ Resumed:{RESET} {match['title']} {DIM}({time_ago(match['updated'])}){RESET}\n")
@@ -1771,6 +2084,8 @@ COMMANDS = {
     "/skills": "list skills (run one with /<name>)",
     "/auto": "toggle auto-approve for edits and commands",
     "/rea": "reverse-engineering tools: status, or /rea on|off",
+    "/recap": "what happened this session, and what's next",
+    "/shells": "background shells: list, or /shells stop <name>",
     "/cost": "tokens and cost this session",
     "/config": "show settings (change: nanocode setup)",
     "/c": "new chat (old one stays saved)",
@@ -1845,6 +2160,28 @@ def cmd_undo():
         st.messages.append({"role": "assistant", "content": "Noted."})
 
 
+async def cmd_shells(arg):
+    parts = arg.split()
+    if len(parts) == 2 and parts[0] == "stop":
+        info = st.shells.get(parts[1])
+        if info:
+            await shell_stop(info)
+            out(f"{GREEN}⏺ Stopped{RESET} {parts[1]}\n")
+        else:
+            out(f"{RED}⏺ no shell named {parts[1]}{RESET}\n")
+        return
+    if not st.shells:
+        out(f"{DIM}no background shells · backend: {shell_backend()} · the model starts them for dev servers, "
+            f"watchers and long builds{RESET}\n")
+        return
+    lines = [f"{BOLD}Background shells{RESET} {DIM}(stop: /shells stop <name>; they stop when nanocode exits){RESET}"]
+    for info in list(st.shells.values()):
+        state = f"{GREEN}running{RESET}" if await shell_alive(info) else f"{DIM}finished{RESET}"
+        watch = f" {DIM}· watch: {info['attach']}{RESET}" if info.get("attach") else ""
+        lines.append(f"  {CYAN}{info['name']}{RESET} {state} {DIM}{info['command'][:60]}{RESET}{watch}")
+    out("\n".join(lines) + "\n")
+
+
 async def cmd_rea(arg):
     if arg in ("on", "off"):
         st.config["rea"] = arg == "on"
@@ -1917,6 +2254,14 @@ async def refresh_sdk_prompt():
         st.client = await make_client(resume=st.session.get("sdk_session_id"))
 
 
+def short_title(text, limit=60):
+    line = " ".join(text.split("\n")[0].split())
+    if len(line) <= limit:
+        return line
+    cut = line[:limit].rsplit(" ", 1)[0]
+    return (cut if len(cut) > limit // 2 else line[:limit]).rstrip(" ,.;:") + "…"
+
+
 async def send(text, display=None):
     """Sends a user message to the model and runs the turn."""
     if display is not None and not st.headless:
@@ -1924,7 +2269,7 @@ async def send(text, display=None):
         for i, line in enumerate(display.split("\n")):
             out(f"{USER_BG}{((' ❯ ' if i == 0 else '   ') + line).ljust(width)}{RESET}")
     if not st.session.get("title"):
-        st.session["title"] = (display or text).split("\n")[0][:60]
+        st.session["title"] = short_title(display or text)
     st.turn_errors = 0
     try:
         if st.backend == "sdk":
@@ -1969,6 +2314,10 @@ async def run_input(text):
             state = f"{YELLOW}on{RESET}: edits and commands run without asking (risky ones still ask)" \
                 if st.auto_approve else f"{GREEN}off{RESET}: I'll ask before edits and commands"
             out(f"⏺ Auto-approve {state}\n")
+        elif word == "/shells":
+            await cmd_shells(arg)
+        elif word == "/recap":
+            await recap()
         elif word == "/cost":
             u = st.usage
             cost = f" · ${u['cost']:.4f}" if u["cost"] else ""
@@ -2482,6 +2831,7 @@ async def run_headless(prompt, resume_last=False):
             await resume_session("1")
         await run_input(prompt)
     finally:
+        await stop_all_shells()
         if st.rea:
             await st.rea.close()
         if st.client:
@@ -2516,6 +2866,7 @@ async def run_interactive(resume_last=False):
     finally:
         if st.task and not st.task.done():
             st.task.cancel()
+        await stop_all_shells()
         if st.rea:
             await st.rea.close()
         if st.client:

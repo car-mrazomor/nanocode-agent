@@ -68,16 +68,24 @@ Your choices are saved in `~/.nanocode/config.json`. To change them later, run `
 
 ## Use
 
-Type what you want done. nanocode reads, searches, edits, runs commands and tests, and shows diffs before it changes anything.
+Type what you want done. nanocode reads, searches, edits, runs commands and tests, and shows diffs before it changes anything. After every response, a dim line shows how long it took, the tokens used and what it cost:
+
+```
+  ✻ Cooked for 11s · 12.3k in · 340 out · $0.0123 · done 19:06
+```
+
+The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Claude subscription it's what the same usage would cost on the API, which your plan covers.
 
 | Command | What it does |
 |---|---|
 | `/model [name]` | List models (with prices, or what's installed in Ollama), or switch. Tab completes |
 | `/resume [n]` | Continue a saved chat. Every chat is saved per project |
+| `/recap` | What happened this session (files changed, commands run, cost) and what's next |
 | `/compact` | Summarize a long chat to free up context |
 | `/undo` | Revert the last file change |
 | `/learn` | Review this chat and save lessons and skills for next time |
 | `/memory`, `/skills` | Show what nanocode knows |
+| `/shells` | Background shells: list them, or `/shells stop <name>` |
 | `/auto` | Toggle auto-approve for edits and commands |
 | `/rea` | Reverse-engineering tools: status, `/rea on`, `/rea off` |
 | `/cost`, `/config`, `/help` | Usage, settings, help |
@@ -105,6 +113,16 @@ nanocode -p "fix the failing test" --yes                      # allow edits and 
 nanocode -c                                                   # continue the last chat in this folder
 nanocode --provider ollama -m qwen3 -p "summarize README.md"  # one-off provider and model
 ```
+
+## Background shells
+
+Some commands keep running: dev servers, file watchers, long builds, REPLs. nanocode runs these in background shells instead of blocking on them. It can start one, read its latest output, type into it (or press Ctrl+C), and stop it.
+
+- **tmux** is used if it's installed. You can watch any shell live with `tmux attach -t nanocode-<name>`.
+- **screen** is used if there's no tmux. Watch with `screen -r nanocode-<name>`.
+- **Otherwise** nanocode runs them itself, which works everywhere, including Windows.
+
+To choose one, set `"shell_backend": "tmux"`, `"screen"` or `"builtin"` in `~/.nanocode/config.json`. Shells stop when nanocode exits, and their output is kept in `.nanocode/shells/` (not committed).
 
 ## Memory
 

@@ -545,7 +545,10 @@ def test_print_mode_does_not_wait_on_idle_stdin(sandbox):
         pytest.fail("nanocode -p hung waiting on an idle stdin")
     finally:
         proc.stdin.close()
-    assert proc.returncode == 1 and b"OpenRouter API key" in proc.stderr.read()
+    stderr = proc.stderr.read()
+    proc.stdout.close()
+    proc.stderr.close()
+    assert proc.returncode == 1 and b"OpenRouter API key" in stderr
 
 
 def test_piped_stdin_is_attached(sandbox, monkeypatch, capsys):
@@ -564,3 +567,106 @@ def test_rea_close_stops_the_server(sandbox, tmp_path):
         return proc.returncode
 
     assert run(scenario()) is not None
+
+
+# --- background shells, the done line, /recap ---
+
+@pytest.mark.parametrize("backend", ["builtin", "tmux", "screen"])
+def test_shell_start_read_send_stop(sandbox, backend):
+    if backend != "builtin" and (os.name == "nt" or not shutil.which(backend)):
+        pytest.skip(f"{backend} not available")
+    nc.st.config = {"shell_backend": backend}
+    script = Path("echoer.py")
+    script.write_text("import sys\nprint('ready', flush=True)\nfor line in sys.stdin:\n    print('got ' + line.strip(), flush=True)\n")
+    command = f'"{sys.executable}" -u echoer.py'
+
+    async def scenario():
+        try:
+            started, err = await nc.run_tool("shell", {"action": "start", "name": "echo", "command": command})
+            assert not err, started
+            assert "running" in started and "ready" in started
+            sent, err = await nc.run_tool("shell", {"action": "send", "name": "echo", "text": "hello"})
+            assert not err, sent
+            for _ in range(20):
+                read, _ = await nc.run_tool("shell", {"action": "read", "name": "echo"})
+                if "got hello" in read:
+                    break
+                await asyncio.sleep(0.5)
+            assert "got hello" in read and "[echo: running]" in read
+            listed, _ = await nc.run_tool("shell", {"action": "list"})
+            assert "echo: running" in listed
+            again, err = await nc.run_tool("shell", {"action": "start", "name": "echo", "command": command})
+            assert err and "already running" in again
+            stopped, _ = await nc.run_tool("shell", {"action": "stop", "name": "echo"})
+            assert "stopped" in stopped and not nc.st.shells
+        finally:
+            await nc.stop_all_shells()
+
+    run(scenario())
+    assert "shells/" in (nc.project_dir() / ".gitignore").read_text()
+
+
+def test_shell_errors_and_permissions(sandbox):
+    nc.st.config = {"shell_backend": "builtin"}
+    text, err = call("shell", action="read", name="nope")
+    assert err and "no shell named" in text
+    text, err = call("shell", action="start", name="x")
+    assert err and "command" in text
+    nc.st.headless, nc.st.auto_approve = True, False
+    text, _ = call("shell", action="start", name="x", command="echo hi")
+    assert text == nc.DENIED and not nc.st.shells
+
+
+def test_done_line_and_recap(sandbox, monkeypatch):
+    nc.st.backend, nc.st.model, nc.st.openrouter_key = "api", "m", "k"
+    Path("a.txt").write_text("one\n")
+
+    def handler(req):
+        body = json.loads(req.content)
+        last = body["messages"][-1]
+        if last["role"] == "user" and "recap" in last["content"]:
+            assert "tools" not in body
+            return sse([{"choices": [{"delta": {"content": "- You asked for an edit."}}]},
+                        {"choices": [], "usage": {"prompt_tokens": 50, "completion_tokens": 9, "cost": 0.0001}}])
+        if last["role"] == "user":
+            return sse([tool_call_chunk("c1", "edit", {"path": "a.txt", "old": "one", "new": "two\nthree"})])
+        return sse([{"choices": [{"delta": {"content": "Edited."}}]},
+                    {"choices": [], "usage": {"prompt_tokens": 1200, "completion_tokens": 40, "cost": 0.0123}}])
+
+    mock_http(monkeypatch, handler)
+    nc.new_session()
+    run(nc.run_input("change one to two"))
+    screen = plain(nc.st.output)
+    assert any(f"✻ {verb} for" in screen for verb in nc.DONE_VERBS)
+    assert "1.2k in · 40 out · $0.0123 · done " in screen
+    run(nc.run_input("/recap"))
+    screen = plain(nc.st.output)
+    assert "Recap" in screen and "a.txt  +2 -1" in screen and "You asked for an edit." in screen
+    assert len(nc.st.messages) == 4
+
+
+def test_cost_labels(sandbox):
+    nc.st.backend = "ollama"
+    assert nc.fmt_cost(0) == "free (local)"
+    nc.st.backend = "sdk"
+    assert nc.fmt_cost(0.5) == "$0.5000 (in your plan)"
+    nc.st.backend = "api"
+    assert nc.fmt_cost(2.5) == "$2.50"
+    assert nc.fmt_duration(11) == "11s" and nc.fmt_duration(125) == "2m 5s" and nc.fmt_duration(3700) == "1h 1m"
+
+
+def test_recap_survives_resume_and_titles_are_tidy(sandbox, monkeypatch):
+    nc.st.backend, nc.st.model, nc.st.openrouter_key = "api", "m", "k"
+    Path("a.txt").write_text("one\n")
+    replies = iter([sse([tool_call_chunk("c1", "edit", {"path": "a.txt", "old": "one", "new": "two"})]),
+                    sse([{"choices": [{"delta": {"content": "Done."}}]},
+                         {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.5}}])])
+    mock_http(monkeypatch, lambda req: next(replies))
+    nc.new_session()
+    run(nc.run_input("please change the word one into the word two in the file called a.txt right now"))
+    assert nc.st.session["title"] == "please change the word one into the word two in the file…"
+    nc.st.__init__()
+    nc.st.backend = "api"
+    run(nc.resume_session("1"))
+    assert nc.st.usage["cost"] == 0.5 and nc.st.changed == {"a.txt": [1, 1]}
+    assert nc.st.activity and nc.st.activity[0][0] == "edit"
