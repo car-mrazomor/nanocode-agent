@@ -2080,6 +2080,7 @@ async def resume_session(arg):
 COMMANDS = {
     "/help": "commands and keys",
     "/model": "list models, or switch: /model <name>",
+    "/provider": "list providers, or switch: /provider <name>",
     "/resume": "list saved chats, or /resume <n>",
     "/compact": "summarize the chat to free up context",
     "/undo": "revert the last file change",
@@ -2123,6 +2124,70 @@ def model_choices():
         return {m["name"]: f"{m['params']} · {m['size_gb']:.1f} GB" + ("" if m["tools"] else " · no tool support")
                 for m in st.ollama_models}
     return OPENROUTER_MODELS
+
+
+def provider_status(name):
+    """Why a provider can't be used right now, or None if it's ready."""
+    if name == "claude":
+        return None if sdk else "claude-agent-sdk isn't installed on this system"
+    if name == "openrouter":
+        return None if os.environ.get("OPENROUTER_API_KEY") or st.config.get("openrouter_api_key") else \
+            "no API key yet: run `nanocode setup` (or set OPENROUTER_API_KEY)"
+    if name == "ollama":
+        try:
+            ollama_models(st.config.get("ollama_url") or OLLAMA_DEFAULT_URL, timeout=1)
+            return None if st.config.get("models", {}).get("ollama") else "no model chosen yet: run `nanocode setup`"
+        except Exception:
+            return "Ollama isn't running (open the Ollama app, or run: ollama serve)"
+    return "unknown provider"
+
+
+async def cmd_provider(arg):
+    current = st.config.get("provider", "claude")
+    if not arg:
+        lines = [f"{BOLD}Providers{RESET} {DIM}(/provider <name>){RESET}"]
+        for name, (_, label, desc) in PROVIDERS.items():
+            mark = f"{GREEN}●{RESET}" if name == current else " "
+            problem = provider_status(name)
+            note = f"{YELLOW}{problem}{RESET}" if problem else f"{DIM}{desc}{RESET}"
+            model = st.config.get("models", {}).get(name) or DEFAULT_MODELS.get(name) or ""
+            lines.append(f" {mark} {CYAN}{name:<11}{RESET} {label:<20} {DIM}{model:<28}{RESET} {note}")
+        out("\n".join(lines) + "\n")
+        return
+    name = arg.split()[0].lower()
+    if name not in PROVIDERS:
+        out(f"{RED}⏺ unknown provider '{name}'{RESET} {DIM}(choose: {', '.join(PROVIDERS)}){RESET}\n")
+        return
+    if name == current:
+        out(f"{DIM}already using {PROVIDERS[name][1]}{RESET}\n")
+        return
+    problem = provider_status(name)
+    if problem:
+        out(f"{RED}⏺ can't switch to {PROVIDERS[name][1]}:{RESET} {problem}\n")
+        return
+    old_backend, saved = st.backend, dict(st.config)
+    os.environ.pop("MODEL", None)  # a `-m` from the command line was meant for the old provider
+    st.config["provider"] = name
+    error = apply_config(name)
+    if error:
+        st.config.clear()
+        st.config.update(saved)
+        apply_config()
+        out(f"{RED}⏺ can't switch: {error}{RESET}\n")
+        return
+    if old_backend == "sdk" and st.client:
+        await st.client.disconnect()
+        st.client = None
+    keeps_history = old_backend != "sdk" and st.backend != "sdk"
+    if not keeps_history:
+        st.messages.clear()
+        new_session()
+    if st.backend == "sdk":
+        st.client = await make_client()
+    save_config()
+    st.ctx_budget = st.ctx_tokens = 0
+    note = "the chat continues" if keeps_history else "new chat started (the old one is saved: /resume)"
+    out(f"{GREEN}⏺ Switched to {PROVIDERS[name][1]}{RESET} · {st.model} {DIM}· {note}{RESET}\n")
 
 
 async def cmd_model(arg):
@@ -2421,6 +2486,8 @@ async def run_input(text):
             await refresh_sdk_prompt()
         elif word == "/help":
             show_help()
+        elif word == "/provider":
+            await cmd_provider(arg)
         elif word == "/model":
             await cmd_model(arg)
         elif word == "/resume":
@@ -2504,35 +2571,35 @@ def gradient(line):
     return result + RESET
 
 
+def pretty_model(model):
+    return SDK_MODELS.get(model, model) if model in SDK_MODELS and not model.isalpha() else (model or "")
+
+
 def banner():
-    name = user_name()
+    """Compact header: the gradient logo, with name/version, model and folder beside it."""
     width = shutil.get_terminal_size((80, 24)).columns
+    logo = [gradient(line) for line in LOGO]
+    logo_width = len(LOGO[0])
+    side_width = max(20, width - logo_width - 6)
     cwd = tilde(os.getcwd())
-    max_cwd = max(20, min(width, 80) - 16)
-    if len(cwd) > max_cwd:
-        cwd = "…" + cwd[-(max_cwd - 1):]
-    n_memory, n_skills = len(memory_files()), len(list_skills())
-    body = [gradient(line) for line in LOGO] + [""]
-    body.append(f"{BOLD}Welcome back, {name}!{RESET}" if name else f"{BOLD}Welcome to nanocode!{RESET}")
-    body.append("")
-    body.append(f"{DIM}model  {RESET}{st.model} {DIM}· {provider_label()}{RESET}")
-    body.append(f"{DIM}cwd    {RESET}{cwd}")
-    body.append(f"{DIM}memory {RESET}{n_memory} file{'s' if n_memory != 1 else ''} {DIM}·{RESET} "
-                f"{n_skills} skill{'s' if n_skills != 1 else ''}")
-    if not name:
-        body.append(f"{DIM}tip: type '# my name is …' and I'll greet you by name{RESET}")
-    inner = max(len(ANSI_RE.sub("", line)) for line in body) + 4
-    if width < inner + 4:
-        box = "\n".join("  " + line for line in body)
+    if len(cwd) > side_width:
+        cwd = "…" + cwd[-(side_width - 1):]
+    info = [f"{BOLD}nanocode{RESET} {DIM}v{__version__}{RESET}",
+            f"{pretty_model(st.model)} {DIM}·{RESET} {provider_label()}",
+            f"{DIM}{cwd}{RESET}"]
+    if width >= logo_width + 30:
+        rows = [f" {logo_line}   {text}" for logo_line, text in zip(logo, info)]
     else:
-        border = "\033[38;5;240m"
-        rows = [f" {border}╭{'─' * inner}╮{RESET}"]
-        for line in body:
-            rows.append(f" {border}│{RESET}  {line}{' ' * (inner - 4 - len(ANSI_RE.sub('', line)))}  {border}│{RESET}")
-        rows.append(f" {border}╰{'─' * (inner - len(__version__) - 3)} {DIM}v{__version__}{RESET} {border}╯{RESET}")
-        box = "\n".join(rows)
-    tips = f"  {DIM}/ commands · @ attach file · # remember · /resume · /learn · /help{RESET}"
-    return f"\n{box}\n{tips}\n"
+        rows = [f" {line}" for line in logo] + [""] + [f" {text}" for text in info]
+    name = user_name()
+    greeting = f"Welcome back, {name}" if name else "Welcome to nanocode"
+    n_memory, n_skills = len(memory_files()), len(list_skills())
+    extras = [greeting]
+    if n_memory or n_skills:
+        extras.append(f"{n_memory} memory file{'s' if n_memory != 1 else ''} · {n_skills} skill{'s' if n_skills != 1 else ''}")
+    rows += ["", f" {DIM}{' · '.join(extras)}{RESET}",
+             f" {DIM}/ commands · @ attach file · # remember · /resume · /help{RESET}"]
+    return "\n" + "\n".join(rows) + "\n"
 
 
 def build_app():
@@ -2565,6 +2632,12 @@ def build_app():
                     if typed in str(i) or typed.lower() in s["title"].lower():
                         yield Completion(str(i), start_position=-len(typed), display=f"{i}. {s['title']}",
                                          display_meta=f"{s.get('model')} · {time_ago(s['updated'])}")
+                return
+            if text.startswith("/provider "):
+                typed = text[len("/provider "):]
+                for name, (_, label, desc) in PROVIDERS.items():
+                    if name.startswith(typed.lower()):
+                        yield Completion(name, start_position=-len(typed), display_meta=f"{label} · {desc}")
                 return
             if text.startswith("/model "):
                 typed = text[len("/model "):]

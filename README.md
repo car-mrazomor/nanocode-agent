@@ -11,17 +11,12 @@ A small, hackable coding agent for your terminal, in one Python file. It runs on
 > Inspired by [1rgs/nanocode](https://github.com/1rgs/nanocode), a minimal Claude Code alternative in ~250 lines. This project started from it and grew into a full agent.
 
 ```
- ╭────────────────────────────────────────────╮
- │  █▀▀▄ ▄▀▀▄ █▀▀▄ ▄▀▀▄ ▄▀▀▀ ▄▀▀▄ █▀▀▄ █▀▀▀   │
- │  █  █ █▀▀█ █  █ █  █ █    █  █ █  █ █▀▀    │
- │  ▀  ▀ ▀  ▀ ▀  ▀  ▀▀   ▀▀▀  ▀▀  ▀▀▀  ▀▀▀▀   │
- │                                            │
- │  Welcome back, Ivan!                       │
- │                                            │
- │  model  openrouter/auto-code · OpenRouter  │
- │  cwd    ~/my-project                       │
- │  memory 2 files · 3 skills                 │
- ╰─────────────────────────────────── v0.3.0 ╯
+ █▀▀▄ ▄▀▀▄ █▀▀▄ ▄▀▀▄ ▄▀▀▀ ▄▀▀▄ █▀▀▄ █▀▀▀   nanocode v0.3.0
+ █  █ █▀▀█ █  █ █  █ █    █  █ █  █ █▀▀    Opus 5.5 · Claude subscription
+ ▀  ▀ ▀  ▀ ▀  ▀  ▀▀   ▀▀▀  ▀▀  ▀▀▀  ▀▀▀▀   ~/my-project
+
+ Welcome back, Ivan · 2 memory files · 3 skills
+ / commands · @ attach file · # remember · /resume · /help
 ```
 
 ## Install
@@ -64,7 +59,7 @@ The first start runs a short setup:
 2. **Pick a model.**
 3. **Choose whether nanocode asks before it edits files or runs commands.**
 
-Your choices are saved in `~/.nanocode/config.json`. To change them later, run `nanocode setup`. To check that everything works, run `nanocode doctor`.
+Your choices are saved in `~/.nanocode/config.json`. To switch provider while nanocode is running, use `/provider ollama` (or `openrouter`, `claude`). To change keys and defaults, run `nanocode setup`. To check that everything works, run `nanocode doctor`.
 
 ## Use
 
@@ -78,6 +73,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 
 | Command | What it does |
 |---|---|
+| `/provider [name]` | List providers, or switch (Claude subscription, OpenRouter, Ollama) |
 | `/model [name]` | List models (with prices, or what's installed in Ollama), or switch. Tab completes |
 | `/resume [n]` | Continue a saved chat. Every chat is saved per project |
 | `/recap` | What happened this session (files changed, commands run, cost) and what's next |

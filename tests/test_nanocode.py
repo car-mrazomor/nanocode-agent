@@ -748,3 +748,25 @@ def test_terminal_setup_vscode_and_manual(sandbox, tmp_path, monkeypatch):
     monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
     run(nc.terminal_setup())
     assert "Option+Enter" in plain(nc.st.output)
+
+
+def test_provider_command(sandbox, monkeypatch):
+    nc.st.config = {"provider": "openrouter", "openrouter_api_key": "k",
+                    "models": {"openrouter": "z-ai/glm-5.3", "ollama": "qwen3"}}
+    assert nc.apply_config() is None
+    nc.st.messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    monkeypatch.setattr(nc, "ollama_models", lambda *a, **k: [{"name": "qwen3", "size_gb": 1, "params": "4B", "tools": True}])
+    run(nc.run_input("/provider"))
+    screen = plain(nc.st.output)
+    assert "● openrouter" in screen and "ollama" in screen and "claude" in screen
+    run(nc.run_input("/provider ollama"))
+    assert nc.st.backend == "ollama" and nc.st.model == "qwen3" and len(nc.st.messages) == 2
+    assert nc.load_config()["provider"] == "ollama" and "the chat continues" in plain(nc.st.output)
+    del nc.st.config["openrouter_api_key"]
+    run(nc.run_input("/provider openrouter"))
+    assert nc.st.backend == "ollama" and "no API key" in plain(nc.st.output)
+    run(nc.run_input("/provider nope"))
+    assert "unknown provider" in plain(nc.st.output)
+    if nc.sdk is None:
+        run(nc.run_input("/provider claude"))
+        assert nc.st.backend == "ollama"
