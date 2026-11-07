@@ -14,6 +14,7 @@ import dataclasses
 import difflib
 import fnmatch
 import getpass
+import glob
 import io
 import json
 import os
@@ -2744,7 +2745,7 @@ def build_app():
             if word.startswith("@"):
                 prefix = word[1:]
                 try:
-                    matches = sorted(p for p in globlib.glob(os.path.expanduser(prefix) + "*")
+                    matches = sorted(p for p in glob.glob(os.path.expanduser(prefix) + "*")
                                      if os.path.basename(p) not in IGNORE_DIRS)[:50]
                 except OSError:
                     matches = []

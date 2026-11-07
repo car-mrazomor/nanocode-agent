@@ -831,3 +831,21 @@ def test_user_block_wraps_inside_the_panel(sandbox):
     rows = block.strip("\n").split("\n")
     assert all(row.startswith("┃") for row in rows)
     assert len({len(row) for row in rows}) == 1 and len(rows) > 3
+
+
+def test_at_file_completion(sandbox):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    Path("src").mkdir()
+    Path("src/app.py").write_text("")
+    Path("setup.py").write_text("")
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        nc.build_app()
+        completer = nc.st.input_box.buffer.completer
+        found = [c.text for c in completer.get_completions(Document("look at @s"), None)]
+        nested = [c.text for c in completer.get_completions(Document("@src/"), None)]
+    assert found == ["@setup.py", "@src/"]
+    assert nested == ["@src/app.py"]
