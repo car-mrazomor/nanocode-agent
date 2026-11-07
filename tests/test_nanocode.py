@@ -726,9 +726,11 @@ def test_terminal_setup_kitty(sandbox, tmp_path, monkeypatch):
     conf = tmp_path / "userhome" / ".config" / "kitty" / "kitty.conf"
     conf.parent.mkdir(parents=True)
     conf.write_text("font_size 14\n")
+    assert nc.terminal_needs_setup()
     run(nc.terminal_setup())
     text = conf.read_text()
     assert text.startswith("font_size 14\n") and "map shift+enter send_text all \\x1b\\r" in text
+    assert not nc.terminal_needs_setup()
     assert conf.with_name("kitty.conf.nanocode-backup").read_text() == "font_size 14\n"
     run(nc.terminal_setup())
     assert conf.read_text().count("shift+enter") == 1 and "already set up" in plain(nc.st.output)

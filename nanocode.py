@@ -2280,6 +2280,25 @@ def cmd_undo():
 TERMINAL_MARK = "nanocode: Shift+Enter = new line, Cmd+Backspace = delete line, Cmd+arrows = line start/end"
 
 
+def terminal_needs_setup():
+    """True when this terminal can be set up by /terminal-setup and hasn't been yet."""
+    terminal = detect_terminal()
+    if terminal in ("vscode", "cursor", "windsurf"):
+        try:
+            path = editor_keybindings_path(terminal)
+            entries = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+            return not any(isinstance(e, dict) and e.get("key") == "shift+enter" for e in entries)
+        except (OSError, json.JSONDecodeError, KeyError):
+            return False
+    change = terminal_config_change(terminal) if terminal in ("kitty", "ghostty") else None
+    if change is None:
+        return False
+    try:
+        return TERMINAL_MARK not in read_text(change[0])
+    except OSError:
+        return True
+
+
 def detect_terminal():
     env = os.environ
     if env.get("KITTY_WINDOW_ID") or env.get("TERM") == "xterm-kitty":
@@ -2312,7 +2331,8 @@ def terminal_config_change(terminal):
         lines = ["map shift+enter send_text all \\x1b\\r"]
         if mac:
             lines += ["map cmd+backspace send_text all \\x15", "map cmd+left send_text all \\x01",
-                      "map cmd+right send_text all \\x05"]
+                      "map cmd+right send_text all \\x05", "map opt+left send_text all \\x1bb",
+                      "map opt+right send_text all \\x1bf"]
         return path, f"\n# {TERMINAL_MARK}\n" + "\n".join(lines) + "\n"
     if terminal == "ghostty":
         path = config_home / "ghostty" / "config"
@@ -2888,11 +2908,17 @@ def build_app():
             fragments.append(("", "\n"))
         return fragments
 
+    needs_setup = terminal_needs_setup()
+
     def home_hint():
         name = user_name()
         hello = f"Welcome back, {name}" if name else "Welcome to nanocode"
-        return [("class:muted", f"{hello} · "), ("class:text", "ctrl+p"), ("class:muted", " commands · "),
+        hint = [("class:muted", f"{hello} · "), ("class:text", "ctrl+p"), ("class:muted", " commands · "),
                 ("class:text", "/"), ("class:muted", " commands · "), ("class:text", "@"), ("class:muted", " files")]
+        if needs_setup:
+            hint += [("", "\n\n"), ("class:warning", "Shift+Enter and Cmd keys need a one-time setup in this "
+                                                     "terminal: "), ("class:text", "/terminal-setup")]
+        return hint
 
     def home_footer():
         return [("class:muted", f" {fit_left(tilde(os.getcwd()), st.app.output.get_size().columns - 14)}")]
@@ -2903,7 +2929,7 @@ def build_app():
         Window(height=2),
         VSplit([Window(), HSplit([prompt_panel], width=Dimension(max=75, preferred=75)), Window()]),
         Window(height=1),
-        Window(FormattedTextControl(home_hint), height=1, align=WindowAlign.CENTER),
+        Window(FormattedTextControl(home_hint), height=Dimension(min=1, max=3), align=WindowAlign.CENTER),
         Window(),
         VSplit([Window(FormattedTextControl(home_footer), height=1),
                 Window(FormattedTextControl(lambda: [("class:muted", f"v{__version__} ")]), height=1,
