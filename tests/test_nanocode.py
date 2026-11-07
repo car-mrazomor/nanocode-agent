@@ -453,7 +453,102 @@ def test_sdk_tools_wrap_our_tools(sandbox):
     if nc.sdk is None:
         pytest.skip("claude-agent-sdk not installed")
     tools = {t.name: t for t in nc.sdk_tools()}
-    assert set(tools) == set(nc.TOOLS)
+    assert set(tools) == {t['name'] for t in nc.active_tools()}
     Path("a.txt").write_text("hi\n")
     result = run(tools["read"].handler({"path": "a.txt"}))
     assert result["is_error"] is False and "hi" in result["content"][0]["text"]
+
+
+# --- REA (reverse-engineering MCP server), with a fake server ---
+
+def install_fake_rea(tmp_path):
+    rea_dir = nc.rea_dir()
+    skill = rea_dir / "node_modules" / "rea-agents" / "skills" / "reverse-engineer-anything"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: reverse-engineer-anything\ndescription: reverse engineer things\n---\n"
+                                    "Start with inspect_artifact.")
+    entry = Path(__file__).with_name("fake_rea.py")
+    (rea_dir / "runtime.json").write_text(json.dumps({"node": sys.executable, "entry": str(entry), "version": "0.0-test"}))
+
+
+def test_rea_hidden_and_harmless_when_not_installed(sandbox):
+    names = {t["function"]["name"] for t in nc.api_tools()}
+    assert "rea_call" not in names and "read" in names
+    assert "reverse engineering" not in nc.build_system_prompt().lower()
+    text, err = call("rea_search", query="apk")
+    assert err and "isn't installed" in text
+
+
+def test_rea_search_schema_call(sandbox, tmp_path):
+    install_fake_rea(tmp_path)
+
+    async def scenario():
+        try:
+            found, _ = await nc.run_tool("rea_search", {"query": "android apk install"})
+            schema, _ = await nc.run_tool("rea_schema", {"tool": "inspect_artifact"})
+            bad, bad_err = await nc.run_tool("rea_call", {"tool": "inspect_artifact", "arguments": {}})
+            good, good_err = await nc.run_tool("rea_call", {"tool": "inspect_artifact", "arguments": {"path": "/bin/ls"}})
+            typo, typo_err = await nc.run_tool("rea_call", {"tool": "inspect_artifcat"})
+            return found, schema, bad, bad_err, good, good_err, typo, typo_err
+        finally:
+            await nc.st.rea.close()
+
+    found, schema, bad, bad_err, good, good_err, typo, typo_err = run(scenario())
+    assert found.splitlines()[0].startswith("install_adb_package") and "asks permission" in found
+    assert '"required": ["path"]' in schema
+    assert bad_err and "arguments schema" in bad
+    assert not good_err and 'inspect_artifact ok: {"path": "/bin/ls"}' in good
+    assert typo_err and "Did you mean: inspect_artifact" in typo
+    assert {"rea_search", "rea_schema", "rea_call"} <= {t["function"]["name"] for t in nc.api_tools()}
+    assert "rea_search" in nc.build_system_prompt()
+    assert "reverse-engineer-anything" in nc.list_skills()
+    assert "rea_call(tool=" in nc.load_skill("reverse-engineer-anything")
+
+
+def test_rea_risky_tools_ask_and_crashes_recover(sandbox, tmp_path):
+    install_fake_rea(tmp_path)
+    nc.st.headless, nc.st.auto_approve = True, False
+
+    async def scenario():
+        try:
+            denied, _ = await nc.run_tool("rea_call", {"tool": "install_adb_package", "arguments": {"apk": "a.apk"}})
+            crashed, crash_err = await nc.run_tool("rea_call", {"tool": "crash_server"})
+            again, again_err = await nc.run_tool("rea_call", {"tool": "inspect_artifact", "arguments": {"path": "x"}})
+            return denied, crashed, crash_err, again, again_err
+        finally:
+            await nc.st.rea.close()
+
+    denied, crashed, crash_err, again, again_err = run(scenario())
+    assert denied == nc.DENIED
+    assert crash_err and "stopped unexpectedly" in crashed
+    assert not again_err and "inspect_artifact ok" in again
+
+
+def test_rea_can_be_turned_off(sandbox, tmp_path):
+    install_fake_rea(tmp_path)
+    nc.st.config = {"rea": False}
+    assert not nc.rea_enabled()
+    assert "rea_call" not in {t["function"]["name"] for t in nc.api_tools()}
+    assert "reverse-engineer-anything" not in nc.list_skills()
+
+
+def test_print_mode_does_not_wait_on_idle_stdin(sandbox):
+    import subprocess
+    script = Path(__file__).resolve().parents[1] / "nanocode.py"
+    env = {**os.environ, "OPENROUTER_API_KEY": ""}
+    proc = subprocess.Popen([sys.executable, str(script), "-p", "hi", "--provider", "openrouter"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        pytest.fail("nanocode -p hung waiting on an idle stdin")
+    finally:
+        proc.stdin.close()
+    assert proc.returncode == 1 and b"OpenRouter API key" in proc.stderr.read()
+
+
+def test_piped_stdin_is_attached(sandbox, monkeypatch, capsys):
+    import io as _io
+    monkeypatch.setattr(sys, "stdin", _io.StringIO("ERROR: disk full"))
+    assert nc.read_piped_stdin() == "ERROR: disk full"

@@ -31,15 +31,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: shellcheck -s sh install.sh
         if: runner.os == 'Linux'
       - run: sh install.sh
       - run: ~/.nanocode/bin/nanocode --version
       - run: ~/.nanocode/bin/nanocode doctor
+      - run: test -f ~/.nanocode/tools/rea/runtime.json && ~/.nanocode/bin/nanocode doctor | grep -q "REA"
       - run: sh install.sh --uninstall --purge && test ! -e ~/.nanocode
       - name: install without a system Python (uv-managed Python in ~/.nanocode/python)
         run: |
-          NANOCODE_MANAGED_PYTHON=1 sh install.sh
+          NANOCODE_MANAGED_PYTHON=1 sh install.sh --no-rea
           ~/.nanocode/bin/nanocode --version
           grep -q "$HOME/.nanocode/python" ~/.nanocode/venv/pyvenv.cfg
           sh install.sh --uninstall --purge && test ! -e ~/.nanocode
@@ -51,10 +55,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - shell: pwsh
         run: ./install.ps1
       - shell: pwsh
-        run: '& "$env:USERPROFILE\.nanocode\bin\nanocode.cmd" --version'
+        run: |
+          & "$env:USERPROFILE\.nanocode\bin\nanocode.cmd" --version
+          if (-not (Test-Path "$env:USERPROFILE\.nanocode\tools\rea\runtime.json")) { exit 1 }
+          & "$env:USERPROFILE\.nanocode\bin\nanocode.cmd" doctor
       - shell: pwsh
         run: |
           ./install.ps1 -Uninstall -Purge
@@ -63,7 +73,7 @@ jobs:
         shell: pwsh
         run: |
           $env:NANOCODE_MANAGED_PYTHON = "1"
-          ./install.ps1
+          ./install.ps1 -NoRea
           & "$env:USERPROFILE\.nanocode\bin\nanocode.cmd" --version
           if (-not (Select-String -Quiet -Path "$env:USERPROFILE\.nanocode\venv\pyvenv.cfg" -Pattern "\.nanocode\\python")) { exit 1 }
           ./install.ps1 -Uninstall -Purge

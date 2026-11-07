@@ -3,8 +3,9 @@
 #   irm https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.ps1 | iex
 #   .\install.ps1 -Uninstall          remove nanocode, keep config, memory and skills
 #   .\install.ps1 -Uninstall -Purge   remove everything
+#   .\install.ps1 -NoRea              skip REA (optional reverse-engineering tools, needs Node.js 22+)
 
-param([switch]$Uninstall, [switch]$Purge)
+param([switch]$Uninstall, [switch]$Purge, [switch]$NoRea)
 
 $ErrorActionPreference = "Stop"
 $RepoRaw = "https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master"
@@ -134,6 +135,35 @@ if (-not (Test-Path $Memory)) {
     [IO.File]::WriteAllText($Memory, $Text)
     Step "Created memory ($Memory)"
 }
+
+# REA (https://github.com/morluto/rea): optional reverse-engineering tools, always the latest version.
+# Any problem here only skips REA; nanocode itself is already installed.
+function Install-Rea {
+    $config = Join-Path $NanoHome "config.json"
+    if ($NoRea -or $env:NANOCODE_NO_REA -or ((Test-Path $config) -and (Select-String -Quiet -Path $config -Pattern '"rea": false'))) { return }
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
+    if (-not $node -or -not $npm) { Warn "REA skipped: it needs Node.js 22+ (https://nodejs.org). Install Node, then run: nanocode update"; return }
+    $major = [int](& $node.Source -p "process.versions.node.split('.')[0]")
+    if ($major -lt 22) { Warn "REA skipped: it needs Node.js 22+. Update Node, then run: nanocode update"; return }
+    $rea = Join-Path $Tools "rea"
+    New-Item -ItemType Directory -Force -Path $rea | Out-Null
+    Step "Installing REA (reverse-engineering tools, latest; skip with -NoRea)"
+    $log = Join-Path $rea "install.log"
+    $env:npm_config_cache = Join-Path $rea ".npm-cache"
+    & $npm.Source install --prefix $rea --no-audit --no-fund --loglevel=error rea-agents@latest *> $log
+    $npmExit = $LASTEXITCODE
+    Remove-Item -Recurse -Force $env:npm_config_cache -ErrorAction SilentlyContinue
+    Remove-Item Env:npm_config_cache -ErrorAction SilentlyContinue
+    if ($npmExit -ne 0) { Warn "REA failed to install (log: $log); nanocode works without it"; return }
+    $entry = Join-Path $rea "node_modules\rea-agents\scripts\rea.mjs"
+    $version = & $node.Source $entry --version 2>$null | Select-Object -First 1
+    if (-not $version) { Warn "REA installed but doesn't start (log: $log); nanocode works without it"; return }
+    @{ node = $node.Source; entry = $entry; version = "$version" } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $rea "runtime.json")
+    Step "REA $version ready (loaded only when a task needs it)"
+}
+try { Install-Rea } catch { Warn "REA skipped: $($_.Exception.Message)" }
 
 & $Launcher --version | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "nanocode doesn't start; run $Launcher --version to see why" }

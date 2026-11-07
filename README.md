@@ -43,7 +43,7 @@ Everything goes into `~/.nanocode`: the app, a private Python environment, your 
 **Python:** if you already have Python 3.10 or newer, the installer uses it. If you don't, it downloads a private Python 3.12 into `~/.nanocode/python` (using [uv](https://github.com/astral-sh/uv)). That needs no admin rights and doesn't touch your system. On Android (Termux) it runs `pkg install python` instead.
 
 ```sh
-nanocode update              # latest version
+nanocode update              # latest nanocode (and REA)
 nanocode uninstall           # remove the app, keep config, memory and skills
 nanocode uninstall --purge   # remove everything
 ```
@@ -79,6 +79,7 @@ Type what you want done. nanocode reads, searches, edits, runs commands and test
 | `/learn` | Review this chat and save lessons and skills for next time |
 | `/memory`, `/skills` | Show what nanocode knows |
 | `/auto` | Toggle auto-approve for edits and commands |
+| `/rea` | Reverse-engineering tools: status, `/rea on`, `/rea off` |
 | `/cost`, `/config`, `/help` | Usage, settings, help |
 | `/c`, `/q` | New chat, quit |
 | `# note` | Save a note to project memory |
@@ -144,6 +145,18 @@ nanocode improves over time by writing down what it learns. It doesn't retrain t
 - **`auto_learn`.** Set `"auto_learn": true` in `~/.nanocode/config.json` to run that review automatically after any turn where tools failed more than once.
 
 Everything it learns is plain markdown in your memory files and skill folders, so you can read, edit or delete it.
+
+## Reverse engineering (REA)
+
+nanocode comes with [REA](https://github.com/morluto/rea), an MCP server for reverse engineering. It covers native binaries, apps, Android APKs, Electron and JavaScript bundles, websites, firmware and devices. Ask things like *"what does this binary do?"* or *"which API endpoints does this Electron app call?"*.
+
+- **Installed and updated automatically.** The installer installs the latest REA when Node.js 22+ is available, and `nanocode update` updates it. Skip it with `sh install.sh --no-rea` (Windows: `-NoRea`).
+- **Costs nothing until it's needed.** REA has about 230 tools, too many to hand to a model at once. nanocode gives the model three small tools instead: `rea_search` finds a REA tool, `rea_schema` shows its arguments, and `rea_call` runs it. REA starts on first use. Its own `reverse-engineer-anything` skill teaches the model the workflows.
+- **Fails safe.** If REA is missing, crashes or times out, the model gets an error message and nanocode keeps working. A crashed REA restarts on the next call.
+- **Asks permission** before REA actions that change something, like installing an APK, running Frida or executing commands.
+- **Status:** `/rea` shows it, and `/rea off` / `/rea on` turns it off or on.
+
+Some REA features need extra tools, such as Ghidra or Hopper for native binaries, JADX for APKs, or adb for Android devices. REA's error messages say what's missing.
 
 ## Ollama tips
 

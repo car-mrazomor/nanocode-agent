@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import codecs
+import dataclasses
 import difflib
 import fnmatch
 import getpass
@@ -20,6 +21,7 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,9 @@ import httpx
 from rich.console import Console
 from rich.markdown import Markdown
 
+import warnings
+
+warnings.filterwarnings("ignore", message="can_use_tool will not be invoked")
 try:
     import claude_agent_sdk as sdk
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
@@ -144,8 +149,11 @@ def sessions_dir():
 
 def skill_dirs():
     """Earlier wins when two skills share a name."""
-    return [project_dir() / "skills", Path.cwd() / ".claude" / "skills",
+    dirs = [project_dir() / "skills", Path.cwd() / ".claude" / "skills",
             home_dir() / "skills", Path.home() / ".claude" / "skills"]
+    if rea_enabled():
+        dirs.append(rea_dir() / "node_modules" / "rea-agents" / "skills")
+    return dirs
 
 
 def ensure_project_dir():
@@ -263,6 +271,7 @@ class State:
         self.app = None
         self.output_window = None
         self.input_box = None
+        self.rea = None
 
 
 st = State()
@@ -414,7 +423,8 @@ class ToolError(Exception):
 
 
 TOOLS = {}
-TOOL_PREVIEW = {"read": "path", "write": "path", "edit": "path", "glob": "pattern", "grep": "pattern",
+TOOL_PREVIEW = {"rea_search": "query", "rea_schema": "tool", "rea_call": "tool",
+                "read": "path", "write": "path", "edit": "path", "glob": "pattern", "grep": "pattern",
                 "bash": "command", "remember": "fact", "skill": "name", "save_skill": "name"}
 DENIED = "error: the user denied this action. Ask what they want instead, or try a different approach."
 
@@ -969,7 +979,264 @@ def load_skill(name):
         return None
     _, body = parse_skill(info["path"])
     folder = info["path"].parent
+    if name == REA_SKILL:
+        body += ("\n\n## In nanocode\nREA's tools are reached through three nanocode tools: `rea_search` finds "
+                 "tools by keywords, `rea_schema` shows a tool's arguments, and `rea_call` runs it, e.g. "
+                 'rea_call(tool="inspect_artifact", arguments={...}). Wherever these instructions name a REA tool, '
+                 "call it that way.")
     return f'<skill name="{name}">\n{body}\n\n(Files for this skill are in {folder}.)\n</skill>'
+
+
+# --- REA (https://github.com/morluto/rea): optional reverse-engineering tools over MCP ---
+# REA has ~230 tools whose schemas alone are ~80k tokens, far too many to give a model directly. The
+# model searches them (rea_search), reads one schema (rea_schema) and runs it (rea_call). The server
+# starts on first use, and any REA failure becomes an error message for the model: nanocode carries on.
+
+REA_SKILL = "reverse-engineer-anything"
+REA_OUTPUT_LIMIT = 12_000
+REA_RISKY = re.compile(r"install|uninstall|push|launch|execute|run_|_run|start_|stop_|kill|load_|resume|capture|"
+                       r"observe|record|attach|inject|spawn|frida|set_|unset_|annotate|write|delete|remove", re.I)
+
+
+def rea_dir():
+    return home_dir() / "tools" / "rea"
+
+
+def rea_runtime():
+    """{"node", "entry", "version"} recorded by the installer, or None if REA isn't usable."""
+    try:
+        info = json.loads((rea_dir() / "runtime.json").read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not Path(info.get("entry", "")).is_file():
+        return None
+    if not Path(info.get("node", "")).exists():
+        info["node"] = shutil.which("node") or ""
+    return info if info["node"] else None
+
+
+def rea_enabled():
+    return st.config.get("rea", True) is not False and rea_runtime() is not None
+
+
+REA_SAFE_PREFIXES = ("open_", "close_", "list_", "get_", "inspect_", "read_", "search_", "find_", "describe_",
+                     "analyze_", "compare_", "decompile_", "demangle_", "current_", "procedure_", "xrefs")
+
+
+def rea_is_risky(spec):
+    annotations = spec.get("annotations") or {}
+    if annotations.get("readOnlyHint") or spec["name"].startswith(REA_SAFE_PREFIXES):
+        return False
+    return bool(annotations.get("destructiveHint")) or bool(REA_RISKY.search(spec["name"]))
+
+
+class ReaClient:
+    """Minimal MCP client (JSON-RPC over stdio) for the REA server."""
+
+    def __init__(self):
+        self.proc = None
+        self.reader = None
+        self.pending = {}
+        self.next_id = 0
+        self.tools = None
+        self.lock = asyncio.Lock()
+        self.log = None
+
+    def alive(self):
+        return self.proc is not None and self.proc.returncode is None
+
+    async def ensure(self):
+        async with self.lock:
+            if self.alive():
+                return
+            await self.close()
+            info = rea_runtime()
+            if info is None:
+                raise ToolError("REA isn't installed. Install or update it with: nanocode update (needs Node.js 22+)")
+            log_file().parent.mkdir(parents=True, exist_ok=True)
+            self.log = open(log_file().parent / "rea.log", "ab")
+            env = {**os.environ, "REA_MCP_INPUT_SCHEMA_PROFILE": "compact", "REA_MCP_OUTPUT_SCHEMA_PROFILE": "off"}
+            try:
+                self.proc = await asyncio.create_subprocess_exec(
+                    info["node"], info["entry"], "mcp", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=self.log, env=env, limit=256 * 1024 * 1024)
+            except OSError as e:
+                raise ToolError(f"couldn't start REA: {e}") from e
+            self.reader = asyncio.ensure_future(self._read())
+            await self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                              "clientInfo": {"name": "nanocode", "version": __version__}}, 120)
+            await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    async def _send(self, message):
+        if not self.alive():
+            raise ToolError("REA isn't running")
+        self.proc.stdin.write((json.dumps(message) + "\n").encode())
+        await self.proc.stdin.drain()
+
+    async def _read(self):
+        try:
+            while True:
+                line = await self.proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "id" in msg and ("result" in msg or "error" in msg):
+                    future = self.pending.pop(msg["id"], None)
+                    if future and not future.done():
+                        future.set_result(msg)
+                elif "id" in msg and "method" in msg:
+                    await self._send({"jsonrpc": "2.0", "id": msg["id"],
+                                      "error": {"code": -32601, "message": "not supported by nanocode"}})
+        except (asyncio.CancelledError, ToolError):
+            pass
+        except Exception as e:
+            log_error(e)
+        finally:
+            for future in self.pending.values():
+                if not future.done():
+                    future.set_exception(ToolError("REA stopped unexpectedly (details: ~/.nanocode/logs/rea.log)"))
+            self.pending.clear()
+
+    async def request(self, method, params=None, timeout=600):
+        self.next_id += 1
+        rid = self.next_id
+        future = asyncio.get_running_loop().create_future()
+        self.pending[rid] = future
+        await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+        try:
+            msg = await asyncio.wait_for(asyncio.shield(future), timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+            self.pending.pop(rid, None)
+            try:
+                await self._send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                                  "params": {"requestId": rid, "reason": "cancelled by nanocode"}})
+            except (ToolError, OSError):
+                pass
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            raise ToolError(f"REA didn't finish within {timeout}s; try a narrower request or a bigger timeout") from e
+        if "error" in msg:
+            raise ToolError(f"REA: {msg['error'].get('message', msg['error'])}")
+        return msg.get("result") or {}
+
+    async def list_tools(self):
+        if self.tools is None:
+            await self.ensure()
+            tools, cursor = [], None
+            while True:
+                result = await self.request("tools/list", {"cursor": cursor} if cursor else {}, 120)
+                tools += result.get("tools", [])
+                cursor = result.get("nextCursor")
+                if not cursor:
+                    break
+            self.tools = {t["name"]: t for t in tools}
+        return self.tools
+
+    async def call(self, name, arguments, timeout):
+        await self.ensure()
+        return await self.request("tools/call", {"name": name, "arguments": arguments}, timeout)
+
+    async def close(self):
+        if self.reader:
+            self.reader.cancel()
+            self.reader = None
+        if self.alive():
+            try:
+                self.proc.terminate()
+                await asyncio.wait_for(self.proc.wait(), 3)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                kill_tree(self.proc)
+        self.proc = None
+        if self.log:
+            self.log.close()
+            self.log = None
+
+
+def rea():
+    if st.rea is None:
+        st.rea = ReaClient()
+    return st.rea
+
+
+def first_sentence(text):
+    text = " ".join((text or "").split())
+    end = text.find(". ")
+    return (text if end == -1 else text[: end + 1])[:160]
+
+
+@tool("rea_search", "Search REA's reverse-engineering tools by keywords (binaries, apps, APKs, Electron/JS bundles, "
+      "websites, firmware, Android devices...). Returns tool names for rea_schema and rea_call.",
+      {"query": {"type": "string"}, "limit": {"type": "integer", "description": "max results (default 12)"}},
+      ["query"])
+async def tool_rea_search(args):
+    tools = await rea().list_tools()
+    words = [w for w in re.split(r"[\s_\-/,.]+", args["query"].lower()) if len(w) > 1]
+    scored = []
+    for name, spec in tools.items():
+        title = name.replace("_", " ")
+        text = (title + " " + (spec.get("description") or "")).lower()
+        score = sum(3 if w in title else 1 for w in words if w in text)
+        if score:
+            scored.append((-score, name))
+    if not scored:
+        return f"no REA tools match '{args['query']}'. Try other words (REA has {len(tools)} tools)."
+    limit = min(max(int(args.get("limit") or 12), 1), 40)
+    lines = [f"{name}: {first_sentence(tools[name].get('description'))}" +
+             (" [changes state, asks permission]" if rea_is_risky(tools[name]) else "")
+             for _, name in sorted(scored)[:limit]]
+    return "\n".join(lines) + "\n(next: rea_schema to see a tool's arguments, then rea_call)"
+
+
+@tool("rea_schema", "Show a REA tool's full description and its arguments (JSON schema).",
+      {"tool": {"type": "string"}}, ["tool"])
+async def tool_rea_schema(args):
+    spec = await rea_tool_spec(args["tool"])
+    return f"{spec['name']}\n\n{spec.get('description', '')}\n\narguments schema:\n{json.dumps(spec.get('inputSchema', {}))}"
+
+
+async def rea_tool_spec(name):
+    tools = await rea().list_tools()
+    if name not in tools:
+        close = difflib.get_close_matches(name, list(tools), n=3, cutoff=0.5)
+        hint = f" Did you mean: {', '.join(close)}?" if close else " Use rea_search to find tools."
+        raise ToolError(f"REA has no tool '{name}'.{hint}")
+    return tools[name]
+
+
+@tool("rea_call", "Run a REA tool. `arguments` must match the schema from rea_schema.",
+      {"tool": {"type": "string"}, "arguments": {"type": "object"},
+       "timeout": {"type": "integer", "description": "seconds (default 600)"}}, ["tool"])
+async def tool_rea_call(args):
+    spec = await rea_tool_spec(args["tool"])
+    arguments = args.get("arguments") or {}
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            raise ToolError("`arguments` must be a JSON object")
+    if rea_is_risky(spec) and not await allowed("rea", f"{spec['name']} {json.dumps(arguments)}"):
+        return DENIED
+    timeout = min(max(int(args.get("timeout") or 600), 5), 3600)
+    result = await rea().call(spec["name"], arguments, timeout)
+    parts = []
+    for item in result.get("content") or []:
+        parts.append(item.get("text", "") if item.get("type") == "text" else f"[{item.get('type')} content]")
+    text = "\n".join(p for p in parts if p) or (json.dumps(result["structuredContent"])
+                                              if result.get("structuredContent") else "")
+    text = cap(text, REA_OUTPUT_LIMIT)
+    if result.get("isError"):
+        if "schema" in text.lower():
+            text += "\n\narguments schema:\n" + json.dumps(spec.get("inputSchema", {}))[:8000]
+        return "error: " + (text or "REA reported an error")
+    return text or "(no output)"
+
+
+def active_tools():
+    """Tools offered to the model: REA's only when it's installed and enabled."""
+    return [t for t in TOOLS.values() if not t["name"].startswith("rea_") or rea_enabled()]
 
 
 def build_system_prompt():
@@ -990,6 +1257,11 @@ def build_system_prompt():
         lines = ["# Skills\nLoad a skill with the `skill` tool before a task that matches its description:"]
         lines += [f"- {name}: {info['description'][:200]}" for name, info in skills.items()]
         parts.append("\n".join(lines))
+    if rea_enabled():
+        parts.append(
+            "# Reverse engineering\nFor reverse-engineering work (native binaries, apps, APKs, Electron/JS bundles, "
+            f"websites, firmware, devices), load the `{REA_SKILL}` skill first, then use REA: rea_search to "
+            "find a tool, rea_schema for its arguments, rea_call to run it.")
     parts.append(
         "# Learning\nWhen the user corrects you or states a lasting preference, save it with `remember`. After "
         "finishing a non-trivial multi-step task that's likely to recur, save the procedure with `save_skill` "
@@ -1008,7 +1280,7 @@ def sdk_tools():
         return handler
 
     return [sdk.SdkMcpTool(name=t["name"], description=t["description"], input_schema=t["schema"],
-                           handler=make_handler(t["name"])) for t in TOOLS.values()]
+                           handler=make_handler(t["name"])) for t in active_tools()]
 
 
 async def make_client(resume=None):
@@ -1019,14 +1291,24 @@ async def make_client(resume=None):
     options = sdk.ClaudeAgentOptions(
         mcp_servers={"nano": server},
         model=st.model,
-        allowed_tools=[f"mcp__nano__{name}" for name in TOOLS],
+        allowed_tools=[f"mcp__nano__{t['name']}" for t in active_tools()],
         disallowed_tools=["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch",
                           "Task", "TodoWrite", "NotebookEdit"],
         system_prompt=build_system_prompt(),
         include_partial_messages=True,
         resume=resume,
         cwd=os.getcwd(),
+        setting_sources=[],
+        strict_mcp_config=True,
     )
+    if "tools" in {f.name for f in dataclasses.fields(sdk.ClaudeAgentOptions)}:
+        options.tools = []  # no Claude Code built-ins: only nanocode's tools, which handle permissions themselves
+
+    async def deny_others(tool_name, _input, _context):
+        # Anything that still asks for permission isn't ours; answering keeps Claude Code from waiting forever.
+        return sdk.PermissionResultDeny(message=f"{tool_name} isn't available in nanocode; use nanocode's tools")
+
+    options.can_use_tool = deny_others
     client = sdk.ClaudeSDKClient(options=options)
     try:
         await client.connect()
@@ -1080,7 +1362,7 @@ class RetryableError(Exception):
 
 def api_tools():
     return [{"type": "function", "function": {"name": t["name"], "description": t["description"],
-                                              "parameters": t["schema"]}} for t in TOOLS.values()]
+                                              "parameters": t["schema"]}} for t in active_tools()]
 
 
 def estimate_tokens(obj):
@@ -1482,6 +1764,7 @@ COMMANDS = {
     "/memory": "show memory",
     "/skills": "list skills (run one with /<name>)",
     "/auto": "toggle auto-approve for edits and commands",
+    "/rea": "reverse-engineering tools: status, or /rea on|off",
     "/cost": "tokens and cost this session",
     "/config": "show settings (change: nanocode setup)",
     "/c": "new chat (old one stays saved)",
@@ -1554,6 +1837,23 @@ def cmd_undo():
     if st.backend != "sdk":
         st.messages.append({"role": "user", "content": f"[I undid your last change to {path}.]"})
         st.messages.append({"role": "assistant", "content": "Noted."})
+
+
+async def cmd_rea(arg):
+    if arg in ("on", "off"):
+        st.config["rea"] = arg == "on"
+        save_config()
+        if arg == "off" and st.rea:
+            await st.rea.close()
+        await refresh_sdk_prompt()
+    info = rea_runtime()
+    if info is None:
+        out(f"{DIM}REA isn't installed. It needs Node.js 22+; then run: nanocode update{RESET}\n")
+        return
+    state = f"{GREEN}on{RESET}" if rea_enabled() else f"{YELLOW}off{RESET} {DIM}(/rea on){RESET}"
+    running = "running" if st.rea and st.rea.alive() else "starts on first use"
+    tools = f" · {len(st.rea.tools)} tools" if st.rea and st.rea.tools else ""
+    out(f"⏺ REA {info.get('version', '')} {state} {DIM}· {running}{tools} · skill: /{REA_SKILL}{RESET}\n")
 
 
 def show_memory():
@@ -1656,6 +1956,8 @@ async def run_input(text):
             show_memory()
         elif word == "/skills":
             show_skills()
+        elif word == "/rea":
+            await cmd_rea(arg)
         elif word == "/auto":
             st.auto_approve = not st.auto_approve if arg not in ("on", "off") else arg == "on"
             state = f"{YELLOW}on{RESET}: edits and commands run without asking (risky ones still ask)" \
@@ -2044,6 +2346,10 @@ def setup_wizard():
                    str(st.config.get("ollama_num_ctx", default_num_ctx())))
         st.config["ollama_num_ctx"] = int(size) if size.isdigit() else default_num_ctx()
 
+    if rea_runtime() is not None:
+        st.config["rea"] = pick("REA reverse-engineering tools (loaded only when a task needs them)",
+                                [(True, "on", "recommended"), (False, "off", "")],
+                                st.config.get("rea", True)) in (True, "on", "yes", "y")
     st.config["permissions"] = pick(
         "Before editing files or running commands",
         [("ask", "ask me first", "recommended"), ("auto", "just do it", "destructive commands still ask")],
@@ -2085,6 +2391,7 @@ def doctor():
     bad = f"{RED}✗{RESET}"
     warn = f"{YELLOW}!{RESET}"
     print(f"{BOLD}nanocode {__version__}{RESET} {DIM}doctor{RESET}\n")
+    st.config = load_config()
     print(f"  {ok} Python {platform.python_version()} on {platform.system()} {platform.machine()}")
     print(f"  {ok} home: {tilde(home_dir())}")
     from importlib import metadata
@@ -2094,6 +2401,12 @@ def doctor():
         except metadata.PackageNotFoundError:
             print(f"  {bad} {name} missing: reinstall nanocode")
     print(f"  {ok if sdk else warn} claude-agent-sdk {getattr(sdk, '__version__', '') if sdk else 'not installed (Claude provider unavailable)'}")
+    rea_info = rea_runtime()
+    if rea_info is None:
+        print(f"  {warn} REA not installed (optional reverse-engineering tools; needs Node.js 22+, then nanocode update)")
+    else:
+        enabled = "" if st.config.get("rea", True) is not False else " (turned off: /rea on)"
+        print(f"  {ok} REA {rea_info.get('version', '')}{enabled}")
     print(f"  {ok if shutil.which('rg') else warn} ripgrep {'found' if shutil.which('rg') else 'not found (grep uses the slower built-in search)'}")
     st.config = load_config()
     if not st.config.get("provider"):
@@ -2163,6 +2476,8 @@ async def run_headless(prompt, resume_last=False):
             await resume_session("1")
         await run_input(prompt)
     finally:
+        if st.rea:
+            await st.rea.close()
         if st.client:
             await st.client.disconnect()
     return 1 if st.last_error else 0
@@ -2195,11 +2510,45 @@ async def run_interactive(resume_last=False):
     finally:
         if st.task and not st.task.done():
             st.task.cancel()
+        if st.rea:
+            await st.rea.close()
         if st.client:
             try:
                 await asyncio.wait_for(st.client.disconnect(), 5)
             except Exception:
                 pass
+
+
+def read_piped_stdin():
+    """Input piped into `nanocode -p`. Doesn't wait on an idle stdin that's merely left open (IDEs, cron, CI)."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return ""
+    try:
+        if stat.S_ISREG(os.fstat(sys.stdin.fileno()).st_mode):
+            return sys.stdin.read()
+    except (OSError, ValueError):
+        pass
+    import threading
+
+    chunks, started, done = [], threading.Event(), threading.Event()
+
+    def reader():
+        try:
+            first = sys.stdin.read(1)
+            started.set()
+            if first:
+                chunks.append(first + sys.stdin.read())
+        except (OSError, ValueError):
+            pass
+        finally:
+            started.set()
+            done.set()
+
+    threading.Thread(target=reader, daemon=True).start()
+    if not started.wait(1.0):
+        return ""
+    done.wait()
+    return "".join(chunks)
 
 
 def parse_args(argv):
@@ -2244,11 +2593,8 @@ def main(argv=None):
     if prompt is not None:
         if prompt == "-":
             prompt = sys.stdin.read()
-        elif not sys.stdin.isatty():
-            try:
-                piped = sys.stdin.read()
-            except (OSError, ValueError):
-                piped = ""
+        else:
+            piped = read_piped_stdin()
             if piped.strip():
                 prompt = f"{prompt}\n\n<stdin>\n{cap(piped, 100_000)}\n</stdin>"
         if not prompt.strip():

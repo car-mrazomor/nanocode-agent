@@ -5,6 +5,7 @@
 #   sh install.sh                        install or update
 #   sh install.sh --uninstall            remove nanocode, keep config, memory and skills
 #   sh install.sh --uninstall --purge    remove everything
+#   sh install.sh --no-rea               skip REA (optional reverse-engineering tools, needs Node.js 22+)
 
 set -eu
 
@@ -33,10 +34,12 @@ die()  { printf '%s⏺ %s%s\n' "$RED" "$*" "$RESET" >&2; exit 1; }
 
 UNINSTALL=0
 PURGE=0
+NO_REA="${NANOCODE_NO_REA:-}"
 for arg in "$@"; do
   case "$arg" in
     --uninstall) UNINSTALL=1 ;;
     --purge) PURGE=1 ;;
+    --no-rea) NO_REA=1 ;;
     -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
     *) die "unknown option: $arg" ;;
   esac
@@ -290,6 +293,44 @@ if [ ! -f "$MEMORY" ]; then
   } > "$MEMORY"
   step "Created memory ${DIM}($MEMORY)${RESET}"
 fi
+
+# REA (https://github.com/morluto/rea): optional reverse-engineering tools, always the latest version.
+# Any problem here only skips REA; nanocode itself is already installed.
+install_rea() {
+  if [ -n "$NO_REA" ] || grep -qs '"rea": false' "$NANO_HOME/config.json"; then
+    return
+  fi
+  node="$(command -v node || true)"
+  npm="$(command -v npm || true)"
+  if [ -z "$node" ] || [ -z "$npm" ]; then
+    warn "REA skipped: it needs Node.js 22+ (https://nodejs.org). Install Node, then run: nanocode update"
+    return
+  fi
+  major="$("$node" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [ "$major" -lt 22 ] 2>/dev/null; then
+    warn "REA skipped: it needs Node.js 22+, you have $("$node" --version). Update Node, then run: nanocode update"
+    return
+  fi
+  rea="$TOOLS/rea"
+  mkdir -p "$rea"
+  step "Installing REA ${DIM}(reverse-engineering tools, latest; skip with --no-rea)${RESET}"
+  if ! npm_config_cache="$rea/.npm-cache" "$npm" install --prefix "$rea" --no-audit --no-fund --loglevel=error \
+      rea-agents@latest >"$rea/install.log" 2>&1; then
+    rm -rf "$rea/.npm-cache"
+    warn "REA failed to install (log: $rea/install.log); nanocode works without it"
+    return
+  fi
+  rm -rf "$rea/.npm-cache"
+  entry="$rea/node_modules/rea-agents/scripts/rea.mjs"
+  version="$("$node" "$entry" --version 2>/dev/null | head -1 || true)"
+  if [ -z "$version" ]; then
+    warn "REA installed but doesn't start (log: $rea/install.log); nanocode works without it"
+    return
+  fi
+  printf '{"node": "%s", "entry": "%s", "version": "%s"}\n' "$node" "$entry" "$version" > "$rea/runtime.json"
+  step "REA $version ready ${DIM}(loaded only when a task needs it)${RESET}"
+}
+install_rea
 
 "$BIN/nanocode" --version >/dev/null 2>&1 || die "nanocode doesn't start; run $BIN/nanocode --version to see why"
 
