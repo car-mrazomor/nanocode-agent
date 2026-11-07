@@ -924,6 +924,7 @@ def test_kitty_keys_and_vertical_moves_in_the_input(sandbox):
     assert seen["history"] == "older prompt"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows reads keys through the console API, not this protocol")
 def test_no_setup_hint_when_keys_are_reported(sandbox, monkeypatch):
     monkeypatch.setenv("KITTY_WINDOW_ID", "1")
     for var in ("TMUX", "STY"):
