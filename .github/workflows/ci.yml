@@ -37,6 +37,12 @@ jobs:
       - run: ~/.nanocode/bin/nanocode --version
       - run: ~/.nanocode/bin/nanocode doctor
       - run: sh install.sh --uninstall --purge && test ! -e ~/.nanocode
+      - name: install without a system Python (uv-managed Python in ~/.nanocode/python)
+        run: |
+          NANOCODE_MANAGED_PYTHON=1 sh install.sh
+          ~/.nanocode/bin/nanocode --version
+          grep -q "$HOME/.nanocode/python" ~/.nanocode/venv/pyvenv.cfg
+          sh install.sh --uninstall --purge && test ! -e ~/.nanocode
 
   install-windows:
     runs-on: windows-latest
@@ -51,5 +57,14 @@ jobs:
         run: '& "$env:USERPROFILE\.nanocode\bin\nanocode.cmd" --version'
       - shell: pwsh
         run: |
+          ./install.ps1 -Uninstall -Purge
+          if (Test-Path "$env:USERPROFILE\.nanocode") { exit 1 }
+      - name: install without a system Python (uv-managed Python in .nanocode\python)
+        shell: pwsh
+        run: |
+          $env:NANOCODE_MANAGED_PYTHON = "1"
+          ./install.ps1
+          & "$env:USERPROFILE\.nanocode\bin\nanocode.cmd" --version
+          if (-not (Select-String -Quiet -Path "$env:USERPROFILE\.nanocode\venv\pyvenv.cfg" -Pattern "\.nanocode\\python")) { exit 1 }
           ./install.ps1 -Uninstall -Purge
           if (Test-Path "$env:USERPROFILE\.nanocode") { exit 1 }

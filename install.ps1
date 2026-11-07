@@ -12,6 +12,8 @@ $NanoHome = if ($env:NANOCODE_HOME) { $env:NANOCODE_HOME } else { Join-Path $env
 $App = Join-Path $NanoHome "app"
 $Venv = Join-Path $NanoHome "venv"
 $Bin = Join-Path $NanoHome "bin"
+$Tools = Join-Path $NanoHome "tools"
+$PyDir = Join-Path $NanoHome "python"
 
 function Step($msg) { Write-Host "* $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "! $msg" -ForegroundColor Yellow }
@@ -26,7 +28,7 @@ function Set-UserPath([bool]$Add) {
 }
 
 if ($Uninstall) {
-    foreach ($dir in @($App, $Venv, $Bin)) {
+    foreach ($dir in @($App, $Venv, $Bin, $Tools, $PyDir)) {
         if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
     }
     Set-UserPath $false
@@ -41,8 +43,33 @@ if ($Uninstall) {
 
 Write-Host "nanocode installer (Windows -> $NanoHome)`n"
 
+# Installs a standalone Python into .nanocode\python with uv, without admin rights. Returns its path.
+function Install-ManagedPython {
+    $uv = Join-Path $Tools "uv.exe"
+    $env:UV_PYTHON_INSTALL_DIR = $PyDir
+    $env:UV_CACHE_DIR = Join-Path $Tools "cache"
+    if (Test-Path $uv) {
+        $found = & $uv python find 3.12 2>$null
+        if ($LASTEXITCODE -eq 0 -and $found -and $found.StartsWith($PyDir)) { return $found }
+    }
+    Step "Installing Python 3.12 into $PyDir (via uv, no admin rights needed)"
+    if (-not (Test-Path $uv)) {
+        New-Item -ItemType Directory -Force -Path $Tools | Out-Null
+        $env:UV_UNMANAGED_INSTALL = $Tools
+        & ([scriptblock]::Create((Invoke-RestMethod "https://astral.sh/uv/install.ps1"))) *> $null
+        Remove-Item Env:UV_UNMANAGED_INSTALL -ErrorAction SilentlyContinue
+        if (-not (Test-Path $uv)) { Fail "couldn't download uv. Install Python yourself: winget install Python.Python.3.12" }
+    }
+    & $uv python install 3.12 --no-bin *> $null
+    if ($LASTEXITCODE -ne 0) { Fail "couldn't download Python. Install it yourself: winget install Python.Python.3.12" }
+    $found = & $uv python find 3.12
+    Remove-Item -Recurse -Force $env:UV_CACHE_DIR -ErrorAction SilentlyContinue
+    return $found
+}
+
 $Python = $null
-foreach ($candidate in @(@("py", "-3"), @("python"), @("python3"))) {
+$Candidates = if ($env:NANOCODE_MANAGED_PYTHON) { @() } else { @(@("py", "-3"), @("python"), @("python3")) }
+foreach ($candidate in $Candidates) {
     $exe = $candidate[0]
     $pre = @($candidate | Select-Object -Skip 1)
     if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
@@ -51,8 +78,8 @@ foreach ($candidate in @(@("py", "-3"), @("python"), @("python3"))) {
         if ($ok -eq "True") { $Python = @{ Exe = $exe; Pre = $pre }; break }
     } catch { }
 }
-if (-not $Python) { Fail "Python 3.10 or newer not found. Install it with: winget install Python.Python.3.12" }
-Step "Python found ($($Python.Exe))"
+if (-not $Python) { $Python = @{ Exe = (Install-ManagedPython); Pre = @() } }
+Step "Python: $($Python.Exe)"
 
 New-Item -ItemType Directory -Force -Path $App, $Bin | Out-Null
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { "" }
@@ -74,6 +101,7 @@ if (-not (Test-Path $Venv)) {
 }
 
 $env:PIP_USER = "0"
+$env:PIP_CACHE_DIR = Join-Path $NanoHome ".pip-cache"
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 Remove-Item Env:PIP_TARGET, Env:PIP_PREFIX -ErrorAction SilentlyContinue
 
@@ -87,6 +115,7 @@ if ($LASTEXITCODE -ne 0) { Warn "claude-agent-sdk failed to install; OpenRouter 
 
 $Launcher = Join-Path $Bin "nanocode.cmd"
 Set-Content -Path $Launcher -Encoding ASCII -Value "@echo off`r`nrem nanocode launcher (made by the nanocode installer)`r`n`"$VenvPython`" `"$(Join-Path $App 'nanocode.py')`" %*"
+Remove-Item -Recurse -Force $env:PIP_CACHE_DIR -ErrorAction SilentlyContinue
 Set-UserPath $true
 if (-not ($env:Path.Split(";") -contains $Bin)) { $env:Path = "$Bin;$env:Path" }
 Step "Command: nanocode ($Launcher)"

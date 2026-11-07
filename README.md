@@ -38,7 +38,9 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.ps1 | iex
 ```
 
-Everything goes into `~/.nanocode`: the app, a private Python environment, your config, memory and skills. Nothing else on your system is touched except one PATH line. You need Python 3.10 or newer. If it's missing, the installer tells you how to get it.
+Everything goes into `~/.nanocode`: the app, a private Python environment, your config, memory and skills. Nothing else on your system is touched except one PATH line.
+
+**Python:** if you already have Python 3.10 or newer, the installer uses it. If you don't, it downloads a private Python 3.12 into `~/.nanocode/python` (using [uv](https://github.com/astral-sh/uv)). That needs no admin rights and doesn't touch your system. On Android (Termux) it runs `pkg install python` instead.
 
 ```sh
 nanocode update              # latest version

@@ -13,6 +13,8 @@ NANO_HOME="${NANOCODE_HOME:-$HOME/.nanocode}"
 APP="$NANO_HOME/app"
 VENV="$NANO_HOME/venv"
 BIN="$NANO_HOME/bin"
+TOOLS="$NANO_HOME/tools"
+PYDIR="$NANO_HOME/python"
 REQUIRED="httpx>=0.27 rich>=13 prompt_toolkit>=3.0.40"
 OPTIONAL="claude-agent-sdk"
 LEGACY_APP="${XDG_DATA_HOME:-$HOME/.local/share}/nanocode"
@@ -82,7 +84,7 @@ if [ "$UNINSTALL" = 1 ]; then
   for dir in $(link_dirs); do
     if is_ours "$dir/nanocode"; then rm -f "$dir/nanocode" 2>/dev/null || warn "couldn't remove $dir/nanocode"; fi
   done
-  rm -rf "$APP" "$VENV" "$BIN"
+  rm -rf "$APP" "$VENV" "$BIN" "$TOOLS" "$PYDIR"
   [ -f "$LEGACY_APP/nanocode.py" ] && rm -rf "$LEGACY_APP"
   clean_rc
   if [ "$PURGE" = 1 ]; then
@@ -110,21 +112,64 @@ python_hint() {
   else echo "install Python 3.10+ from https://www.python.org/downloads/"; fi
 }
 
-PY=""
-for cand in python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
-  if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
-    PY="$(command -v "$cand")"
-    break
-  fi
-done
-[ -n "$PY" ] || die "Python 3.10 or newer not found. Install it with:  $(python_hint)"
-step "Python $("$PY" -c 'import platform; print(platform.python_version())') ${DIM}($PY)${RESET}"
-
 fetch() {
   if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
   elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
   else die "need curl or wget to download $1"; fi
 }
+
+# Python 3.10+ already on the system, if any.
+find_python() {
+  for cand in python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+      command -v "$cand"
+      return
+    fi
+  done
+}
+
+# Installs Python without admin rights: Termux/Alpine use their package manager; everywhere else uv
+# downloads a standalone Python into ~/.nanocode/python. Nothing outside ~/.nanocode is touched.
+install_python() {
+  if [ "$PLATFORM" = "termux" ]; then
+    step "Installing Python ${DIM}(pkg install python)${RESET}"
+    pkg install -y python >/dev/null 2>&1 || die "couldn't install Python; run: pkg install python"
+    PY="$(find_python)"
+    return
+  fi
+  if command -v apk >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
+    step "Installing Python ${DIM}(apk add python3)${RESET}"
+    apk add --no-cache python3 >/dev/null 2>&1 || die "couldn't install Python; run: apk add python3"
+    PY="$(find_python)"
+    return
+  fi
+  UV="$TOOLS/uv"
+  [ -x "$UV.exe" ] && UV="$UV.exe"
+  export UV_PYTHON_INSTALL_DIR="$PYDIR" UV_CACHE_DIR="$TOOLS/cache"
+  if [ -x "$UV" ]; then
+    PY="$("$UV" python find 3.12 2>/dev/null || true)"
+    case "$PY" in "$PYDIR"*) return ;; *) PY="" ;; esac
+  fi
+  step "Installing Python 3.12 into $PYDIR ${DIM}(via uv, no admin rights needed)${RESET}"
+  if [ ! -x "$UV" ]; then
+    mkdir -p "$TOOLS"
+    fetch "https://astral.sh/uv/install.sh" "$TOOLS/uv-install.sh"
+    UV_UNMANAGED_INSTALL="$TOOLS" sh "$TOOLS/uv-install.sh" >/dev/null 2>&1 \
+      || die "couldn't download uv to install Python. Install Python 3.10+ yourself:  $(python_hint)"
+    rm -f "$TOOLS/uv-install.sh"
+    [ -x "$UV" ] || UV="$TOOLS/uv.exe"
+  fi
+  "$UV" python install 3.12 --no-bin >/dev/null 2>&1 \
+    || die "couldn't download Python. Install Python 3.10+ yourself:  $(python_hint)"
+  PY="$("$UV" python find 3.12 2>/dev/null)"
+  rm -rf "$TOOLS/cache"
+}
+
+PY=""
+[ -n "${NANOCODE_MANAGED_PYTHON:-}" ] || PY="$(find_python)"
+[ -n "$PY" ] || install_python
+[ -n "$PY" ] || die "Python 3.10 or newer not found. Install it with:  $(python_hint)"
+step "Python $("$PY" -c 'import platform; print(platform.python_version())') ${DIM}($PY)${RESET}"
 
 mkdir -p "$APP" "$BIN"
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
@@ -149,14 +194,22 @@ venv_python() {
 if [ -d "$VENV" ] && [ -z "$(venv_python)" ]; then
   rm -rf "$VENV"
 fi
-if [ ! -d "$VENV" ]; then
-  "$PY" -m venv "$VENV" >/dev/null 2>&1 || die "couldn't create a Python venv. On Debian/Ubuntu: sudo apt-get install python3-venv"
+if [ ! -d "$VENV" ] && ! "$PY" -m venv "$VENV" >/dev/null 2>&1; then
+  # e.g. Debian/Ubuntu without python3-venv: use our own Python instead of asking for sudo
+  rm -rf "$VENV"
+  case "$PY" in "$PYDIR"*) die "couldn't create a Python venv in $VENV" ;; esac
+  warn "this Python can't create a venv; installing a private one"
+  PY=""
+  install_python
+  if [ -z "$PY" ] || ! "$PY" -m venv "$VENV" >/dev/null 2>&1; then
+    die "couldn't create a Python venv in $VENV"
+  fi
 fi
 VPY="$(venv_python)"
 [ -n "$VPY" ] || die "the venv in $VENV is broken; delete it and run the installer again"
 
 # pip.conf with `user = true` (common with Homebrew Python) or PIP_TARGET/PIP_PREFIX break installs into a venv.
-export PIP_USER=0 PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_USER=0 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_CACHE_DIR="$NANO_HOME/.pip-cache"
 unset PIP_TARGET PIP_PREFIX
 
 step "Installing dependencies ${DIM}(httpx, rich, prompt_toolkit)${RESET}"
@@ -175,6 +228,7 @@ cat > "$BIN/nanocode" <<EOF
 exec "$VPY" "$APP/nanocode.py" "\$@"
 EOF
 chmod +x "$BIN/nanocode"
+rm -rf "$NANO_HOME/.pip-cache"
 
 if [ -f "$LEGACY_APP/nanocode.py" ]; then
   rm -rf "$LEGACY_APP"
