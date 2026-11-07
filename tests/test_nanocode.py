@@ -722,6 +722,7 @@ def test_editing_keys(sandbox):
 
 def test_terminal_setup_kitty(sandbox, tmp_path, monkeypatch):
     monkeypatch.setenv("KITTY_WINDOW_ID", "1")
+    nc.st.config = {"keyboard_protocol": "off"}
     monkeypatch.delenv("KITTY_CONFIG_DIRECTORY", raising=False)
     conf = tmp_path / "userhome" / ".config" / "kitty" / "kitty.conf"
     conf.parent.mkdir(parents=True)
@@ -921,3 +922,10 @@ def test_kitty_keys_and_vertical_moves_in_the_input(sandbox):
     assert seen["ctrl_c_clears"] == ""
     assert seen["up_moved"] == (True, True)
     assert seen["history"] == "older prompt"
+
+
+def test_no_setup_hint_when_keys_are_reported(sandbox, monkeypatch):
+    monkeypatch.setenv("KITTY_WINDOW_ID", "1")
+    for var in ("TMUX", "STY"):
+        monkeypatch.delenv(var, raising=False)
+    assert nc.keyboard_protocol_enabled() and not nc.terminal_needs_setup()

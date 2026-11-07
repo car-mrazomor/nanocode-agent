@@ -2282,6 +2282,8 @@ TERMINAL_MARK = "nanocode: Shift+Enter = new line, Cmd+Backspace = delete line, 
 
 def terminal_needs_setup():
     """True when this terminal can be set up by /terminal-setup and hasn't been yet."""
+    if keyboard_protocol_enabled():
+        return False  # the terminal reports these keys itself while nanocode runs
     terminal = detect_terminal()
     if terminal in ("vscode", "cursor", "windsurf"):
         try:
