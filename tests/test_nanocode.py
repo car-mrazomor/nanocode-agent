@@ -552,3 +552,15 @@ def test_piped_stdin_is_attached(sandbox, monkeypatch, capsys):
     import io as _io
     monkeypatch.setattr(sys, "stdin", _io.StringIO("ERROR: disk full"))
     assert nc.read_piped_stdin() == "ERROR: disk full"
+
+
+def test_rea_close_stops_the_server(sandbox, tmp_path):
+    install_fake_rea(tmp_path)
+
+    async def scenario():
+        await nc.run_tool("rea_search", {"query": "inspect"})
+        proc = nc.st.rea.proc
+        await nc.st.rea.close()
+        return proc.returncode
+
+    assert run(scenario()) is not None

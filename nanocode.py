@@ -1043,7 +1043,9 @@ class ReaClient:
         self.log = None
 
     def alive(self):
-        return self.proc is not None and self.proc.returncode is None
+        # The reader ends when REA's output closes; on Windows that happens before returncode is set.
+        return (self.proc is not None and self.proc.returncode is None
+                and self.reader is not None and not self.reader.done())
 
     async def ensure(self):
         async with self.lock:
@@ -1063,15 +1065,19 @@ class ReaClient:
             except OSError as e:
                 raise ToolError(f"couldn't start REA: {e}") from e
             self.reader = asyncio.ensure_future(self._read())
+            await asyncio.sleep(0)
             await self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                               "clientInfo": {"name": "nanocode", "version": __version__}}, 120)
             await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     async def _send(self, message):
         if not self.alive():
-            raise ToolError("REA isn't running")
-        self.proc.stdin.write((json.dumps(message) + "\n").encode())
-        await self.proc.stdin.drain()
+            raise ToolError("REA stopped unexpectedly (details: ~/.nanocode/logs/rea.log)")
+        try:
+            self.proc.stdin.write((json.dumps(message) + "\n").encode())
+            await self.proc.stdin.drain()
+        except (OSError, RuntimeError) as e:
+            raise ToolError(f"REA stopped unexpectedly ({type(e).__name__}); it restarts on the next call") from e
 
     async def _read(self):
         try:
@@ -1143,7 +1149,7 @@ class ReaClient:
         if self.reader:
             self.reader.cancel()
             self.reader = None
-        if self.alive():
+        if self.proc is not None and self.proc.returncode is None:
             try:
                 self.proc.terminate()
                 await asyncio.wait_for(self.proc.wait(), 3)
