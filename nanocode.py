@@ -914,9 +914,9 @@ def add_memory(fact, scope="project"):
         path = project_memory_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     fact = " ".join(fact.split())
-    if path.exists() and f"- {fact}\n" in read_text(path):
+    if path.exists() and f"- {fact}" in (line.strip() for line in read_text(path).splitlines()):
         return path
-    with open(path, "a", encoding="utf-8") as f:
+    with open(path, "a", encoding="utf-8", newline="") as f:
         if path.stat().st_size == 0:
             f.write("# Memory\n\n")
         f.write(f"- {fact}\n")
