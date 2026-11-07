@@ -2750,7 +2750,7 @@ def build_app():
                 except OSError:
                     matches = []
                 for path in matches:
-                    shown = path + "/" if os.path.isdir(path) else path
+                    shown = path.replace(os.sep, "/") + ("/" if os.path.isdir(path) else "")
                     yield Completion("@" + shown, start_position=-len(word), display=shown)
 
     class Placeholder(Processor):
