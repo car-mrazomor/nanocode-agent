@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# nanocode: saved chats (/resume) stay local; .nanocode/skills/ can be committed
+.nanocode/sessions/
+.nanocode/memory.md
+
+# secrets (OPENROUTER_API_KEY etc.)
+.env
+.env.*
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
