@@ -1,15 +1,17 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
 env/
 
-# nanocode: saved chats (/resume) stay local; .nanocode/skills/ can be committed
+# nanocode's per-project data: chats, memory and undo stay local; skills/ can be committed
 .nanocode/sessions/
 .nanocode/memory.md
+.nanocode/undo/
 
-# secrets (OPENROUTER_API_KEY etc.)
+# secrets
 .env
 .env.*
 

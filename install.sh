@@ -1,18 +1,22 @@
 #!/bin/sh
-# nanocode installer: puts a `nanocode` command on your PATH.
+# nanocode installer for macOS, Linux, WSL, Android (Termux), iSH and Git Bash.
+# Everything lives in ~/.nanocode (override with NANOCODE_HOME); Windows PowerShell: install.ps1.
 #
-#   sh install.sh               install or update
-#   sh install.sh --uninstall   remove it
-#
-# Works on macOS, Linux, WSL, Android (Termux), iSH, and Git Bash on Windows.
-# Everything goes into its own folder with a private Python venv, so it never
-# touches your system Python packages.
+#   sh install.sh                        install or update
+#   sh install.sh --uninstall            remove nanocode, keep config, memory and skills
+#   sh install.sh --uninstall --purge    remove everything
 
 set -eu
 
-RAW_URL="https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/nanocode.py"
-DEPS="claude-agent-sdk prompt_toolkit rich httpx"
-APP_DIR="${NANOCODE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/nanocode}"
+REPO_RAW="https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master"
+NANO_HOME="${NANOCODE_HOME:-$HOME/.nanocode}"
+APP="$NANO_HOME/app"
+VENV="$NANO_HOME/venv"
+BIN="$NANO_HOME/bin"
+REQUIRED="httpx>=0.27 rich>=13 prompt_toolkit>=3.0.40"
+OPTIONAL="claude-agent-sdk"
+LEGACY_APP="${XDG_DATA_HOME:-$HOME/.local/share}/nanocode"
+LEGACY_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/nanocode"
 
 if [ -t 1 ]; then
   BOLD="$(printf '\033[1m')"; DIM="$(printf '\033[2m')"; RED="$(printf '\033[31m')"
@@ -25,159 +29,205 @@ step() { printf '%s⏺%s %s\n' "$GREEN" "$RESET" "$*"; }
 warn() { printf '%s⏺ %s%s\n' "$YELLOW" "$*" "$RESET"; }
 die()  { printf '%s⏺ %s%s\n' "$RED" "$*" "$RESET" >&2; exit 1; }
 
-# --- Detect the system -------------------------------------------------------
+UNINSTALL=0
+PURGE=0
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall) UNINSTALL=1 ;;
+    --purge) PURGE=1 ;;
+    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
 
-OS="$(uname -s 2>/dev/null || echo unknown)"
-case "$OS" in
+case "$(uname -s 2>/dev/null || echo unknown)" in
   MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
-  Darwin)               PLATFORM="macos" ;;
-  *)
-    if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux ]; then PLATFORM="termux"
-    else PLATFORM="linux"; fi ;;
+  Darwin) PLATFORM="macos" ;;
+  *) if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux ]; then PLATFORM="termux"; else PLATFORM="linux"; fi ;;
 esac
 
-# Hint for installing Python, based on the package manager we can find
-python_hint() {
-  if   [ "$PLATFORM" = "termux" ];            then echo "pkg install python"
-  elif command -v brew    >/dev/null 2>&1;    then echo "brew install python"
-  elif command -v apt-get >/dev/null 2>&1;    then echo "sudo apt-get install python3 python3-venv"
-  elif command -v dnf     >/dev/null 2>&1;    then echo "sudo dnf install python3"
-  elif command -v pacman  >/dev/null 2>&1;    then echo "sudo pacman -S python"
-  elif command -v zypper  >/dev/null 2>&1;    then echo "sudo zypper install python3"
-  elif command -v apk     >/dev/null 2>&1;    then echo "apk add python3 py3-pip"
-  elif [ "$PLATFORM" = "windows" ];           then echo "winget install Python.Python.3.12"
-  else echo "install Python 3.10+ from https://www.python.org/downloads/"; fi
+on_path() { case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
+
+# Folders where a `nanocode` link makes the command work right away, without a new shell.
+link_dirs() {
+  if [ "$PLATFORM" = "termux" ] && [ -n "${PREFIX:-}" ]; then echo "$PREFIX/bin"; fi
+  echo "$HOME/.local/bin"
+  echo "/usr/local/bin"
 }
 
-# Where the `nanocode` command goes: a bin folder that is already on PATH if possible
-pick_bin_dir() {
-  if [ "$PLATFORM" = "termux" ] && [ -n "${PREFIX:-}" ]; then echo "$PREFIX/bin"; return; fi
-  case ":$PATH:" in *":$HOME/.local/bin:"*) echo "$HOME/.local/bin"; return ;; esac
-  if [ "$PLATFORM" != "windows" ] && [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-    echo "/usr/local/bin"; return
-  fi
-  echo "$HOME/.local/bin"   # not on PATH yet: we add it to the shell profile below
+is_ours() {
+  [ -L "$1" ] && case "$(readlink "$1")" in *nanocode*) return 0 ;; esac
+  [ -f "$1" ] && grep -q "nanocode installer\|nanocode launcher" "$1" 2>/dev/null
 }
 
-BIN_DIR="$(pick_bin_dir)"
-LAUNCHER="$BIN_DIR/nanocode"
-
-# --- Uninstall ---------------------------------------------------------------
-
-if [ "${1:-}" = "--uninstall" ]; then
-  rm -rf "$APP_DIR"
-  for f in "$LAUNCHER" "$HOME/.local/bin/nanocode" "/usr/local/bin/nanocode"; do
-    [ -f "$f" ] && grep -q "nanocode installer" "$f" 2>/dev/null && rm -f "$f"
+rc_files() {
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
+    [ -f "$rc" ] && echo "$rc"
   done
-  step "nanocode removed ${DIM}(saved chats in your projects' .nanocode/ folders were kept)${RESET}"
+  return 0
+}
+
+# Removes our PATH lines, including the two-line block older versions wrote.
+clean_rc() {
+  for rc in $(rc_files); do
+    grep -q "nanocode" "$rc" 2>/dev/null || continue
+    tmp="$rc.nanocode-tmp"
+    awk '/# added by nanocode installer/ { skip = 1; next } skip { skip = 0; next } / # nanocode$/ { next } { print }' "$rc" > "$tmp"
+    cat "$tmp" > "$rc"
+    rm -f "$tmp"
+  done
+}
+
+if [ "$UNINSTALL" = 1 ]; then
+  for dir in $(link_dirs); do
+    if is_ours "$dir/nanocode"; then rm -f "$dir/nanocode" 2>/dev/null || warn "couldn't remove $dir/nanocode"; fi
+  done
+  rm -rf "$APP" "$VENV" "$BIN"
+  [ -f "$LEGACY_APP/nanocode.py" ] && rm -rf "$LEGACY_APP"
+  clean_rc
+  if [ "$PURGE" = 1 ]; then
+    rm -rf "$NANO_HOME" "$LEGACY_CONFIG" "$HOME/.nanocode_history"
+    step "nanocode removed completely"
+  else
+    step "nanocode removed ${DIM}(config, memory and skills kept in $NANO_HOME; --purge deletes them)${RESET}"
+  fi
+  say "${DIM}Each project's .nanocode/ folder (saved chats, project memory) was left alone.${RESET}"
   exit 0
 fi
 
-say "${BOLD}nanocode installer${RESET} ${DIM}($PLATFORM)${RESET}"
+say "${BOLD}nanocode installer${RESET} ${DIM}($PLATFORM → $NANO_HOME)${RESET}"
 say ""
 
-# --- Python 3.10+ -------------------------------------------------------------
+python_hint() {
+  if   [ "$PLATFORM" = "termux" ];          then echo "pkg install python"
+  elif command -v brew    >/dev/null 2>&1;  then echo "brew install python"
+  elif command -v apt-get >/dev/null 2>&1;  then echo "sudo apt-get install python3 python3-venv"
+  elif command -v dnf     >/dev/null 2>&1;  then echo "sudo dnf install python3"
+  elif command -v pacman  >/dev/null 2>&1;  then echo "sudo pacman -S python"
+  elif command -v zypper  >/dev/null 2>&1;  then echo "sudo zypper install python3"
+  elif command -v apk     >/dev/null 2>&1;  then echo "apk add python3 py3-pip"
+  elif [ "$PLATFORM" = "windows" ];         then echo "winget install Python.Python.3.12"
+  else echo "install Python 3.10+ from https://www.python.org/downloads/"; fi
+}
 
 PY=""
 for cand in python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
-  if command -v "$cand" >/dev/null 2>&1 &&
-     "$cand" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
-    PY="$(command -v "$cand")"; break
+  if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+    PY="$(command -v "$cand")"
+    break
   fi
 done
 [ -n "$PY" ] || die "Python 3.10 or newer not found. Install it with:  $(python_hint)"
-step "Python: $("$PY" --version 2>&1) ${DIM}($PY)${RESET}"
+step "Python $("$PY" -c 'import platform; print(platform.python_version())') ${DIM}($PY)${RESET}"
 
-# --- Copy nanocode.py ---------------------------------------------------------
-
-mkdir -p "$APP_DIR"
-SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/nanocode.py" ]; then
-  cp "$SCRIPT_DIR/nanocode.py" "$APP_DIR/nanocode.py"
-  step "Copied nanocode.py from $SCRIPT_DIR"
-else
-  # Run outside the repo (e.g. curl ... | sh): download it instead
-  if command -v curl >/dev/null 2>&1; then curl -fsSL "$RAW_URL" -o "$APP_DIR/nanocode.py"
-  elif command -v wget >/dev/null 2>&1; then wget -qO "$APP_DIR/nanocode.py" "$RAW_URL"
-  else die "nanocode.py not found next to this script, and neither curl nor wget is installed"; fi
-  step "Downloaded nanocode.py"
-fi
-
-# --- Private venv + dependencies ---------------------------------------------
-
-VENV="$APP_DIR/venv"
-venv_python() { if [ -x "$VENV/bin/python" ]; then echo "$VENV/bin/python"; elif [ -x "$VENV/Scripts/python.exe" ]; then echo "$VENV/Scripts/python.exe"; fi; }  # Windows uses Scripts/
-if [ -d "$VENV" ] && [ -z "$(venv_python)" ]; then
-  rm -rf "$VENV"  # half-made venv from an earlier failed run
-fi
-if [ ! -d "$VENV" ]; then
-  "$PY" -m venv "$VENV" 2>/dev/null || die "Could not create a venv. On Debian/Ubuntu run:  sudo apt-get install python3-venv"
-fi
-VPY="$(venv_python)"
-
-# `user = true` in pip.conf (common with Homebrew Python), or PIP_TARGET/PIP_PREFIX in the env,
-# make pip refuse to install into a venv. Turn them off for our pip only; your pip config stays untouched.
-export PIP_USER=0
-unset PIP_TARGET PIP_PREFIX
-
-step "Installing dependencies ${DIM}($DEPS)${RESET}"
-"$VPY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
-# shellcheck disable=SC2086
-if ! "$VPY" -m pip install --quiet --upgrade $DEPS; then
-  die "pip install failed (see the error above). On Android/iSH, claude-agent-sdk may have no build for this device."
-fi
-
-# --- The `nanocode` command --------------------------------------------------
-
-write_launcher() {
-  cat <<EOF
-#!/bin/sh
-# nanocode installer: launcher (re-run install.sh to update, --uninstall to remove)
-exec "$VPY" "$APP_DIR/nanocode.py" "\$@"
-EOF
+fetch() {
+  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
+  else die "need curl or wget to download $1"; fi
 }
 
-if mkdir -p "$BIN_DIR" 2>/dev/null && [ -w "$BIN_DIR" ]; then
-  write_launcher > "$LAUNCHER"
-  chmod +x "$LAUNCHER"
+mkdir -p "$APP" "$BIN"
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/nanocode.py" ]; then
+  cp "$SCRIPT_DIR/nanocode.py" "$APP/nanocode.py.new"
+  cp "$SCRIPT_DIR/install.sh" "$APP/install.sh"
+  [ -f "$SCRIPT_DIR/install.ps1" ] && cp "$SCRIPT_DIR/install.ps1" "$APP/install.ps1"
+  step "Copied nanocode from $SCRIPT_DIR"
 else
-  die "Can't write to $BIN_DIR"
+  fetch "$REPO_RAW/nanocode.py" "$APP/nanocode.py.new"
+  fetch "$REPO_RAW/install.sh" "$APP/install.sh" || true
+  step "Downloaded nanocode"
 fi
-step "Command installed: ${BOLD}$LAUNCHER${RESET}"
+head -1 "$APP/nanocode.py.new" | grep -q python || die "downloaded nanocode.py looks broken; try again later"
+mv "$APP/nanocode.py.new" "$APP/nanocode.py"
 
-# Make sure ~/.local/bin is on PATH for future shells
-PATH_NOTE=""
-case ":$PATH:" in
-  *":$BIN_DIR:"*) ;;
-  *)
-    LINE="export PATH=\"$BIN_DIR:\$PATH\""
-    for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
-      if [ -f "$rc" ] || [ "$rc" = "$HOME/.profile" ]; then
-        grep -qsF "$LINE" "$rc" || printf '\n# added by nanocode installer\n%s\n' "$LINE" >> "$rc"
-      fi
-    done
-    PATH_NOTE="yes"
-    ;;
-esac
+venv_python() {
+  for p in "$VENV/bin/python" "$VENV/Scripts/python.exe"; do
+    [ -x "$p" ] && "$p" -c "" >/dev/null 2>&1 && { echo "$p"; return; }
+  done
+}
+if [ -d "$VENV" ] && [ -z "$(venv_python)" ]; then
+  rm -rf "$VENV"
+fi
+if [ ! -d "$VENV" ]; then
+  "$PY" -m venv "$VENV" >/dev/null 2>&1 || die "couldn't create a Python venv. On Debian/Ubuntu: sudo apt-get install python3-venv"
+fi
+VPY="$(venv_python)"
+[ -n "$VPY" ] || die "the venv in $VENV is broken; delete it and run the installer again"
 
-# --- Global memory (~/.config/nanocode/NANOCODE.md) --------------------------
+# pip.conf with `user = true` (common with Homebrew Python) or PIP_TARGET/PIP_PREFIX break installs into a venv.
+export PIP_USER=0 PIP_DISABLE_PIP_VERSION_CHECK=1
+unset PIP_TARGET PIP_PREFIX
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nanocode"
-MEMORY="$CONFIG_DIR/NANOCODE.md"
-if [ -f "$MEMORY" ]; then
-  step "Memory already exists, kept it ${DIM}($MEMORY)${RESET}"
+step "Installing dependencies ${DIM}(httpx, rich, prompt_toolkit)${RESET}"
+"$VPY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+# shellcheck disable=SC2086
+"$VPY" -m pip install --quiet --upgrade $REQUIRED || die "pip install failed (see the error above)"
+step "Installing claude-agent-sdk ${DIM}(for the Claude subscription provider)${RESET}"
+# shellcheck disable=SC2086
+if ! "$VPY" -m pip install --quiet --upgrade $OPTIONAL >/dev/null 2>&1; then
+  warn "claude-agent-sdk has no build for this device; OpenRouter and Ollama still work"
+fi
+
+cat > "$BIN/nanocode" <<EOF
+#!/bin/sh
+# nanocode launcher (made by the nanocode installer; update: nanocode update, remove: nanocode uninstall)
+exec "$VPY" "$APP/nanocode.py" "\$@"
+EOF
+chmod +x "$BIN/nanocode"
+
+if [ -f "$LEGACY_APP/nanocode.py" ]; then
+  rm -rf "$LEGACY_APP"
+  step "Removed the old install in $LEGACY_APP"
+fi
+
+LINKED=""
+for dir in $(link_dirs); do
+  on_path "$dir" || continue
+  [ -d "$dir" ] && [ -w "$dir" ] || continue
+  if [ -e "$dir/nanocode" ] && ! is_ours "$dir/nanocode"; then continue; fi
+  ln -sf "$BIN/nanocode" "$dir/nanocode" && LINKED="$dir/nanocode" && break
+done
+
+clean_rc
+for rc in $(rc_files) "$HOME/.profile"; do
+  case "$rc" in
+    *config.fish) line="fish_add_path $BIN # nanocode" ;;
+    *) line="export PATH=\"$BIN:\$PATH\" # nanocode" ;;
+  esac
+  grep -qsF "$line" "$rc" || printf '%s\n' "$line" >> "$rc"
+done
+if [ -n "$LINKED" ]; then
+  step "Command: ${BOLD}nanocode${RESET} ${DIM}($LINKED → $BIN/nanocode)${RESET}"
 else
-  mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/skills"
+  step "Command: ${BOLD}$BIN/nanocode${RESET} ${DIM}(added to PATH in your shell profile)${RESET}"
+fi
+
+if [ -z "${NANOCODE_HOME:-}" ]; then
+  for name in config.json NANOCODE.md skills; do
+    if [ -e "$LEGACY_CONFIG/$name" ] && [ ! -e "$NANO_HOME/$name" ]; then
+      mv "$LEGACY_CONFIG/$name" "$NANO_HOME/$name"
+    fi
+  done
+  if [ -e "$HOME/.nanocode_history" ] && [ ! -e "$NANO_HOME/history" ]; then
+    mv "$HOME/.nanocode_history" "$NANO_HOME/history"
+  fi
+  rmdir "$LEGACY_CONFIG/skills" "$LEGACY_CONFIG" 2>/dev/null || true
+fi
+
+mkdir -p "$NANO_HOME/skills"
+MEMORY="$NANO_HOME/NANOCODE.md"
+if [ ! -f "$MEMORY" ]; then
   NAME=""
-  if [ -r /dev/tty ] && { true < /dev/tty; } 2>/dev/null; then  # works even with: curl ... | sh
+  if [ -r /dev/tty ] && { true < /dev/tty; } 2>/dev/null; then
     printf '%s?%s Your name, so nanocode can greet you %s(Enter to skip)%s: ' "$YELLOW" "$RESET" "$DIM" "$RESET"
     read -r NAME < /dev/tty || NAME=""
   fi
   {
     echo "# Memory"
     echo ""
-    echo "Things nanocode should always know about you, in every project. Edit freely."
-    echo "Project-only notes go in <project>/.nanocode/memory.md (type '# note' in nanocode)."
+    echo "What nanocode should always know about you, in every project. Edit freely."
+    echo "Project notes go in <project>/.nanocode/memory.md (type '# note' in nanocode)."
     echo ""
     echo "## About me"
     if [ -n "$NAME" ]; then echo "- Name: $NAME"; else echo "<!-- - Name: your name -->"; fi
@@ -187,19 +237,21 @@ else
   step "Created memory ${DIM}($MEMORY)${RESET}"
 fi
 
-# --- Done --------------------------------------------------------------------
+"$BIN/nanocode" --version >/dev/null 2>&1 || die "nanocode doesn't start; run $BIN/nanocode --version to see why"
 
 say ""
-say "${GREEN}${BOLD}nanocode is installed.${RESET}"
-if [ -n "$PATH_NOTE" ]; then
-  say "Open a new terminal (or run: ${BOLD}export PATH=\"$BIN_DIR:\$PATH\"${RESET}), then:"
+say "${GREEN}${BOLD}nanocode $("$BIN/nanocode" --version | cut -d' ' -f2) is installed.${RESET}"
+if [ -n "$LINKED" ]; then
+  say "Run it from any project folder:  ${BOLD}cd your-project && nanocode${RESET}"
 else
-  say "Run it from any project folder:"
+  say "Open a new terminal (or run: ${BOLD}export PATH=\"$BIN:\$PATH\"${RESET}), then:  ${BOLD}nanocode${RESET}"
 fi
-say "  ${BOLD}cd your-project && nanocode${RESET}"
 say ""
-say "${DIM}Claude Code SDK mode: log in once with Claude Code (run 'claude', then /login).${RESET}"
+say "${DIM}The first start asks for a provider: Claude subscription, OpenRouter, or Ollama (local).${RESET}"
+say "${DIM}Later: nanocode setup · nanocode doctor · nanocode update · nanocode uninstall${RESET}"
 if ! command -v claude >/dev/null 2>&1; then
-  say "${DIM}  Claude Code isn't installed: curl -fsSL https://claude.ai/install.sh | bash${RESET}"
+  say "${DIM}  Claude subscription needs Claude Code: curl -fsSL https://claude.ai/install.sh | bash${RESET}"
 fi
-say "${DIM}OpenRouter mode: export OPENROUTER_API_KEY=sk-or-...${RESET}"
+if ! command -v ollama >/dev/null 2>&1; then
+  say "${DIM}  Local models need Ollama: https://ollama.com/download${RESET}"
+fi
