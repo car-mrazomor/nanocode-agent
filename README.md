@@ -91,17 +91,26 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `@path` | Attach a file to your message |
 | `/<skill> [task]` | Run a skill, e.g. `/review app.py` |
 
+**The interface:** nanocode opens on a start screen, with the logo and the prompt in the middle. Once you send something, it switches to the chat view:
+
+- **Transcript:** your messages appear as blocks with an accent bar, tool calls as short lines (`→ Read`, `← Edit` with a diff, `$ Bash` with its output), and each reply ends with a `▣` line showing time, model, tokens and cost.
+- **Prompt panel:** at the bottom, with the mode (Ask or Auto), the model and the provider. Below it are the folder and git branch, and while a reply runs, a spinner and `esc interrupt`.
+- **Sidebar:** on the right in wide terminals (110+ columns). It shows the session title, context and cost, modified files, background shells and REA.
+- **Command palette:** `ctrl+p` opens a searchable list of every action and command.
+
 **Keys:**
 
 | Key | Action |
 |---|---|
 | Enter | Send |
 | Shift+Enter, Alt+Enter, Ctrl+J | New line |
+| Ctrl+P | Command palette |
+| Ctrl+X then N / L / M / B / C / U / H / Q | New session / sessions / models / sidebar / compact / undo / help / quit |
+| Esc Esc | Stop the reply (press twice) |
+| Ctrl+C | Stop the reply, clear the input, or quit |
 | Ctrl+U (Cmd+Backspace on macOS) | Delete everything before the cursor |
 | Ctrl+← →, Alt/Option+← → | Jump by word |
-| Home / End, Ctrl+A / Ctrl+E (Cmd+← → on macOS) | Start / end of line |
-| Esc | Stop the reply |
-| Ctrl+C | Stop the reply, clear the input, or quit |
+| Home / End, Ctrl+A / Ctrl+E | Start / end of line |
 | ↑ / ↓ | History |
 | PageUp / PageDown | Scroll |
 | Tab | Complete |

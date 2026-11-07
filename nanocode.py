@@ -53,6 +53,26 @@ BLUE, CYAN, GREEN, YELLOW, RED = "\033[34m", "\033[36m", "\033[32m", "\033[33m",
 USER_BG = "\033[48;5;237m"
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
+# Grayish theme with accents from the logo gradient (cyan → blue → violet → pink), toned down.
+THEME = {
+    "bg": "#141518", "panel": "#1e2024", "panel2": "#26292e", "border": "#34373d",
+    "text": "#d5d6da", "muted": "#80838c", "faint": "#555860",
+    "accent": "#7fa7c9", "accent2": "#9d8fc4", "pink": "#c08aae", "cyan": "#78b8c4",
+    "success": "#8fb48b", "error": "#d07f7f", "warning": "#cfad73",
+}
+
+
+def _rgb(color):
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def fg(name):
+    return "\033[38;2;{};{};{}m".format(*_rgb(THEME.get(name, name)))
+
+
+def bg(name):
+    return "\033[48;2;{};{};{}m".format(*_rgb(THEME.get(name, name)))
+
 MAX_TOOL_OUTPUT = 30_000
 MAX_OUTPUT_CHARS = 400_000
 READ_LIMIT = 2000
@@ -284,6 +304,10 @@ class State:
         self.output_window = None
         self.input_box = None
         self.rea = None
+        self.home = True  # the start screen, until the first message or command
+        self.sidebar_on = True
+        self.dialog = None
+        self.interrupt_armed = 0.0
         self.activity = []  # (tool, preview, is_error) this session, for /recap
         self.changed = {}  # path -> [lines added, lines removed] this session
         self.shells = {}  # name -> shell info, see Shells
@@ -316,17 +340,30 @@ def out(text="", end="\n"):
     invalidate()
 
 
+def messages_width():
+    """Width of the transcript column (terminal minus sidebar and padding)."""
+    if st.app is None or not st.app.is_running:
+        return 80
+    columns = st.app.output.get_size().columns
+    if sidebar_visible():
+        columns -= SIDEBAR_WIDTH
+    return max(20, columns - 4)
+
+
 def render_markdown(text):
-    width = 80
-    if st.app is not None and st.app.is_running:
-        width = max(20, st.app.output.get_size().columns - 2)
+    width = max(20, messages_width() - 3)
+    from rich.theme import Theme
     buf = io.StringIO()
-    Console(file=buf, force_terminal=True, color_system="256", width=width).print(Markdown(text))
+    theme = Theme({"markdown.code": f"bold {THEME['cyan']}", "markdown.link": THEME["accent"],
+                   "markdown.h1": f"bold {THEME['text']}", "markdown.h2": f"bold {THEME['text']}",
+                   "markdown.block_quote": THEME["muted"], "markdown.item.bullet": THEME["accent2"]})
+    Console(file=buf, force_terminal=True, color_system="truecolor", width=width, theme=theme).print(
+        Markdown(text, code_theme="github-dark"))
     return buf.getvalue().rstrip("\n")
 
 
 def render_live():
-    st.live = f"\n{CYAN}⏺{RESET} {render_markdown(st.live_md)}"
+    st.live = "\n" + "\n".join("   " + line for line in render_markdown(st.live_md).split("\n"))
     st.live_rendered_at = time.monotonic()
     invalidate()
 
@@ -409,9 +446,9 @@ def show_usage(tokens_in, tokens_out, cost, seconds):
     st.usage["output"] += tokens_out
     st.usage["cost"] += cost or 0
     verb = random.choice(DONE_VERBS)
-    parts = [f"✻ {verb} for {fmt_duration(seconds)}", f"{fmt_tokens(tokens_in)} in", f"{fmt_tokens(tokens_out)} out",
-             fmt_cost(cost), f"done {time.strftime('%H:%M')}"]
-    out(f"\n  {DIM}{' · '.join(parts)}{RESET}")
+    parts = [f"{verb} for {fmt_duration(seconds)}", pretty_model(st.model), f"{fmt_tokens(tokens_in)} in",
+             f"{fmt_tokens(tokens_out)} out", fmt_cost(cost), time.strftime('%H:%M')]
+    out(f"\n   {fg('accent2')}▣{RESET} {fg('muted')}{' · '.join(parts)}{RESET}")
 
 
 # --- Permissions ---
@@ -438,9 +475,10 @@ async def allowed(tool_name, preview):
         out(f"  {DIM}⎿  denied {tool_name} ({reason}){RESET}")
         return False
     stream_end()
-    warn = f"  {RED}{BOLD}⚠ this command looks destructive{RESET}\n" if dangerous else ""
-    options = "[y]es / [n]o" if dangerous else "[y]es / [n]o / [a]lways"
-    out(f"{warn}  {YELLOW}? Allow {BOLD}{tool_name}{RESET}{YELLOW}({preview[:120]}){RESET}  {DIM}{options}{RESET}")
+    warn = f"   {fg('error')}{BOLD}⚠ this looks destructive{RESET}\n" if dangerous else ""
+    options = "y allow · n deny" if dangerous else "y allow · a always · n deny"
+    out(f"\n{warn}   {fg('warning')}△ Permission{RESET} {fg('text')}{tool_name}{RESET} "
+        f"{fg('muted')}{preview[:120]}{RESET}\n     {fg('faint')}{options}{RESET}")
     st.pending_permission = asyncio.get_running_loop().create_future()
     try:
         answer = await st.pending_permission
@@ -449,7 +487,7 @@ async def allowed(tool_name, preview):
     if answer == "a" and not dangerous:
         st.always_allow.add(tool_name)
     ok = answer in ("y", "a")
-    out(f"  {DIM}⎿  {'allowed' if ok else 'denied'}{RESET}")
+    out(f"     {fg('success') if ok else fg('error')}{'allowed' if ok else 'denied'}{RESET}")
     return ok
 
 
@@ -490,15 +528,20 @@ def show_tool_call(name, args):
     preview = preview.replace("\n", " ")
     if len(preview) > 70:
         preview = preview[:67] + "…"
-    out(f"\n{GREEN}⏺ {name.replace('_', ' ').capitalize()}{RESET}({DIM}{preview}{RESET})")
+    icon = TOOL_ICONS.get(name, "⚙")
+    out(f"\n   {fg('muted')}{icon} {fg('text')}{name.replace('_', ' ').capitalize()}{RESET} {fg('muted')}{preview}{RESET}")
+
+
+TOOL_ICONS = {"read": "→", "write": "←", "edit": "←", "glob": "✱", "grep": "✱", "bash": "$", "shell": "$",
+              "remember": "◆", "skill": "◈", "save_skill": "◈", "rea_search": "%", "rea_schema": "%", "rea_call": "%"}
 
 
 def show_tool_result(text, is_error):
     lines = text.strip().split("\n") if text.strip() else ["(no output)"]
     first = lines[0][:90]
     more = f" … +{len(lines) - 1} lines" if len(lines) > 1 else ""
-    color = RED if is_error else DIM
-    out(f"  {color}⎿  {first}{more}{RESET}")
+    color = fg("error") if is_error else fg("faint")
+    out(f"     {color}{first}{more}{RESET}")
 
 
 async def run_tool(name, args):
@@ -880,9 +923,9 @@ async def tool_bash(args):
     def display(line):
         nonlocal shown
         if shown < 80:
-            out(f"  {DIM}│ {line.rstrip()[:200]}{RESET}")
+            out(f"     {fg('border')}│{RESET} {fg('muted')}{line.rstrip()[:200]}{RESET}")
         elif shown == 80:
-            out(f"  {DIM}│ … (more output, hidden here){RESET}")
+            out(f"     {fg('border')}│{RESET} {fg('faint')}… more output, hidden here{RESET}")
         shown += 1
 
     async def pump():
@@ -2447,6 +2490,22 @@ async def refresh_sdk_prompt():
         st.client = await make_client(resume=st.session.get("sdk_session_id"))
 
 
+def user_block(text):
+    """Your message: an accent bar on the left, on a raised panel."""
+    width = messages_width()
+    inner = max(10, width - 1)
+    bar, panel = f"{fg('accent')}┃{RESET}", bg("panel")
+    body = []
+    for line in text.split("\n"):
+        indent = " " * (len(line) - len(line.lstrip(" ")))
+        chunks = textwrap.wrap(line.strip(" "), max(10, inner - 4 - len(indent)), replace_whitespace=False)
+        body += [indent + chunks[0]] + chunks[1:] if chunks else [""]
+    rows = [f"{bar}{panel}{' ' * inner}{RESET}"]
+    rows += [f"{bar}{panel}  {fg('text')}{line.ljust(inner - 4)}  {RESET}" for line in body]
+    rows.append(f"{bar}{panel}{' ' * inner}{RESET}")
+    return "\n" + "\n".join(rows)
+
+
 def short_title(text, limit=60):
     line = " ".join(text.split("\n")[0].split())
     if len(line) <= limit:
@@ -2458,9 +2517,7 @@ def short_title(text, limit=60):
 async def send(text, display=None):
     """Sends a user message to the model and runs the turn."""
     if display is not None and not st.headless:
-        width = st.app.output.get_size().columns if st.app is not None and st.app.is_running else 80
-        for i, line in enumerate(display.split("\n")):
-            out(f"{USER_BG}{((' ❯ ' if i == 0 else '   ') + line).ljust(width)}{RESET}")
+        out(user_block(display))
     if not st.session.get("title"):
         st.session["title"] = short_title(display or text)
     st.turn_errors = 0
@@ -2602,6 +2659,30 @@ def banner():
     return "\n" + "\n".join(rows) + "\n"
 
 
+SIDEBAR_WIDTH = 42
+PLACEHOLDERS = ["Fix a TODO in the codebase", "What is the tech stack of this project?", "Fix broken tests",
+                "Explain how this repo is structured", "Add tests for the last change"]
+LOGO_HEX = ["#6fb6c6", "#6aa9cc", "#6f9ccb", "#7a92c8", "#8a8cc4", "#9b88bf", "#ad87b6", "#bf89ae"]
+
+
+def sidebar_visible():
+    if st.app is None or not st.app.is_running or not st.sidebar_on or st.home:
+        return False
+    return st.app.output.get_size().columns >= 110
+
+
+def start_input(text):
+    """Runs a prompt line (message or /command) in the background, like pressing Enter."""
+    if st.task and not st.task.done():
+        out(f"   {fg('muted')}still working; press Esc twice to stop{RESET}")
+        return False
+    st.home = False
+    st.scroll = 0
+    st.task_started = time.time()
+    st.task = asyncio.ensure_future(run_input(text))
+    return True
+
+
 def build_app():
     from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
     from prompt_toolkit.keys import Keys
@@ -2617,11 +2698,16 @@ def build_app():
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
+    from prompt_toolkit.layout import (ConditionalContainer, DynamicContainer, Float, FloatContainer, HSplit, Layout,
+                                       VSplit, Window, WindowAlign)
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.layout.menus import CompletionsMenu
+    from prompt_toolkit.layout.processors import Processor, Transformation
+    from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import TextArea
+
+    T = THEME
 
     class NanoCompleter(Completer):
         def get_completions(self, document, complete_event):
@@ -2666,59 +2752,291 @@ def build_app():
                     shown = path + "/" if os.path.isdir(path) else path
                     yield Completion("@" + shown, start_position=-len(word), display=shown)
 
+    class Placeholder(Processor):
+        def apply_transformation(self, ti):
+            if ti.document.text == "" and ti.lineno == 0:
+                hint = PLACEHOLDERS[int(st.session.get("created", 0)) % len(PLACEHOLDERS)]
+                return Transformation([("class:placeholder", f'Ask anything... "{hint}"')])
+            return Transformation(ti.fragments)
+
     try:
         history_file().parent.mkdir(parents=True, exist_ok=True)
         history = FileHistory(str(history_file()))
     except OSError:
         history = InMemoryHistory()
 
+    # --- transcript ---
     st.output_window = Window(
         FormattedTextControl(lambda: ANSI(visible_output()),
                              get_cursor_position=lambda: Point(x=0, y=visible_output().count("\n")),
                              show_cursor=False),
-        wrap_lines=True,
+        wrap_lines=True, style="class:transcript",
     )
-    st.input_box = TextArea(prompt="❯ ", multiline=True, height=Dimension(min=1, max=10), dont_extend_height=True,
-                            completer=NanoCompleter(), complete_while_typing=True, history=history)
+
+    # --- prompt panel ---
+    st.input_box = TextArea(multiline=True, height=Dimension(min=1, max=10), dont_extend_height=True,
+                            completer=NanoCompleter(), complete_while_typing=True, history=history,
+                            style="class:panel", input_processors=[Placeholder()])
     st.input_box.accept_handler = on_enter
 
-    def context_info():
-        if st.backend == "sdk" or not st.messages or not st.ctx_budget:
-            return ""
-        pct = st.ctx_tokens * 100 // st.ctx_budget
-        return f" ctx {min(pct, 100)}%{' (/compact)' if pct >= 70 else ''} ·"
+    def meta_row():
+        mode = ("Auto", "class:mode.auto") if st.auto_approve else ("Ask", "class:mode")
+        return [(mode[1], mode[0]), ("class:panel", "  "), ("class:panel.text", pretty_model(st.model)),
+                ("class:panel", "  "), ("class:panel.muted", provider_label())]
 
-    def status_text():
-        parts = []
+    def bar_style():
         if st.pending_permission is not None:
-            parts.append(("#e5c07b", " waiting for permission: y / n / a "))
-        elif st.task and not st.task.done():
+            return "class:bar.warning"
+        return "class:bar.busy" if st.task and not st.task.done() else "class:bar"
+
+    pad = lambda width: Window(width=width, style="class:panel")  # noqa: E731
+    prompt_panel = HSplit([
+        VSplit([
+            Window(width=1, char="┃", style=bar_style),
+            pad(2),
+            HSplit([Window(height=1, style="class:panel"), st.input_box, Window(height=1, style="class:panel"),
+                    Window(FormattedTextControl(meta_row), height=1, style="class:panel")]),
+            pad(2),
+        ]),
+        VSplit([Window(width=1, char="╹", style=bar_style), Window(height=1, char="▀", style="class:panel.edge")]),
+    ])
+
+    def footer_left():
+        if st.pending_permission is not None:
+            return [("class:warning", " △ "), ("class:muted", "waiting for permission: y allow · a always · n deny")]
+        if st.task and not st.task.done():
             frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 10) % 10]
-            parts.append(("#61afef", f" {frame} working… {time.time() - st.task_started:.0f}s "))
-            parts.append(("#888888", "(esc to stop) "))
+            armed = st.interrupt_armed and time.time() - st.interrupt_armed < 2
+            return [("class:accent", f" {frame} "), ("class:muted", f"{fmt_duration(time.time() - st.task_started)}  "),
+                    ("class:warning" if armed else "class:muted", "esc again to interrupt" if armed else "esc interrupt")]
+        branch = git_branch()
+        right = sum(len(text) for _, text in footer_right())
+        total = st.app.output.get_size().columns - (SIDEBAR_WIDTH if sidebar_visible() else 0) - 4
+        room = max(8, total - right - len(branch) - 5)
+        return [("class:muted", f" {fit_left(tilde(os.getcwd()), room)}"), ("class:faint", f"  {branch}" if branch else "")]
+
+    def footer_right():
+        parts = []
         if st.scroll:
-            parts.append(("#888888", f" ↑ scrolled {st.scroll} lines (PageDown) "))
-        if st.auto_approve:
-            parts.append(("#e5c07b", " auto-approve ·"))
-        routed = f" → {st.routed_model}" if st.backend == "api" and st.routed_model and \
-            (st.model or "").startswith("openrouter/") else ""
-        parts.append(("#888888", f"{context_info()} {st.model}{routed}"))
+            parts.append(("class:muted", f"↑{st.scroll} pgdn  "))
+        if st.backend != "sdk" and st.ctx_budget and st.messages:
+            pct = min(100, st.ctx_tokens * 100 // st.ctx_budget)
+            parts.append(("class:warning" if pct >= 70 else "class:muted", f"{pct}% context  "))
+        if st.usage["input"] or st.usage["output"]:
+            parts.append(("class:muted", f"{fmt_cost(st.usage['cost'])}  "))
+        parts += [("class:text", "ctrl+p"), ("class:muted", " commands ")]
         return parts
 
+    footer = VSplit([Window(FormattedTextControl(footer_left), height=1),
+                     Window(FormattedTextControl(footer_right), height=1, align=WindowAlign.RIGHT)])
+
+    # --- sidebar ---
+    def sidebar_text():
+        width = SIDEBAR_WIDTH - 4
+        lines = []
+        title = st.session.get("title") or "New session"
+        for chunk in textwrap.wrap(title, width)[:3]:
+            lines += [("class:sidebar.title", chunk), ("", "\n")]
+        lines.append(("", "\n"))
+        lines += [("class:sidebar.heading", "Context"), ("", "\n")]
+        tokens = st.usage["input"] + st.usage["output"]
+        lines += [("class:sidebar.text", f"{tokens:,} tokens"), ("", "\n")]
+        if st.backend != "sdk" and st.ctx_budget:
+            lines += [("class:sidebar.muted", f"{min(100, st.ctx_tokens * 100 // st.ctx_budget)}% used"), ("", "\n")]
+        lines += [("class:sidebar.muted", f"{fmt_cost(st.usage['cost'])} spent"), ("", "\n"), ("", "\n")]
+        if st.changed:
+            lines += [("class:sidebar.heading", "Modified Files"), ("", "\n")]
+            for path, (added, removed) in list(st.changed.items())[-12:]:
+                name = path if len(path) <= width - 12 else "…" + path[-(width - 13):]
+                lines += [("class:sidebar.text", name), ("class:success", f" +{added}"),
+                          ("class:error", f" -{removed}"), ("", "\n")]
+            lines.append(("", "\n"))
+        if st.shells:
+            lines += [("class:sidebar.heading", "Shells"), ("", "\n")]
+            for name, info in st.shells.items():
+                lines += [("class:accent", "● "), ("class:sidebar.text", name),
+                          ("class:sidebar.muted", f"  {info['command'][:width - len(name) - 4]}"), ("", "\n")]
+            lines.append(("", "\n"))
+        if rea_runtime() is not None:
+            state = "on" if rea_enabled() else "off"
+            lines += [("class:sidebar.heading", "REA"), ("", "\n"),
+                      ("class:sidebar.muted", f"{state} · {'running' if st.rea and st.rea.alive() else 'idle'}"),
+                      ("", "\n"), ("", "\n")]
+        return lines
+
+    def sidebar_footer():
+        return [("class:sidebar.muted", fit_left(tilde(os.getcwd()), SIDEBAR_WIDTH - 4)), ("", "\n"),
+                ("class:accent", "● "), ("class:sidebar.text", "nanocode"), ("class:sidebar.muted", f" v{__version__}")]
+
+    sidebar = ConditionalContainer(
+        VSplit([Window(width=2, style="class:sidebar"),
+                HSplit([Window(height=1, style="class:sidebar"),
+                        Window(FormattedTextControl(sidebar_text), style="class:sidebar", wrap_lines=True),
+                        Window(FormattedTextControl(sidebar_footer), height=2, style="class:sidebar"),
+                        Window(height=1, style="class:sidebar")]),
+                Window(width=2, style="class:sidebar")], width=SIDEBAR_WIDTH),
+        filter=Condition(sidebar_visible))
+
+    # --- home screen: logo and prompt in the middle ---
+    def logo_fragments():
+        fragments = []
+        for row in LOGO:
+            for i, ch in enumerate(row):
+                color = LOGO_HEX[i * len(LOGO_HEX) // len(row)]
+                fragments.append((f"fg:{color} bold" if ch != " " else "", ch))
+            fragments.append(("", "\n"))
+        return fragments
+
+    def home_hint():
+        name = user_name()
+        hello = f"Welcome back, {name}" if name else "Welcome to nanocode"
+        return [("class:muted", f"{hello} · "), ("class:text", "ctrl+p"), ("class:muted", " commands · "),
+                ("class:text", "/"), ("class:muted", " commands · "), ("class:text", "@"), ("class:muted", " files")]
+
+    def home_footer():
+        return [("class:muted", f" {fit_left(tilde(os.getcwd()), st.app.output.get_size().columns - 14)}")]
+
+    home = HSplit([
+        Window(),
+        Window(FormattedTextControl(logo_fragments), height=len(LOGO), align=WindowAlign.CENTER),
+        Window(height=2),
+        VSplit([Window(), HSplit([prompt_panel], width=Dimension(max=75, preferred=75)), Window()]),
+        Window(height=1),
+        Window(FormattedTextControl(home_hint), height=1, align=WindowAlign.CENTER),
+        Window(),
+        VSplit([Window(FormattedTextControl(home_footer), height=1),
+                Window(FormattedTextControl(lambda: [("class:muted", f"v{__version__} ")]), height=1,
+                       align=WindowAlign.RIGHT)]),
+    ])
+
+    session = VSplit([
+        HSplit([
+            VSplit([Window(width=2), st.output_window, Window(width=2)]),
+            Window(height=1),
+            VSplit([Window(width=2), HSplit([prompt_panel, footer]), Window(width=2)]),
+        ]),
+        sidebar,
+    ])
+
+    # --- dialogs: command palette, models, sessions, providers ---
+    class SearchHint(Processor):
+        def apply_transformation(self, ti):
+            if ti.document.text == "":
+                return Transformation(list(ti.fragments) + [("class:dialog.muted", "Search")])
+            return Transformation(ti.fragments)
+
+    dialog_filter = TextArea(height=1, multiline=False, style="class:dialog.input", prompt="  ",
+                             input_processors=[SearchHint()])
+    dialog_open = Condition(lambda: st.dialog is not None)
+
+    def dialog_items():
+        if st.dialog is None:
+            return []
+        query = dialog_filter.text.lower().strip()
+        items = [it for it in st.dialog["items"] if not query or all(w in (it[0] + " " + it[1]).lower()
+                                                                     for w in query.split())]
+        st.dialog["index"] = min(st.dialog["index"], max(0, len(items) - 1))
+        return items
+
+    def dialog_list():
+        items = dialog_items()
+        if not items:
+            return [("class:dialog.muted", "  no matches")]
+        start = max(0, st.dialog["index"] - 11)
+        fragments = []
+        for i, (label, meta, _) in enumerate(items[start:start + 12], start):
+            selected = i == st.dialog["index"]
+            style = "class:dialog.selected" if selected else "class:dialog.text"
+            width = 56
+            text = f"  {label}"
+            gap = max(1, width - len(text) - len(meta) - 2)
+            fragments += [(style, text + " " * gap), (style + (" class:dialog.meta" if not selected else ""), meta + "  "),
+                          ("", "\n")]
+        return fragments
+
+    def dialog_title():
+        if st.dialog is None:
+            return []
+        return [("class:dialog.title", f"  {st.dialog['title']}"), ("class:dialog.muted", "   esc close")]
+
+    dialog = ConditionalContainer(
+        HSplit([Window(height=1, style="class:dialog"),
+                Window(FormattedTextControl(dialog_title), height=1, style="class:dialog"),
+                Window(height=1, style="class:dialog"),
+                dialog_filter,
+                Window(height=1, style="class:dialog"),
+                Window(FormattedTextControl(dialog_list), height=Dimension(max=12), style="class:dialog"),
+                Window(height=1, style="class:dialog")], width=60),
+        filter=dialog_open)
+
+    def open_dialog(title, items):
+        st.dialog = {"title": title, "items": items, "index": 0}
+        dialog_filter.text = ""
+        st.app.layout.focus(dialog_filter)
+
+    def close_dialog():
+        st.dialog = None
+        st.app.layout.focus(st.input_box)
+
+    def run_command(text):
+        return lambda: start_input(text)
+
+    def models_dialog():
+        if st.backend == "ollama":
+            refresh_ollama_models()
+        items = [(name, ("● " if name == st.model else "") + desc, run_command(f"/model {name}"))
+                 for name, desc in model_choices().items()]
+        open_dialog("Switch model", items)
+
+    def sessions_dialog():
+        items = [(s["title"], time_ago(s["updated"]), run_command(f"/resume {s['id']}")) for s in list_sessions()]
+        open_dialog("Sessions", items or [("no saved chats yet", "", lambda: None)])
+
+    def providers_dialog():
+        items = []
+        for name, (_, label, desc) in PROVIDERS.items():
+            current = "● " if name == st.config.get("provider") else ""
+            items.append((label, current + (provider_status(name) or desc)[:30], run_command(f"/provider {name}")))
+        open_dialog("Switch provider", items)
+
+    def palette():
+        actions = [
+            ("New session", "ctrl+x n", run_command("/c")),
+            ("Switch session", "ctrl+x l", sessions_dialog),
+            ("Switch model", "ctrl+x m", models_dialog),
+            ("Switch provider", "", providers_dialog),
+            ("Toggle sidebar", "ctrl+x b", toggle_sidebar),
+            ("Compact session", "ctrl+x c", run_command("/compact")),
+            ("Undo last file change", "ctrl+x u", run_command("/undo")),
+        ]
+        actions += [(f"{cmd}  {desc}", "", run_command(cmd)) for cmd, desc in COMMANDS.items()
+                    if cmd not in ("/c", "/compact", "/undo", "/model", "/provider", "/resume")]
+        actions += [(f"/{name}  {info['description'][:40]}", "skill", run_command(f"/{name}"))
+                    for name, info in list_skills().items()]
+        actions.append(("Exit", "ctrl+x q", lambda: st.app.exit()))
+        open_dialog("Commands", actions)
+
+    def toggle_sidebar():
+        st.sidebar_on = not st.sidebar_on
+        invalidate()
+
+    # --- keys ---
     kb = KeyBindings()
     waiting = Condition(lambda: st.pending_permission is not None)
     busy = Condition(lambda: st.task is not None and not st.task.done())
+    no_dialog = ~dialog_open
 
     def interrupt():
+        st.interrupt_armed = 0
         if st.pending_permission is not None:
             answer_permission("n")
         elif st.backend == "sdk" and st.client:
             asyncio.ensure_future(st.client.interrupt())
         elif st.task:
             st.task.cancel()
-        out(f"  {RED}⎿  Interrupted{RESET}")
+        out(f"   {fg('error')}interrupted{RESET}")
 
-    @kb.add("c-c")
+    @kb.add("c-c", filter=no_dialog)
     def _(event):
         if busy():
             interrupt()
@@ -2727,51 +3045,57 @@ def build_app():
         else:
             event.app.exit()
 
-    @kb.add("c-d")
+    @kb.add("c-d", filter=no_dialog)
     def _(event):
         if not event.current_buffer.text:
             event.app.exit()
 
-    @kb.add("enter", filter=has_completions & completion_is_selected)
+    @kb.add("enter", filter=has_completions & completion_is_selected & no_dialog)
     def _(event):
         buff = event.current_buffer
         buff.apply_completion(buff.complete_state.current_completion)
 
-    @kb.add("enter", filter=~(has_completions & completion_is_selected) & ~waiting)
+    @kb.add("enter", filter=~(has_completions & completion_is_selected) & ~waiting & no_dialog)
     def _(event):
         event.current_buffer.validate_and_handle()
 
-    @kb.add("escape", "enter")
-    @kb.add("c-j")
+    @kb.add("escape", "enter", filter=no_dialog)
+    @kb.add("c-j", filter=no_dialog)
     def _(event):
         event.current_buffer.insert_text("\n")
 
-    @kb.add("c-u")
+    @kb.add("c-u", filter=no_dialog)
     def _(event):
         buff = event.current_buffer
         buff.delete_before_cursor(len(buff.document.text_before_cursor))
 
-    @kb.add("escape", "left")
+    @kb.add("escape", "left", filter=no_dialog)
     def _(event):
         buff = event.current_buffer
         buff.cursor_position += buff.document.find_previous_word_beginning(count=1) or -buff.cursor_position
 
-    @kb.add("escape", "right")
+    @kb.add("escape", "right", filter=no_dialog)
     def _(event):
         buff = event.current_buffer
         buff.cursor_position += buff.document.find_next_word_ending(count=1) or len(buff.document.text_after_cursor)
 
-    @kb.add("escape")
+    @kb.add("escape", filter=no_dialog)
     def _(event):
         buff = event.current_buffer
         if buff.complete_state:
             buff.cancel_completion()
-        elif busy() or st.pending_permission is not None:
+        elif st.pending_permission is not None:
             interrupt()
+        elif busy():
+            if st.interrupt_armed and time.time() - st.interrupt_armed < 2:
+                interrupt()
+            else:
+                st.interrupt_armed = time.time()
+                invalidate()
 
-    @kb.add("y", filter=waiting)
-    @kb.add("n", filter=waiting)
-    @kb.add("a", filter=waiting)
+    @kb.add("y", filter=waiting & no_dialog)
+    @kb.add("n", filter=waiting & no_dialog)
+    @kb.add("a", filter=waiting & no_dialog)
     def _(event):
         answer_permission(event.key_sequence[0].data)
 
@@ -2779,27 +3103,96 @@ def build_app():
         info = st.output_window.render_info
         return max(1, info.window_height - 2) if info else 10
 
-    @kb.add("pageup")
+    @kb.add("pageup", filter=no_dialog)
     def _(event):
         st.scroll = min(st.scroll + page(), (st.output + st.live).count("\n"))
         invalidate()
 
-    @kb.add("pagedown")
+    @kb.add("pagedown", filter=no_dialog)
     def _(event):
         st.scroll = max(0, st.scroll - page())
         invalidate()
 
+    @kb.add("c-p", filter=no_dialog)
+    def _(event):
+        palette()
+
+    leader = {"n": run_command("/c"), "l": sessions_dialog, "m": models_dialog, "b": toggle_sidebar,
+              "c": run_command("/compact"), "u": run_command("/undo"), "h": run_command("/help"),
+              "q": lambda: st.app.exit()}
+    for key, action in leader.items():
+        kb.add("c-x", key, filter=no_dialog)(lambda event, action=action: action())
+
+    @kb.add("up", filter=dialog_open)
+    @kb.add("c-p", filter=dialog_open)
+    def _(event):
+        st.dialog["index"] = max(0, st.dialog["index"] - 1)
+
+    @kb.add("down", filter=dialog_open)
+    @kb.add("c-n", filter=dialog_open)
+    def _(event):
+        st.dialog["index"] = min(len(dialog_items()) - 1, st.dialog["index"] + 1)
+
+    @kb.add("enter", filter=dialog_open)
+    def _(event):
+        items = dialog_items()
+        chosen = items[st.dialog["index"]][2] if items else None
+        close_dialog()
+        if chosen:
+            chosen()
+
+    @kb.add("escape", filter=dialog_open, eager=True)
+    @kb.add("c-c", filter=dialog_open)
+    def _(event):
+        close_dialog()
+
+    style = Style.from_dict({
+        "root": f"bg:{T['bg']} fg:{T['text']}",
+        "transcript": f"bg:{T['bg']}",
+        "panel": f"bg:{T['panel']} fg:{T['text']}",
+        "panel.text": f"bg:{T['panel']} fg:{T['text']}",
+        "panel.muted": f"bg:{T['panel']} fg:{T['muted']}",
+        "panel.edge": f"bg:{T['bg']} fg:{T['panel']}",
+        "placeholder": f"fg:{T['faint']}",
+        "mode": f"bg:{T['panel']} fg:{T['accent']} bold",
+        "mode.auto": f"bg:{T['panel']} fg:{T['warning']} bold",
+        "bar": f"bg:{T['bg']} fg:{T['accent']}",
+        "bar.busy": f"bg:{T['bg']} fg:{T['accent2']}",
+        "bar.warning": f"bg:{T['bg']} fg:{T['warning']}",
+        "text": f"fg:{T['text']}", "muted": f"fg:{T['muted']}", "faint": f"fg:{T['faint']}",
+        "accent": f"fg:{T['accent']}", "warning": f"fg:{T['warning']}",
+        "success": f"fg:{T['success']}", "error": f"fg:{T['error']}",
+        "sidebar": f"bg:{T['panel']}",
+        "sidebar.title": f"bg:{T['panel']} fg:{T['text']} bold",
+        "sidebar.heading": f"bg:{T['panel']} fg:{T['text']} bold",
+        "sidebar.text": f"bg:{T['panel']} fg:{T['text']}",
+        "sidebar.muted": f"bg:{T['panel']} fg:{T['muted']}",
+        "dialog": f"bg:{T['panel2']}",
+        "dialog.title": f"bg:{T['panel2']} fg:{T['text']} bold",
+        "dialog.muted": f"bg:{T['panel2']} fg:{T['muted']}",
+        "dialog.text": f"bg:{T['panel2']} fg:{T['text']}",
+        "dialog.meta": f"fg:{T['muted']}",
+        "dialog.selected": f"bg:{T['accent']} fg:{T['bg']}",
+        "dialog.input": f"bg:{T['panel2']} fg:{T['text']}",
+        "completion-menu": f"bg:{T['panel2']} fg:{T['text']}",
+        "completion-menu.completion.current": f"bg:{T['accent']} fg:{T['bg']}",
+        "completion-menu.meta.completion": f"bg:{T['panel2']} fg:{T['muted']}",
+        "completion-menu.meta.completion.current": f"bg:{T['accent']} fg:{T['bg']}",
+        "scrollbar.background": f"bg:{T['panel2']}", "scrollbar.button": f"bg:{T['border']}",
+    })
+
     app = Application(
         layout=Layout(
             FloatContainer(
-                content=HSplit([st.output_window, Window(height=1, char="─", style="#444444"), st.input_box,
-                                Window(height=1, char="─", style="#444444"),
-                                Window(FormattedTextControl(status_text), height=1)]),
-                floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=8, scroll_offset=1))],
+                content=HSplit([DynamicContainer(lambda: home if st.home else session)], style="class:root"),
+                floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=8, scroll_offset=1)),
+                        Float(content=dialog, top=3)],
             ),
             focused_element=st.input_box,
         ),
         key_bindings=kb,
+        style=style,
+        color_depth=color_depth(),
         full_screen=True,
         refresh_interval=0.1,
     )
@@ -2809,6 +3202,33 @@ def build_app():
     return app
 
 
+def color_depth():
+    from prompt_toolkit.output.color_depth import ColorDepth
+    if os.environ.get("PROMPT_TOOLKIT_COLOR_DEPTH"):
+        return None
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") or os.name == "nt":
+        return ColorDepth.TRUE_COLOR
+    return None
+
+
+def fit_left(text, width):
+    return text if len(text) <= width else "…" + text[-(width - 1):] if width > 1 else ""
+
+
+_branch_cache = {"at": 0.0, "value": ""}
+
+
+def git_branch():
+    if time.time() - _branch_cache["at"] > 5:
+        _branch_cache["at"] = time.time()
+        try:
+            head = (Path.cwd() / ".git" / "HEAD").read_text().strip()
+            _branch_cache["value"] = head.rsplit("/", 1)[-1] if head.startswith("ref:") else head[:8]
+        except OSError:
+            _branch_cache["value"] = ""
+    return _branch_cache["value"]
+
+
 def on_enter(buff):
     text = buff.text.strip()
     if not text:
@@ -2816,12 +3236,8 @@ def on_enter(buff):
     if ALIASES.get(text, text) == "/q":
         st.app.exit()
         return False
-    if st.task and not st.task.done():
-        out(f"{DIM}(still working; press Esc to stop){RESET}")
+    if not start_input(text):
         return True
-    st.scroll = 0
-    st.task_started = time.time()
-    st.task = asyncio.ensure_future(run_input(text))
     return False
 
 
@@ -3069,7 +3485,6 @@ async def run_headless(prompt, resume_last=False):
 async def run_interactive(resume_last=False):
     app = build_app()
     new_session()
-    out(banner())
 
     async def startup():
         try:

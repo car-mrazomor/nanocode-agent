@@ -637,8 +637,8 @@ def test_done_line_and_recap(sandbox, monkeypatch):
     nc.new_session()
     run(nc.run_input("change one to two"))
     screen = plain(nc.st.output)
-    assert any(f"✻ {verb} for" in screen for verb in nc.DONE_VERBS)
-    assert "1.2k in · 40 out · $0.0123 · done " in screen
+    assert any(f"▣ {verb} for" in screen for verb in nc.DONE_VERBS)
+    assert "· m · 1.2k in · 40 out · $0.0123 · " in screen
     run(nc.run_input("/recap"))
     screen = plain(nc.st.output)
     assert "Recap" in screen and "a.txt  +2 -1" in screen and "You asked for an edit." in screen
@@ -770,3 +770,64 @@ def test_provider_command(sandbox, monkeypatch):
     if nc.sdk is None:
         run(nc.run_input("/provider claude"))
         assert nc.st.backend == "ollama"
+
+
+# --- OpenCode-style TUI ---
+
+def test_tui_home_palette_leader_and_interrupt(sandbox, monkeypatch):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    nc.st.config = {"provider": "openrouter", "models": {"openrouter": "m"}}
+    nc.st.backend, nc.st.model, nc.st.openrouter_key = "api", "m", "k"
+
+    async def slow(req):
+        await asyncio.sleep(10)
+        return sse([{"choices": [{"delta": {"content": "late"}}]}])
+
+    mock_http(monkeypatch, slow)
+    seen = {}
+
+    async def scenario():
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            nc.new_session()
+            app = nc.build_app()
+            task = asyncio.ensure_future(app.run_async())
+            await asyncio.sleep(0.2)
+
+            async def keys(text, wait=0.2):
+                inp.send_text(text)
+                await asyncio.sleep(wait)
+
+            seen["home_at_start"] = nc.st.home
+            await keys("\x10")                      # ctrl+p: command palette
+            seen["palette"] = nc.st.dialog and nc.st.dialog["title"]
+            await keys("switch model")
+            await keys("\r")                        # opens the model list
+            seen["models"] = nc.st.dialog and nc.st.dialog["title"]
+            await keys("\x1b", 0.3)                 # esc closes it
+            seen["closed"] = nc.st.dialog is None and app.layout.has_focus(nc.st.input_box)
+            await keys("\x18b")                     # ctrl+x b: toggle sidebar
+            seen["sidebar"] = nc.st.sidebar_on
+            await keys("hello\r", 0.4)
+            seen["home_after_send"] = nc.st.home
+            seen["busy"] = not nc.st.task.done()
+            await keys("\x1b", 0.3)                 # first esc only arms the interrupt
+            seen["still_busy"] = not nc.st.task.done()
+            await keys("\x1b", 0.5)                 # second esc interrupts
+            seen["stopped"] = nc.st.task.done()
+            app.exit()
+            await task
+
+    run(scenario())
+    assert seen == {"home_at_start": True, "palette": "Commands", "models": "Switch model", "closed": True,
+                    "sidebar": False, "home_after_send": False, "busy": True, "still_busy": True, "stopped": True}
+    assert "interrupted" in plain(nc.st.output)
+
+
+def test_user_block_wraps_inside_the_panel(sandbox):
+    block = plain(nc.user_block("word " * 40))
+    rows = block.strip("\n").split("\n")
+    assert all(row.startswith("┃") for row in rows)
+    assert len({len(row) for row in rows}) == 1 and len(rows) > 3
