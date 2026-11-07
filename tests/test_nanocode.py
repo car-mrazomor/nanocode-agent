@@ -681,9 +681,10 @@ def test_editing_keys(sandbox):
     sent = []
 
     async def scenario():
-        with create_pipe_input() as inp:
+        from prompt_toolkit.application import create_app_session
+
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
             app = nc.build_app()
-            app.input, app.output = inp, DummyOutput()
             nc.st.input_box.accept_handler = lambda buff: sent.append(buff.text) or False
             task = asyncio.ensure_future(app.run_async())
             await asyncio.sleep(0.2)
