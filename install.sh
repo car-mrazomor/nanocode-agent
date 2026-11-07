@@ -16,6 +16,7 @@ VENV="$NANO_HOME/venv"
 BIN="$NANO_HOME/bin"
 TOOLS="$NANO_HOME/tools"
 PYDIR="$NANO_HOME/python"
+NODEDIR="$NANO_HOME/node"
 REQUIRED="httpx>=0.27 rich>=13 prompt_toolkit>=3.0.40"
 OPTIONAL="claude-agent-sdk"
 LEGACY_APP="${XDG_DATA_HOME:-$HOME/.local/share}/nanocode"
@@ -87,7 +88,7 @@ if [ "$UNINSTALL" = 1 ]; then
   for dir in $(link_dirs); do
     if is_ours "$dir/nanocode"; then rm -f "$dir/nanocode" 2>/dev/null || warn "couldn't remove $dir/nanocode"; fi
   done
-  rm -rf "$APP" "$VENV" "$BIN" "$TOOLS" "$PYDIR"
+  rm -rf "$APP" "$VENV" "$BIN" "$TOOLS" "$PYDIR" "$NODEDIR"
   [ -f "$LEGACY_APP/nanocode.py" ] && rm -rf "$LEGACY_APP"
   clean_rc
   if [ "$PURGE" = 1 ]; then
@@ -296,25 +297,105 @@ fi
 
 # REA (https://github.com/morluto/rea): optional reverse-engineering tools, always the latest version.
 # Any problem here only skips REA; nanocode itself is already installed.
+node_ok() {
+  [ -x "$1" ] && [ "$("$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 22 ] 2>/dev/null
+}
+
+# Sets node/npm: Node 22+ on the system, else our private one in ~/.nanocode/node, else installs it.
+find_node() {
+  node="$(command -v node || true)"
+  npm="$(command -v npm || true)"
+  if [ -z "${NANOCODE_PRIVATE_NODE:-}" ] && [ -n "$npm" ] && node_ok "$node"; then
+    return 0
+  fi
+  node="$NODEDIR/bin/node"
+  npm="$NODEDIR/bin/npm"
+  if node_ok "$node"; then
+    return 0
+  fi
+  install_node && node_ok "$node" && return 0
+  return 1
+}
+
+# Node.js for REA without admin rights: the official LTS build from nodejs.org, checksum-verified, into
+# ~/.nanocode/node. Termux and Alpine (musl, no official builds) use their package manager instead.
+install_node() {
+  if [ "$PLATFORM" = "termux" ]; then
+    step "Installing Node.js for REA ${DIM}(pkg install nodejs)${RESET}"
+    pkg install -y nodejs >/dev/null 2>&1 || { warn "REA skipped: couldn't install Node.js (pkg install nodejs)"; return 1; }
+    node="$(command -v node)"; npm="$(command -v npm)"
+    return 0
+  fi
+  if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ] || [ -e /lib/ld-musl-i386.so.1 ]; then
+    if command -v apk >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
+      step "Installing Node.js for REA ${DIM}(apk add nodejs npm)${RESET}"
+      apk add --no-cache nodejs npm >/dev/null 2>&1 || { warn "REA skipped: couldn't install Node.js (apk add nodejs npm)"; return 1; }
+      node="$(command -v node)"; npm="$(command -v npm)"
+      return 0
+    fi
+    warn "REA skipped: it needs Node.js 22+ (on Alpine: apk add nodejs npm), then run: nanocode update"
+    return 1
+  fi
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) target="darwin-arm64" ;;
+    Darwin-x86_64) target="darwin-x64" ;;
+    Linux-x86_64|Linux-amd64) target="linux-x64" ;;
+    Linux-aarch64|Linux-arm64) target="linux-arm64" ;;
+    Linux-armv7l) target="linux-armv7l" ;;
+    *) warn "REA skipped: no official Node.js build for $(uname -s) $(uname -m). Install Node.js 22+, then run: nanocode update"
+       return 1 ;;
+  esac
+  step "Installing Node.js for REA into $NODEDIR ${DIM}(official LTS, no admin rights needed)${RESET}"
+  dl="$NANO_HOME/.node-download"
+  rm -rf "$dl"
+  mkdir -p "$dl"
+  if ! fetch "https://nodejs.org/dist/index.json" "$dl/index.json" 2>/dev/null; then
+    rm -rf "$dl"
+    warn "REA skipped: couldn't reach nodejs.org to download Node.js"
+    return 1
+  fi
+  version="$("$PY" -c 'import json, sys
+print(next(r["version"] for r in json.load(open(sys.argv[1])) if r["lts"] and int(r["version"][1:].split(".")[0]) >= 22))' "$dl/index.json" 2>/dev/null || true)"
+  archive="node-$version-$target.tar.gz"
+  if [ -z "$version" ] || ! fetch "https://nodejs.org/dist/$version/$archive" "$dl/$archive" 2>/dev/null \
+      || ! fetch "https://nodejs.org/dist/$version/SHASUMS256.txt" "$dl/SHASUMS256.txt" 2>/dev/null; then
+    rm -rf "$dl"
+    warn "REA skipped: couldn't download Node.js"
+    return 1
+  fi
+  if ! "$PY" - "$dl" "$archive" "$NODEDIR" <<'PYCODE'
+import hashlib, os, shutil, sys, tarfile
+folder, archive, dest = sys.argv[1:4]
+expected = next(line.split()[0] for line in open(os.path.join(folder, "SHASUMS256.txt")) if line.split()[-1] == archive)
+with open(os.path.join(folder, archive), "rb") as f:
+    if hashlib.sha256(f.read()).hexdigest() != expected:
+        sys.exit("checksum mismatch")
+with tarfile.open(os.path.join(folder, archive)) as tar:
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(folder, filter="data")
+    else:
+        tar.extractall(folder)
+shutil.rmtree(dest, ignore_errors=True)
+os.replace(os.path.join(folder, archive[: -len(".tar.gz")]), dest)
+PYCODE
+  then
+    rm -rf "$dl"
+    warn "REA skipped: the Node.js download didn't verify"
+    return 1
+  fi
+  rm -rf "$dl"
+  step "Node.js $version ready ${DIM}(used only by REA)${RESET}"
+}
+
 install_rea() {
   if [ -n "$NO_REA" ] || grep -qs '"rea": false' "$NANO_HOME/config.json"; then
     return
   fi
-  node="$(command -v node || true)"
-  npm="$(command -v npm || true)"
-  if [ -z "$node" ] || [ -z "$npm" ]; then
-    warn "REA skipped: it needs Node.js 22+ (https://nodejs.org). Install Node, then run: nanocode update"
-    return
-  fi
-  major="$("$node" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  if [ "$major" -lt 22 ] 2>/dev/null; then
-    warn "REA skipped: it needs Node.js 22+, you have $("$node" --version). Update Node, then run: nanocode update"
-    return
-  fi
+  find_node || return 0
   rea="$TOOLS/rea"
   mkdir -p "$rea"
   step "Installing REA ${DIM}(reverse-engineering tools, latest; skip with --no-rea)${RESET}"
-  if ! npm_config_cache="$rea/.npm-cache" "$npm" install --prefix "$rea" --no-audit --no-fund --loglevel=error \
+  if ! PATH="$(dirname "$node"):$PATH" npm_config_cache="$rea/.npm-cache" "$npm" install --prefix "$rea" --no-audit --no-fund --loglevel=error \
       rea-agents@latest >"$rea/install.log" 2>&1; then
     rm -rf "$rea/.npm-cache"
     warn "REA failed to install (log: $rea/install.log); nanocode works without it"

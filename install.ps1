@@ -15,6 +15,7 @@ $Venv = Join-Path $NanoHome "venv"
 $Bin = Join-Path $NanoHome "bin"
 $Tools = Join-Path $NanoHome "tools"
 $PyDir = Join-Path $NanoHome "python"
+$NodeDir = Join-Path $NanoHome "node"
 
 function Step($msg) { Write-Host "* $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "! $msg" -ForegroundColor Yellow }
@@ -29,7 +30,7 @@ function Set-UserPath([bool]$Add) {
 }
 
 if ($Uninstall) {
-    foreach ($dir in @($App, $Venv, $Bin, $Tools, $PyDir)) {
+    foreach ($dir in @($App, $Venv, $Bin, $Tools, $PyDir, $NodeDir)) {
         if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
     }
     Set-UserPath $false
@@ -138,15 +139,55 @@ if (-not (Test-Path $Memory)) {
 
 # REA (https://github.com/morluto/rea): optional reverse-engineering tools, always the latest version.
 # Any problem here only skips REA; nanocode itself is already installed.
+function Test-Node($exe) {
+    if (-not $exe -or -not (Test-Path $exe)) { return $false }
+    try { return ([int](& $exe -p "process.versions.node.split('.')[0]") -ge 22) } catch { return $false }
+}
+
+# Node.js for REA without admin rights: the official LTS zip from nodejs.org, checksum-verified, into .nanocode\node.
+function Install-PrivateNode {
+    $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+    Step "Installing Node.js for REA into $NodeDir (official LTS, no admin rights needed)"
+    $index = Invoke-RestMethod "https://nodejs.org/dist/index.json"
+    $release = $index | Where-Object { $_.lts -and ([int]($_.version.TrimStart("v").Split(".")[0]) -ge 22) } | Select-Object -First 1
+    if (-not $release) { throw "no Node.js LTS release found" }
+    $version = $release.version
+    $name = "node-$version-win-$arch"
+    $download = Join-Path $NanoHome ".node-download"
+    Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $download | Out-Null
+    $zip = Join-Path $download "$name.zip"
+    Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$version/$name.zip" -OutFile $zip
+    $sums = (Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$version/SHASUMS256.txt").Content
+    $expected = ($sums -split "`n" | Where-Object { $_ -match "  $([regex]::Escape("$name.zip"))$" } | Select-Object -First 1).Split(" ")[0]
+    if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne $expected.ToUpper()) { throw "the Node.js download didn't verify" }
+    Expand-Archive -Path $zip -DestinationPath $download -Force
+    Remove-Item -Recurse -Force $NodeDir -ErrorAction SilentlyContinue
+    Move-Item (Join-Path $download $name) $NodeDir
+    Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue
+    Step "Node.js $version ready (used only by REA)"
+}
+
 function Install-Rea {
     $config = Join-Path $NanoHome "config.json"
     if ($NoRea -or $env:NANOCODE_NO_REA -or ((Test-Path $config) -and (Select-String -Quiet -Path $config -Pattern '"rea": false'))) { return }
-    $node = Get-Command node -ErrorAction SilentlyContinue
-    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
-    if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
-    if (-not $node -or -not $npm) { Warn "REA skipped: it needs Node.js 22+ (https://nodejs.org). Install Node, then run: nanocode update"; return }
-    $major = [int](& $node.Source -p "process.versions.node.split('.')[0]")
-    if ($major -lt 22) { Warn "REA skipped: it needs Node.js 22+. Update Node, then run: nanocode update"; return }
+    $nodeExe = $null
+    $npmExe = $null
+    $systemNode = Get-Command node -ErrorAction SilentlyContinue
+    $systemNpm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $env:NANOCODE_PRIVATE_NODE -and $systemNode -and $systemNpm -and (Test-Node $systemNode.Source)) {
+        $nodeExe = $systemNode.Source
+        $npmExe = $systemNpm.Source
+    } else {
+        if (-not (Test-Node (Join-Path $NodeDir "node.exe"))) {
+            try { Install-PrivateNode } catch { Warn "REA skipped: couldn't install Node.js ($($_.Exception.Message))"; return }
+        }
+        $nodeExe = Join-Path $NodeDir "node.exe"
+        $npmExe = Join-Path $NodeDir "npm.cmd"
+    }
+    $node = @{ Source = $nodeExe }
+    $npm = @{ Source = $npmExe }
+    $env:Path = "$(Split-Path $nodeExe);$env:Path"
     $rea = Join-Path $Tools "rea"
     New-Item -ItemType Directory -Force -Path $rea | Out-Null
     Step "Installing REA (reverse-engineering tools, latest; skip with -NoRea)"

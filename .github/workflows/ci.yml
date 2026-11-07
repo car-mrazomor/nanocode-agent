@@ -41,6 +41,12 @@ jobs:
       - run: ~/.nanocode/bin/nanocode doctor
       - run: test -f ~/.nanocode/tools/rea/runtime.json && ~/.nanocode/bin/nanocode doctor | grep -q "REA"
       - run: sh install.sh --uninstall --purge && test ! -e ~/.nanocode
+      - name: REA with a private Node.js (official LTS in ~/.nanocode/node)
+        run: |
+          NANOCODE_PRIVATE_NODE=1 sh install.sh
+          grep -q "$HOME/.nanocode/node/bin/node" ~/.nanocode/tools/rea/runtime.json
+          ~/.nanocode/bin/nanocode doctor | grep -q "REA"
+          sh install.sh --uninstall --purge && test ! -e ~/.nanocode
       - name: install without a system Python (uv-managed Python in ~/.nanocode/python)
         run: |
           NANOCODE_MANAGED_PYTHON=1 sh install.sh --no-rea
@@ -67,6 +73,14 @@ jobs:
           & "$env:USERPROFILE\.nanocode\bin\nanocode.cmd" doctor
       - shell: pwsh
         run: |
+          ./install.ps1 -Uninstall -Purge
+          if (Test-Path "$env:USERPROFILE\.nanocode") { exit 1 }
+      - name: REA with a private Node.js (official LTS in .nanocode\node)
+        shell: pwsh
+        run: |
+          $env:NANOCODE_PRIVATE_NODE = "1"
+          ./install.ps1
+          if (-not (Select-String -Quiet -Path "$env:USERPROFILE\.nanocode\tools\rea\runtime.json" -Pattern "nanocode\\\\node")) { exit 1 }
           ./install.ps1 -Uninstall -Purge
           if (Test-Path "$env:USERPROFILE\.nanocode") { exit 1 }
       - name: install without a system Python (uv-managed Python in .nanocode\python)

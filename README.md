@@ -168,13 +168,25 @@ Everything it learns is plain markdown in your memory files and skill folders, s
 
 nanocode comes with [REA](https://github.com/morluto/rea), an MCP server for reverse engineering. It covers native binaries, apps, Android APKs, Electron and JavaScript bundles, websites, firmware and devices. Ask things like *"what does this binary do?"* or *"which API endpoints does this Electron app call?"*.
 
-- **Installed and updated automatically.** The installer installs the latest REA when Node.js 22+ is available, and `nanocode update` updates it. Skip it with `sh install.sh --no-rea` (Windows: `-NoRea`).
+- **Installed and updated automatically.** The installer installs the latest REA, and `nanocode update` updates it. REA needs Node.js 22+. If you don't have it, the installer downloads the official Node.js LTS into `~/.nanocode/node`, verified against its checksum. That needs no admin rights, and only REA uses it. Skip REA with `sh install.sh --no-rea` (Windows: `-NoRea`).
 - **Costs nothing until it's needed.** REA has about 230 tools, too many to hand to a model at once. nanocode gives the model three small tools instead: `rea_search` finds a REA tool, `rea_schema` shows its arguments, and `rea_call` runs it. REA starts on first use. Its own `reverse-engineer-anything` skill teaches the model the workflows.
 - **Fails safe.** If REA is missing, crashes or times out, the model gets an error message and nanocode keeps working. A crashed REA restarts on the next call.
 - **Asks permission** before REA actions that change something, like installing an APK, running Frida or executing commands.
 - **Status:** `/rea` shows it, and `/rea off` / `/rea on` turns it off or on.
 
-Some REA features need extra tools, such as Ghidra or Hopper for native binaries, JADX for APKs, or adb for Android devices. REA's error messages say what's missing.
+Some REA features need programs you install yourself, because they're large, platform-specific or paid:
+
+| For | Install |
+|---|---|
+| Native binaries (decompiling, functions) | [Ghidra](https://ghidra-sre.org) (free), or Hopper / IDA |
+| Android APKs | [JADX](https://github.com/skylot/jadx) and a Java JDK |
+| Android devices | adb ([platform-tools](https://developer.android.com/tools/releases/platform-tools)) |
+| APK resources | [Apktool](https://apktool.org) |
+| Websites | Chrome or Chromium |
+| Firmware (Linux) | Binwalk or Unblob |
+| Packet captures | TShark ([Wireshark](https://www.wireshark.org)) |
+
+When a task needs one you don't have, nanocode tells you what to install and carries on with what works without it. Static analysis of .NET, PyInstaller, Electron and JavaScript apps, and Mach-O, ELF and PE files needs nothing extra.
 
 ## Ollama tips
 

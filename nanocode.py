@@ -1334,7 +1334,8 @@ class ReaClient:
                 raise ToolError("REA isn't installed. Install or update it with: nanocode update (needs Node.js 22+)")
             log_file().parent.mkdir(parents=True, exist_ok=True)
             self.log = open(log_file().parent / "rea.log", "ab")
-            env = {**os.environ, "REA_MCP_INPUT_SCHEMA_PROFILE": "compact", "REA_MCP_OUTPUT_SCHEMA_PROFILE": "off"}
+            env = {**os.environ, "REA_MCP_INPUT_SCHEMA_PROFILE": "compact", "REA_MCP_OUTPUT_SCHEMA_PROFILE": "off",
+                   "PATH": os.path.dirname(info["node"]) + os.pathsep + os.environ.get("PATH", "")}
             try:
                 self.proc = await asyncio.create_subprocess_exec(
                     info["node"], info["entry"], "mcp", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -1547,7 +1548,10 @@ def build_system_prompt():
         parts.append(
             "# Reverse engineering\nFor reverse-engineering work (native binaries, apps, APKs, Electron/JS bundles, "
             f"websites, firmware, devices), load the `{REA_SKILL}` skill first, then use REA: rea_search to "
-            "find a tool, rea_schema for its arguments, rea_call to run it.")
+            "find a tool, rea_schema for its arguments, rea_call to run it. Some REA features need programs the user "
+            "installs themselves (Ghidra, Hopper or IDA for native code; JADX and a JDK for APKs; adb; Apktool; "
+            "Chrome; Binwalk; TShark). If REA reports one is missing, tell the user what to install and how, then "
+            "continue with what works without it; don't retry the same call.")
     parts.append(
         "# Learning\nWhen the user corrects you or states a lasting preference, save it with `remember`. After "
         "finishing a non-trivial multi-step task that's likely to recur, save the procedure with `save_skill` "
