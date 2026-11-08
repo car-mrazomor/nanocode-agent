@@ -45,7 +45,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -59,7 +59,7 @@ THEME = {
     "bg": "#141518", "panel": "#1e2024", "panel2": "#26292e", "border": "#34373d",
     "text": "#d5d6da", "muted": "#80838c", "faint": "#555860",
     "accent": "#7fa7c9", "accent2": "#9d8fc4", "pink": "#c08aae", "cyan": "#78b8c4",
-    "success": "#8fb48b", "error": "#d07f7f", "warning": "#cfad73",
+    "success": "#8fb48b", "error": "#d07f7f", "warning": "#cfad73", "think": "#f5a742",
 }
 
 
@@ -3609,9 +3609,11 @@ def build_app():
                 return None
             return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
 
-        think = ("class:think", f"◈ {level} · /think", cycle)
+        # Like OpenCode's variant: a dim dot, then the level in bold orange (dim when thinking is off).
         return [(mode[1], mode[0]), ("class:panel", "  "), ("class:panel.text", pretty_model(st.model)),
-                ("class:panel", "  "), ("class:panel.muted", provider_label()), ("class:panel", "  "), think]
+                ("class:panel", "  "), ("class:panel.muted", provider_label()), ("class:panel", " "),
+                ("class:panel.muted", "·", cycle), ("class:panel", " ", cycle),
+                ("class:think.off" if level == "off" else "class:think", level, cycle)]
 
     def bar_style():
         if st.pending_permission is not None:
@@ -4037,7 +4039,8 @@ def build_app():
         "placeholder": f"fg:{T['faint']}",
         "mode": f"bg:{T['panel']} fg:{T['accent']} bold",
         "mode.auto": f"bg:{T['panel']} fg:{T['warning']} bold",
-        "think": f"bg:{T['panel']} fg:{T['faint']}", "thinking": f"fg:{T['muted']}",
+        "think": f"bg:{T['panel']} fg:{T['think']} bold", "think.off": f"bg:{T['panel']} fg:{T['muted']}",
+        "thinking": f"fg:{T['think']}",
         "bar": f"bg:{T['bg']} fg:{T['accent']}",
         "bar.busy": f"bg:{T['bg']} fg:{T['accent2']}",
         "bar.warning": f"bg:{T['bg']} fg:{T['warning']}",
