@@ -6,149 +6,148 @@
 <title>nanocode — a small coding agent for your terminal</title>
 <meta name="description" content="A small, hackable coding agent for your terminal, in one Python file. Runs on your Claude subscription, any OpenRouter model, or local models through Ollama.">
 <meta property="og:title" content="nanocode">
-<meta property="og:description" content="A small coding agent for your terminal, in one Python file.">
-<meta name="theme-color" content="#111214">
+<meta property="og:description" content="The coding agent that fits in one file.">
+<meta name="theme-color" content="#101113">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%236fb6c6'/><stop offset='1' stop-color='%23bf89ae'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='%23141518'/><rect x='8' y='7' width='3.5' height='18' rx='1.75' fill='url(%23g)'/><path d='M16 11l6 5-6 5' fill='none' stroke='%23d5d6da' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="preconnect" href="https://api.fontshare.com">
+<link href="https://api.fontshare.com/v2/css?f[]=switzer@400,500,600,700&f[]=sentient@400i&display=swap" rel="stylesheet">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #111214; --bg2: #141518; --panel: #1b1d21; --panel2: #24272c; --border: #2e3137;
-    --text: #e2e3e6; --muted: #8a8d95; --faint: #5a5d65;
-    --accent: #7fa7c9; --accent2: #9d8fc4; --cyan: #78b8c4; --pink: #c08aae;
+    --page: #101113; --surface: #16171a; --panel: #1b1d21; --panel2: #24272c;
+    --line: #23252a; --line2: #2e3137;
+    --text: #e6e7ea; --muted: #8e919a; --faint: #5c5f67;
+    --accent: #8fb3d4; --accent2: #9d8fc4; --cyan: #78b8c4; --pink: #c08aae;
     --success: #8fb48b; --error: #d07f7f; --think: #f5a742; --warn: #cfad73;
     --grad: linear-gradient(90deg, #6fb6c6, #6f9ccb, #8a8cc4, #ad87b6, #bf89ae);
+    --display: "Switzer", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --serif: "Sentient", Georgia, "Times New Roman", serif;
     --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    --sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --rail: 1000px;
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  body { margin: 0; background: var(--page); color: var(--text); font: 16px/1.6 var(--display); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  /* film grain, like OpenClaw */
+  body::after { content: ""; position: fixed; inset: 0; z-index: 100; pointer-events: none; opacity: .05; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
   a { color: inherit; text-decoration: none; }
-  code { font-family: var(--mono); font-size: .92em; color: var(--text); }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  code { font-family: var(--mono); font-size: .9em; }
   .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 
-  /* nav */
-  nav { position: fixed; inset: 0 0 auto; z-index: 20; transition: background .3s, border-color .3s; border-bottom: 1px solid transparent; }
-  nav.solid { background: rgba(17,18,20,.78); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-color: var(--panel2); }
-  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
-  .brand { display: flex; align-items: center; gap: 10px; font: 600 17px var(--mono); letter-spacing: -.01em; }
+  /* top bar */
+  .top { position: sticky; top: 0; z-index: 50; background: rgba(16,17,19,.82); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+  .top .in { max-width: 1240px; margin: 0 auto; padding: 0 28px; height: 60px; display: flex; align-items: center; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 10px; font: 600 17px var(--display); letter-spacing: -.01em; }
   .brand svg { width: 26px; height: 26px; }
-  nav .links { display: flex; align-items: center; gap: 28px; font-size: 14px; color: var(--muted); }
-  nav .links a:hover { color: var(--text); }
-  .gh { display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 10px; color: var(--text) !important; background: rgba(255,255,255,.02); }
-  .gh:hover { background: var(--panel); }
-  .gh svg { width: 16px; height: 16px; fill: currentColor; }
+  .nav { display: flex; align-items: center; gap: 26px; font-size: 14.5px; color: var(--muted); }
+  .nav a:hover { color: var(--text); }
+  .nav .gh { display: inline-flex; align-items: center; gap: 7px; }
+  .nav svg { width: 16px; height: 16px; fill: currentColor; }
 
-  /* hero */
-  .hero { position: relative; min-height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 120px 0 72px; text-align: center; overflow: hidden; }
-  #field { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
-  .hero::after { content: ""; position: absolute; inset: auto 0 0; height: 220px; background: linear-gradient(transparent, var(--bg)); z-index: 1; pointer-events: none; }
-  .hero .wrap { position: relative; z-index: 2; width: 100%; min-width: 0; }
-  .lines, .term .body, .shot { min-width: 0; }
-  .mark { display: inline-flex; align-items: center; gap: 14px; margin-bottom: 30px; }
-  .mark svg { width: 56px; height: 56px; filter: drop-shadow(0 0 22px rgba(127,167,201,.35)); }
-  .mark .word { font: 700 clamp(34px, 5vw, 48px)/1 var(--mono); letter-spacing: -.03em; }
-  .mark .word span { color: var(--faint); font-weight: 400; animation: blink 1.1s steps(1) infinite; }
-  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 14px 5px 10px; border: 1px solid var(--border); border-radius: 99px; font: 12.5px var(--mono); color: var(--muted); background: rgba(27,29,33,.6); margin-bottom: 26px; }
-  .pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 10px var(--success); }
-  h1 { font-size: clamp(38px, 6.6vw, 72px); line-height: 1.04; margin: 0 0 22px; letter-spacing: -.035em; font-weight: 700; }
-  .lead { max-width: 600px; margin: 0 auto 36px; color: var(--muted); font-size: clamp(16px, 2vw, 18.5px); }
-  .buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 24px; border-radius: 12px; font-weight: 600; font-size: 15px; transition: transform .2s, box-shadow .2s, background .2s; }
-  .btn:hover { transform: translateY(-2px); }
-  .btn.primary { background: var(--text); color: var(--bg); box-shadow: 0 8px 30px rgba(127,167,201,.18); }
-  .btn.primary:hover { box-shadow: 0 10px 40px rgba(127,167,201,.32); }
-  .btn.ghost { border: 1px solid var(--border); background: rgba(27,29,33,.55); backdrop-filter: blur(6px); }
-  .btn.ghost:hover { background: var(--panel); }
-  .btn svg { width: 16px; height: 16px; }
+  /* hero: dithered arcs, the mark, then the words */
+  .hero { position: relative; text-align: center; border-bottom: 1px solid var(--line); overflow: hidden; }
+  .art { height: min(32vh, 310px); display: flex; justify-content: center; overflow: hidden; pointer-events: none; user-select: none;
+    -webkit-mask-image: linear-gradient(transparent 0%, #000 40% 68%, transparent 94%); mask-image: linear-gradient(transparent 0%, #000 40% 68%, transparent 94%); }
+  .art pre { margin: 0; font: 11px/1.3 var(--mono); letter-spacing: 1px; opacity: .7; flex-shrink: 0; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .hero-content { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; margin-top: -100px; padding: 0 24px 72px; }
+  .mark { width: 72px; height: 72px; filter: drop-shadow(0 0 28px rgba(127,167,201,.45)); }
+  .eyebrow { margin: 22px 0 0; font: 700 12px/1.4 var(--mono); text-transform: uppercase; color: var(--accent); letter-spacing: 0; }
+  h1 { font-family: var(--display); font-size: clamp(2.4rem, 5.6vw, 3.8rem); font-weight: 600; line-height: 1.08; letter-spacing: -.03em; margin: 20px auto 22px; }
+  h1 em { font-family: var(--serif); font-style: italic; font-weight: 400; letter-spacing: -.015em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; padding-right: .06em; }
+  .description { color: var(--muted); max-width: 620px; margin: 0 auto; font-size: 1rem; line-height: 1.8; }
+  .ownership { margin: 18px 0 0; color: var(--muted); font-size: .92rem; font-style: italic; line-height: 1.7; }
+  .ownership span { display: block; font: normal 12.5px/1.8 var(--mono); color: var(--accent); }
+  .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 30px; }
+  .action { display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 20px; border-radius: 8px; font: 600 13.5px var(--mono); border: 1px solid var(--line2); transition: background .2s, border-color .2s, transform .2s; }
+  .action:hover { transform: translateY(-1px); background: var(--panel); border-color: var(--faint); }
+  .action.primary { background: var(--accent); color: #0f1012; border-color: var(--accent); }
+  .action.primary:hover { background: #a6c4df; border-color: #a6c4df; }
 
-  /* the hero image: a live nanocode session */
-  .shot { position: relative; margin: 72px auto 0; max-width: 880px; border-radius: 16px; padding: 1px; background: linear-gradient(140deg, rgba(111,182,198,.55), rgba(46,49,55,.6) 35%, rgba(46,49,55,.6) 65%, rgba(191,137,174,.55)); box-shadow: 0 40px 120px -20px rgba(0,0,0,.7), 0 0 80px -10px rgba(138,140,196,.18); text-align: left; }
-  .shot::before { content: ""; position: absolute; inset: -60px -40px; z-index: -1; background: radial-gradient(closest-side, rgba(127,167,201,.16), transparent); filter: blur(10px); }
-  .term { background: var(--bg2); border-radius: 15px; overflow: hidden; }
-  .term .top { display: flex; align-items: center; gap: 7px; padding: 12px 16px; border-bottom: 1px solid var(--panel2); }
-  .term .top i { width: 11px; height: 11px; border-radius: 50%; background: var(--panel2); }
-  .term .top b { margin-left: auto; margin-right: auto; font: 500 12px var(--mono); color: var(--faint); padding-right: 40px; }
-  .term .body { padding: 22px 24px 16px; font: 13.5px/1.7 var(--mono); min-height: 470px; display: flex; flex-direction: column; }
-  .lines { flex: 1; }
+  /* the rail: content column with hairline sides, like OpenClaw */
+  .rail { max-width: var(--rail); margin: 0 auto; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+  .block { padding: 64px 40px; border-bottom: 1px solid var(--line); }
+  .head { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin-bottom: 22px; }
+  .label { margin: 0; font: 700 12px/1.4 var(--mono); text-transform: uppercase; color: var(--accent); }
+  .head a { font: 12.5px var(--mono); color: var(--muted); }
+  .head a:hover { color: var(--text); }
+  h2 { margin: 6px 0 0; font-size: 1.35rem; font-weight: 600; letter-spacing: -.015em; }
+
+  /* quick start */
+  .qs { border: 1px solid var(--line2); background: var(--surface); }
+  .tabs { display: flex; align-items: center; gap: 4px; padding: 0 16px; border-bottom: 1px solid var(--line2); }
+  .tabs .k { font: 600 12px var(--mono); color: var(--faint); text-transform: uppercase; margin-right: 12px; }
+  .tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 13px 10px 11px; font: 500 12.5px var(--mono); cursor: pointer; }
+  .tab.on { color: var(--accent); border-color: var(--accent); }
+  .code { padding: 22px 24px; font: 13.5px/1.9 var(--mono); }
+  .code .c { color: var(--faint); }
+  .code .line { display: flex; align-items: center; gap: 12px; }
+  .code .line > span { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+  .code .p { color: var(--accent); user-select: none; font-weight: 400; }
+  .copy { flex-shrink: 0; background: var(--panel2); color: var(--text); border: 1px solid var(--line2); border-radius: 6px; padding: 4px 11px; font: 500 12px var(--mono); cursor: pointer; }
+  .copy:hover { background: var(--line2); }
+  .after { margin: 18px 0 0; text-align: center; color: var(--muted); font-size: .9rem; }
+  .after code { border: 1px solid var(--line2); background: var(--surface); padding: 1px 6px; border-radius: 4px; color: var(--text); font-size: .82em; }
+
+  /* the session */
+  .term { border: 1px solid var(--line2); background: #121316; box-shadow: 0 40px 100px -40px rgba(0,0,0,.8); min-width: 0; }
+  .term .bar { display: flex; align-items: center; gap: 7px; padding: 11px 14px; border-bottom: 1px solid var(--line2); }
+  .term .bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--panel2); }
+  .term .bar b { margin: 0 auto; padding-right: 36px; font: 500 12px var(--mono); color: var(--faint); }
+  .tb { padding: 22px 24px 14px; font: 13.5px/1.7 var(--mono); min-height: 460px; display: flex; flex-direction: column; min-width: 0; }
+  .lines { flex: 1; min-width: 0; }
   .ln { white-space: pre; overflow: hidden; text-overflow: ellipsis; opacity: 0; transform: translateY(4px); transition: opacity .35s, transform .35s; }
   .ln.on { opacity: 1; transform: none; }
   .user { white-space: normal; border-left: 2px solid var(--accent); background: var(--panel); padding: 10px 16px; margin-bottom: 14px; }
-  .m { color: var(--muted); } .f { color: var(--faint); } .ok { color: var(--success); } .bad { color: var(--error); }
-  .cy { color: var(--cyan); } .vi { color: var(--accent2); }
+  .m { color: var(--muted); } .f { color: var(--faint); } .ok { color: var(--success); } .bad { color: var(--error); } .cy { color: var(--cyan); } .vi { color: var(--accent2); }
   .add { color: var(--success); background: rgba(143,180,139,.08); } .del { color: var(--error); background: rgba(208,127,127,.08); }
   .gap { margin-top: 10px; }
   .prompt { margin-top: 16px; border-left: 2px solid var(--accent); background: var(--panel); padding: 12px 16px; }
-  .prompt .ph { color: var(--faint); margin-bottom: 8px; min-height: 1.7em; }
-  .prompt .typed { color: var(--text); }
+  .prompt .ph { min-height: 1.7em; margin-bottom: 8px; }
   .caret { display: inline-block; width: 8px; height: 15px; background: var(--text); vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
   .meta .mode { color: var(--warn); font-weight: 700; } .meta .th { color: var(--think); font-weight: 700; }
   .status { display: flex; justify-content: space-between; padding-top: 9px; color: var(--muted); font-size: 12.5px; }
   .spin { color: var(--accent); }
   @keyframes blink { 50% { opacity: 0; } }
 
-  /* sections */
-  section { padding: 120px 0 0; }
-  .head { text-align: center; margin-bottom: 52px; }
-  .eyebrow { display: inline-block; font: 500 12.5px var(--mono); color: var(--accent); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 14px; }
-  h2 { font-size: clamp(30px, 4.4vw, 46px); margin: 0 0 14px; letter-spacing: -.03em; line-height: 1.1; }
-  .sub { color: var(--muted); margin: 0 auto; max-width: 560px; font-size: 17px; }
+  /* features: shared hairlines, mono caps titles */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line2); border: 1px solid var(--line2); }
+  .feature { padding: 28px 24px; background: var(--page); transition: background .25s; }
+  .feature:hover { background: var(--surface); }
+  .feature .ic { display: block; font: 600 16px var(--mono); margin-bottom: 16px; color: var(--muted); }
+  .feature h3 { margin: 0 0 10px; font: 600 .78rem var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  .feature p { margin: 0; color: var(--muted); font-size: .88rem; line-height: 1.7; }
+  .feature code { color: var(--text); }
+  .feature .tag { display: block; font: 12px var(--mono); color: var(--cyan); margin-bottom: 14px; }
 
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-  .card { position: relative; background: linear-gradient(180deg, var(--panel), rgba(27,29,33,.6)); border: 1px solid var(--panel2); border-radius: 16px; padding: 26px; overflow: hidden; transition: border-color .25s, transform .25s; }
-  .card::before { content: ""; position: absolute; inset: 0; background: radial-gradient(360px circle at var(--x, 50%) var(--y, 50%), rgba(127,167,201,.09), transparent 60%); opacity: 0; transition: opacity .3s; pointer-events: none; }
-  .card:hover { border-color: var(--border); transform: translateY(-2px); }
-  .card:hover::before { opacity: 1; }
-  .card .icon { font: 600 17px var(--mono); width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px; background: var(--panel2); border: 1px solid var(--border); margin-bottom: 18px; }
-  .card h3 { margin: 0 0 7px; font-size: 16.5px; letter-spacing: -.01em; }
-  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
-  .card .tag { font: 12px var(--mono); color: var(--cyan); display: block; margin-bottom: 14px; }
-  .providers { grid-template-columns: repeat(3, 1fr); }
+  .closing { text-align: center; padding: 84px 40px; }
+  .closing h2 { font-size: clamp(1.8rem, 3.6vw, 2.6rem); line-height: 1.12; letter-spacing: -.03em; margin: 0 0 6px; }
+  .closing h2 em { font-family: var(--serif); font-style: italic; font-weight: 400; }
 
-  /* install */
-  .install { max-width: 760px; margin: 0 auto; }
-  .tabs { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--panel2); border-radius: 12px; background: var(--panel); margin-bottom: 14px; }
-  .tab { background: none; border: 0; color: var(--muted); padding: 8px 16px; border-radius: 9px; font: 500 13.5px var(--sans); cursor: pointer; transition: background .2s, color .2s; }
-  .tab.on { background: var(--panel2); color: var(--text); }
-  .cmd { display: flex; align-items: center; gap: 12px; background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 16px 16px 16px 20px; box-shadow: 0 20px 60px -20px rgba(0,0,0,.6); }
-  .cmd code { flex: 1; min-width: 0; font-size: 14px; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
-  .cmd code .d { color: var(--accent); user-select: none; }
-  .copy { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 9px; padding: 7px 13px; font: 500 13px var(--sans); cursor: pointer; transition: background .2s; }
-  .copy:hover { background: var(--border); }
-  .then { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
-  .then div { font: 13px var(--mono); color: var(--muted); padding: 13px 15px; border-radius: 12px; background: var(--panel); border: 1px solid var(--panel2); }
-  .then b { color: var(--text); font-weight: 500; display: block; margin-bottom: 2px; }
-  .note { color: var(--muted); font-size: 14px; margin: 18px 0 0; text-align: center; }
-
-  /* closing */
-  .cta { margin-top: 120px; text-align: center; padding: 72px 24px; border: 1px solid var(--panel2); border-radius: 22px; background: radial-gradient(600px 220px at 50% 0%, rgba(127,167,201,.10), transparent), var(--panel); }
-  .cta h2 { margin-bottom: 26px; }
-
-  footer { margin-top: 80px; border-top: 1px solid var(--panel2); padding: 30px 0 42px; color: var(--faint); font-size: 14px; }
-  footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: center; }
+  footer { max-width: var(--rail); margin: 0 auto; padding: 26px 40px 40px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; color: var(--faint); font: 12.5px var(--mono); border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
   footer a:hover { color: var(--text); }
-  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
-  .badges span { border: 1px solid var(--panel2); border-radius: 99px; padding: 3px 11px; font: 12px var(--mono); color: var(--muted); }
 
-  /* fade in on scroll */
-  .reveal { opacity: 0; transform: translateY(18px); transition: opacity .7s ease, transform .7s ease; }
+  .reveal { opacity: 0; transform: translateY(14px); transition: opacity .7s ease, transform .7s ease; }
   .reveal.in { opacity: 1; transform: none; }
 
-  @media (max-width: 880px) { .grid, .providers { grid-template-columns: 1fr 1fr; } .then { grid-template-columns: 1fr; } }
+  @media (max-width: 860px) { .features { grid-template-columns: 1fr 1fr; } }
   @media (max-width: 620px) {
-    .wrap { padding: 0 16px; }
-    nav .links a:not(.gh) { display: none; }
-    .grid, .providers { grid-template-columns: 1fr; }
-    .hero { min-height: auto; padding-top: 104px; }
-    .mark svg { width: 42px; height: 42px; }
-    .term .body { font-size: 11px; padding: 16px 14px 12px; min-height: 380px; }
-    .status span:last-child { display: none; }
-    .term .top b { display: none; }
-    section { padding-top: 88px; }
-    .cta { padding: 48px 18px; }
+    .top .in { padding: 0 16px; }
+    .nav a:not(.gh) { display: none; }
+    .art { height: min(26vh, 230px); }
+    .art pre { font-size: 9px; letter-spacing: 1.5px; }
+    .hero-content { padding: 0 16px 56px; }
+    .description br, h1 br { display: none; }
+    .rail, footer { border: 0; }
+    .block { padding: 48px 16px; }
+    .features { grid-template-columns: 1fr; }
+    .tb { font-size: 11px; padding: 16px 14px 12px; min-height: 380px; }
+    .status span:last-child, .term .bar b { display: none; }
+    .tabs .k { display: none; }
+    .code { padding: 18px 16px; font-size: 12.5px; }
+    footer { padding: 24px 16px 36px; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -162,212 +161,189 @@
   <defs>
     <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6fb6c6"/><stop offset=".5" stop-color="#8a8cc4"/><stop offset="1" stop-color="#bf89ae"/></linearGradient>
     <symbol id="logo" viewBox="0 0 48 48">
-      <rect x="1" y="1" width="46" height="46" rx="12" fill="#1b1d21" stroke="#2e3137"/>
+      <rect x="1" y="1" width="46" height="46" rx="12" fill="#1b1d21" stroke="#34373d"/>
       <rect x="12" y="11" width="5" height="26" rx="2.5" fill="url(#lg)"/>
-      <path d="M24 17l9 7-9 7" fill="none" stroke="#e2e3e6" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M24 17l9 7-9 7" fill="none" stroke="#e6e7ea" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
     </symbol>
     <symbol id="github" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.23.83 1.23.83.72 1.23 1.88.87 2.34.67.07-.52.28-.87.5-1.07-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></symbol>
   </defs>
 </svg>
 
-<nav id="nav">
-  <div class="wrap">
+<div class="top">
+  <div class="in">
     <a class="brand" href="#"><svg><use href="#logo"/></svg>nanocode</a>
-    <div class="links">
-      <a href="#providers">Providers</a>
+    <div class="nav">
+      <a href="#quickstart">Install</a>
       <a href="#features">Features</a>
-      <a href="#install">Install</a>
+      <a href="#models">Models</a>
+      <a href="https://github.com/car-mrazomor/nanocode-agent#readme">Docs</a>
       <a class="gh" href="https://github.com/car-mrazomor/nanocode-agent"><svg><use href="#github"/></svg>GitHub</a>
     </div>
   </div>
-</nav>
+</div>
 
 <header class="hero">
-  <canvas id="field" aria-hidden="true"></canvas>
-  <div class="wrap">
-    <div class="mark"><svg aria-hidden="true"><use href="#logo"/></svg><span class="word grad">nanocode<span>_</span></span></div>
-    <div><span class="pill"><i></i>v0.5.1 · one Python file · open source</span></div>
-    <h1>The coding agent<br>that fits in <span class="grad">one file.</span></h1>
-    <p class="lead">Reads, edits and runs your code in the terminal — on your Claude subscription, any OpenRouter model, or local models with Ollama. It asks before it touches anything.</p>
-    <div class="buttons">
-      <a class="btn primary" href="#install">Get started</a>
-      <a class="btn ghost" href="https://github.com/car-mrazomor/nanocode-agent"><svg fill="currentColor"><use href="#github"/></svg>View on GitHub</a>
-    </div>
-
-    <div class="shot reveal" aria-hidden="true">
-      <div class="term">
-        <div class="top"><i></i><i></i><i></i><b>~/projects/app — nanocode</b></div>
-        <div class="body">
-          <div class="lines" id="lines">
-            <div class="ln user">the date parser fails on ISO weeks, fix it and run the tests</div>
-            <div class="ln"><span class="m">→</span> Read <span class="m">src/dates.py</span></div>
-            <div class="ln"><span class="m">✱</span> Grep <span class="m">"isoweek" · 3 matches</span></div>
-            <div class="ln"><span class="m">←</span> Edit <span class="m">src/dates.py</span> <span class="ok">+1</span> <span class="bad">-1</span></div>
-            <div class="ln"><span class="del">  -     week = int(parts[1])                   </span></div>
-            <div class="ln"><span class="add">  +     week = int(parts[1].lstrip("W"))       </span></div>
-            <div class="ln"><span class="m">$</span> Bash <span class="m">pytest tests/test_dates.py -q</span></div>
-            <div class="ln"><span class="f">    14 passed in 0.31s</span></div>
-            <div class="ln gap">   Fixed: ISO weeks like <span class="cy">2026-W07</span> kept the <span class="cy">W</span>, so <span class="cy">int()</span> failed.</div>
-            <div class="ln">   All 14 date tests pass now.</div>
-            <div class="ln gap"><span class="vi">▣</span> <span class="m">Cooked for 9s · GLM 5.3 · 4.1k in · 312 out · $0.0021</span></div>
-          </div>
-          <div class="prompt">
-            <div class="ph"><span class="typed" id="typed"></span><span class="caret"></span></div>
-            <div class="meta"><span class="mode">Auto</span> <span class="f">·</span> GLM 5.3  <span class="m">OpenRouter</span> <span class="f">·</span> <span class="th">medium</span></div>
-          </div>
-          <div class="status"><span id="state"><span class="spin" id="spin">⠋</span> <span class="m">working</span></span><span>12% context  $0.0021  ctrl+p commands</span></div>
-        </div>
-      </div>
+  <div class="art" aria-hidden="true"><pre id="art"></pre></div>
+  <div class="hero-content">
+    <svg class="mark" aria-hidden="true"><use href="#logo"/></svg>
+    <p class="eyebrow">Open source · One Python file · Your models</p>
+    <h1>The coding agent that <br>fits in <em>one file.</em></h1>
+    <p class="description">Reads, edits and runs your code from the terminal. <br>On your Claude subscription, any OpenRouter model, or local models with Ollama. <br>It asks before it touches anything.</p>
+    <p class="ownership">No account. No telemetry. Nothing to read but one file.<span>Your keys. Your models. Your machine. Your code.</span></p>
+    <div class="actions">
+      <a class="action primary" href="#quickstart">Get started</a>
+      <a class="action" href="https://github.com/car-mrazomor/nanocode-agent#readme">Read the docs</a>
+      <a class="action" href="https://github.com/car-mrazomor/nanocode-agent">View on GitHub</a>
     </div>
   </div>
 </header>
 
-<section id="providers">
-  <div class="wrap">
-    <div class="head reveal">
-      <span class="eyebrow">Bring your own model</span>
-      <h2>Three ways to run it.</h2>
-      <p class="sub">Switch any time with <code>/provider</code> and <code>/model</code>. Same tools, same interface.</p>
+<main class="rail">
+  <section class="block reveal" id="quickstart">
+    <div class="head"><p class="label">Quick start</p><a href="https://github.com/car-mrazomor/nanocode-agent#install">All install options →</a></div>
+    <div class="qs">
+      <div class="tabs" role="tablist">
+        <span class="k">Install</span>
+        <button class="tab on" data-os="unix">macOS · Linux · WSL</button>
+        <button class="tab" data-os="win">Windows</button>
+      </div>
+      <div class="code">
+        <div class="c" id="comment"># Installs into ~/.nanocode. Gets Python for you if it's missing.</div>
+        <div class="line"><span><b class="p">$ </b><span id="cmd">curl -fsSL https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.sh | sh</span></span><button class="copy" id="copy">Copy</button></div>
+        <div class="c" style="margin-top:8px"># Then start it and pick a provider</div>
+        <div class="line"><span><b class="p">$ </b>nanocode</span></div>
+      </div>
     </div>
-    <div class="grid providers">
-      <div class="card reveal"><span class="tag">/provider claude</span><h3>Claude subscription</h3><p>Uses the plan you already pay for, through the Claude Agent SDK. No API key.</p></div>
-      <div class="card reveal"><span class="tag">/provider openrouter</span><h3>OpenRouter</h3><p>Any model: Claude, GLM, GPT, Gemini, DeepSeek, Kimi — or the auto router. Cost shown per reply.</p></div>
-      <div class="card reveal"><span class="tag">/provider ollama</span><h3>Ollama</h3><p>Local models on your machine. Free, private and offline. Small models get a lighter tool set.</p></div>
-    </div>
-  </div>
-</section>
+    <p class="after">Also on Android (Termux). Update with <code>/update</code>, check with <code>nanocode doctor</code>, remove with <code>nanocode uninstall</code>.</p>
+  </section>
 
-<section id="features">
-  <div class="wrap">
-    <div class="head reveal">
-      <span class="eyebrow">Features</span>
-      <h2>Small, but it does the job.</h2>
-      <p class="sub">Everything a coding agent needs, in a full-screen terminal UI that stays out of your way.</p>
-    </div>
-    <div class="grid">
-      <div class="card reveal"><div class="icon" style="color:var(--accent)">←</div><h3>Tools that ask first</h3><p>Read, edit, search and run commands. Edits show a diff and wait for your OK — or switch to Auto. <code>/undo</code> reverts.</p></div>
-      <div class="card reveal"><div class="icon" style="color:var(--cyan)">$</div><h3>Background shells</h3><p>Dev servers and watchers keep running in tmux or screen while the agent works and reads their output.</p></div>
-      <div class="card reveal"><div class="icon" style="color:var(--pink)">◆</div><h3>Memory</h3><p>Global and per-project notes it always follows. Type <code># note</code> to remember something.</p></div>
-      <div class="card reveal"><div class="icon" style="color:var(--accent2)">◈</div><h3>Skills</h3><p>Drop in any <code>SKILL.md</code> — Claude Code skills work too. Run one with <code>/name</code>, or let it learn new ones.</p></div>
-      <div class="card reveal"><div class="icon" style="color:var(--think)">∴</div><h3>Thinking levels</h3><p><code>/think</code> off, low, medium or high, for every provider. Shown right under the prompt.</p></div>
-      <div class="card reveal"><div class="icon" style="color:var(--accent)">▣</div><h3>Costs in sight</h3><p>Time, tokens and cost after every reply, context use in the status bar, <code>/compact</code> when it fills up.</p></div>
-      <div class="card reveal"><div class="icon" style="color:var(--cyan)">%</div><h3>Reverse engineering</h3><p>Optional REA tools for binaries, APKs, Electron apps, web bundles and firmware — installed for you.</p></div>
-      <div class="card reveal"><div class="icon" style="color:var(--pink)">⇅</div><h3>A mouse that works</h3><p>Smooth scrolling, drag to select and copy, your message pinned on top while you read the answer.</p></div>
-      <div class="card reveal"><div class="icon" style="color:var(--success)">↑</div><h3>Stays up to date</h3><p>Tells you when a new version is out. <code>/update</code> installs it in the background.</p></div>
-    </div>
-  </div>
-</section>
-
-<section id="install">
-  <div class="wrap">
-    <div class="head reveal">
-      <span class="eyebrow">Get started</span>
-      <h2>One line to install.</h2>
-      <p class="sub">Everything goes into <code>~/.nanocode</code>. No admin rights — Python is downloaded privately if you don't have it.</p>
-    </div>
-    <div class="install reveal">
-      <div style="text-align:center">
-        <div class="tabs" role="tablist">
-          <button class="tab on" data-cmd="curl -fsSL https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.sh | sh">macOS · Linux · WSL</button>
-          <button class="tab" data-cmd="irm https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.ps1 | iex">Windows</button>
+  <section class="block reveal">
+    <div class="head"><div><p class="label">See it work</p><h2>Read, edit, run — and it tells you what it did.</h2></div></div>
+    <div class="term" aria-hidden="true">
+      <div class="bar"><i></i><i></i><i></i><b>~/projects/app — nanocode</b></div>
+      <div class="tb">
+        <div class="lines" id="lines">
+          <div class="ln user">the date parser fails on ISO weeks, fix it and run the tests</div>
+          <div class="ln"><span class="m">→</span> Read <span class="m">src/dates.py</span></div>
+          <div class="ln"><span class="m">✱</span> Grep <span class="m">"isoweek" · 3 matches</span></div>
+          <div class="ln"><span class="m">←</span> Edit <span class="m">src/dates.py</span> <span class="ok">+1</span> <span class="bad">-1</span></div>
+          <div class="ln"><span class="del">  -     week = int(parts[1])                   </span></div>
+          <div class="ln"><span class="add">  +     week = int(parts[1].lstrip("W"))       </span></div>
+          <div class="ln"><span class="m">$</span> Bash <span class="m">pytest tests/test_dates.py -q</span></div>
+          <div class="ln"><span class="f">    14 passed in 0.31s</span></div>
+          <div class="ln gap">   Fixed: ISO weeks like <span class="cy">2026-W07</span> kept the <span class="cy">W</span>, so <span class="cy">int()</span> failed.</div>
+          <div class="ln">   All 14 date tests pass now.</div>
+          <div class="ln gap"><span class="vi">▣</span> <span class="m">Cooked for 9s · GLM 5.3 · 4.1k in · 312 out · $0.0021</span></div>
         </div>
+        <div class="prompt">
+          <div class="ph"><span id="typed"></span><span class="caret"></span></div>
+          <div class="meta"><span class="mode">Auto</span> <span class="f">·</span> GLM 5.3  <span class="m">OpenRouter</span> <span class="f">·</span> <span class="th">medium</span></div>
+        </div>
+        <div class="status"><span id="state"><span class="spin" id="spin">⠋</span> <span class="m">working</span></span><span>12% context  $0.0021  ctrl+p commands</span></div>
       </div>
-      <div class="cmd"><code><span class="d">$ </span><span id="cmd">curl -fsSL https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.sh | sh</span></code><button class="copy" id="copy">Copy</button></div>
-      <div class="then">
-        <div><b>nanocode</b>start, pick a provider</div>
-        <div><b>nanocode -p "…"</b>one prompt, no UI</div>
-        <div><b>nanocode doctor</b>check the setup</div>
-      </div>
-      <p class="note">Also on Android (Termux). Update with <code>/update</code>, remove with <code>nanocode uninstall</code>.</p>
     </div>
+  </section>
 
-    <div class="cta reveal">
-      <h2>Small enough to read.<br><span class="grad">Good enough to ship with.</span></h2>
-      <div class="buttons">
-        <a class="btn primary" href="#install">Install nanocode</a>
-        <a class="btn ghost" href="https://github.com/car-mrazomor/nanocode-agent"><svg fill="currentColor"><use href="#github"/></svg>Star on GitHub</a>
-      </div>
+  <section class="block reveal" id="features">
+    <div class="head"><p class="label">What it does</p></div>
+    <div class="features">
+      <div class="feature"><span class="ic" style="color:var(--accent)">←</span><h3>Asks before it acts</h3><p>Reads, edits, searches and runs commands. Edits show a diff and wait for your OK — or switch to Auto. <code>/undo</code> reverts.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--cyan)">$</span><h3>Background shells</h3><p>Dev servers and watchers keep running in tmux or screen while it works and reads their output.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--pink)">◆</span><h3>Persistent memory</h3><p>Global and per-project notes it always follows. Type <code># note</code> to remember something.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--accent2)">◈</span><h3>Skills</h3><p>Drop in any <code>SKILL.md</code> — Claude Code skills work too. Run one with <code>/name</code>, or let it write its own.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--think)">∴</span><h3>Thinking levels</h3><p><code>/think</code> off, low, medium or high, for every provider. Shown right under the prompt.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--accent)">▣</span><h3>Costs in sight</h3><p>Time, tokens and cost after every reply. Context use in the status bar, <code>/compact</code> when it fills up.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--cyan)">%</span><h3>Reverse engineering</h3><p>Optional REA tools for binaries, APKs, Electron apps, web bundles and firmware — installed for you.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--pink)">⇅</span><h3>A mouse that works</h3><p>Smooth scrolling, drag to select and copy, and your message pinned on top while you read the answer.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--success)">↑</span><h3>Stays up to date</h3><p>Tells you when a new version is out. <code>/update</code> installs it in the background.</p></div>
     </div>
-  </div>
-</section>
+  </section>
+
+  <section class="block reveal" id="models">
+    <div class="head"><p class="label">Bring your own model</p><a href="https://github.com/car-mrazomor/nanocode-agent#start">Switch any time →</a></div>
+    <div class="features">
+      <div class="feature"><span class="tag">/provider claude</span><h3>Claude subscription</h3><p>The plan you already pay for, through the Claude Agent SDK. No API key.</p></div>
+      <div class="feature"><span class="tag">/provider openrouter</span><h3>OpenRouter</h3><p>Any model — Claude, GLM, GPT, Gemini, DeepSeek, Kimi — or the auto router. Cost shown per reply.</p></div>
+      <div class="feature"><span class="tag">/provider ollama</span><h3>Ollama</h3><p>Local models on your machine. Free, private and offline.</p></div>
+    </div>
+  </section>
+
+  <section class="closing reveal">
+    <h2>Small enough to <em>read.</em><br><span class="grad">Good enough to ship with.</span></h2>
+    <div class="actions">
+      <a class="action primary" href="#quickstart">Install nanocode</a>
+      <a class="action" href="https://github.com/car-mrazomor/nanocode-agent"><svg width="15" height="15" fill="currentColor"><use href="#github"/></svg>Star on GitHub</a>
+    </div>
+  </section>
+</main>
 
 <footer>
-  <div class="wrap">
-    <div>nanocode · by <a href="https://github.com/car-mrazomor">car-mrazomor</a> · inspired by <a href="https://github.com/1rgs/nanocode">1rgs/nanocode</a></div>
-    <div class="badges"><span>one file</span><span>macOS · Linux · Windows</span><span>no telemetry</span></div>
-  </div>
+  <div>nanocode v0.5.1 · by <a href="https://github.com/car-mrazomor">car-mrazomor</a></div>
+  <div>inspired by <a href="https://github.com/1rgs/nanocode">1rgs/nanocode</a> · no telemetry</div>
 </footer>
 
 <script>
 (() => {
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  // nav turns solid after the hero starts scrolling away
-  const nav = document.getElementById("nav");
-  const onScroll = () => nav.classList.toggle("solid", scrollY > 24);
-  addEventListener("scroll", onScroll, { passive: true }); onScroll();
-
-  // background: a dot grid that a slow gradient wave passes through, brighter near the pointer
-  const canvas = document.getElementById("field"), ctx = canvas.getContext("2d");
-  const colors = [[111,182,198], [111,156,203], [138,140,196], [173,135,182], [191,137,174]];
-  let w = 0, h = 0, dpr = 1, mx = -9999, my = -9999;
-  const size = () => { dpr = Math.min(devicePixelRatio || 1, 2); w = canvas.clientWidth; h = canvas.clientHeight; canvas.width = w * dpr; canvas.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); };
-  size(); addEventListener("resize", size);
-  canvas.parentElement.addEventListener("pointermove", e => { const r = canvas.getBoundingClientRect(); mx = e.clientX - r.left; my = e.clientY - r.top; });
-  canvas.parentElement.addEventListener("pointerleave", () => { mx = my = -9999; });
-  const draw = t => {
-    ctx.clearRect(0, 0, w, h);
-    const step = w < 620 ? 24 : 28;
-    for (let y = step / 2; y < h; y += step) {
-      for (let x = step / 2; x < w; x += step) {
-        const wave = Math.sin(x * 0.006 + y * 0.004 - t * 0.0006) * 0.5 + 0.5;
-        const near = Math.max(0, 1 - Math.hypot(x - mx, y - my) / 180);
-        const fade = Math.min(1, y / (h * 0.35)) * (1 - Math.max(0, (y - h * 0.6) / (h * 0.4)));
-        const a = (0.08 + Math.pow(wave, 5) * 0.5 + near * 0.6) * Math.max(0, fade);
-        if (a < 0.03) continue;
-        const c = colors[Math.min(colors.length - 1, Math.floor((x / w) * colors.length))];
-        ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${a})`;
-        ctx.beginPath(); ctx.arc(x, y, 1.1 + near * 1.2, 0, 6.283); ctx.fill();
+  // dithered arcs rising from behind the mark (ASCII, like OpenClaw's hero), slowly rippling outward
+  const art = document.getElementById("art");
+  const ramp = " .:-=+xX#8@";
+  const COLS = 190, ROWS = 26;
+  const frame = t => {
+    const cx = COLS / 2, cy = ROWS + 5;
+    let out = "";
+    for (let y = 0; y < ROWS; y++) {
+      let row = "";
+      for (let x = 0; x < COLS; x++) {
+        const dx = (x - cx) / 2.2, dy = y - cy;
+        const r = Math.hypot(dx, dy);
+        const ang = Math.atan2(-dy, Math.abs(dx));
+        const ring = Math.cos(r * 0.42 - t) * 0.5 + 0.5;
+        const band = Math.exp(-Math.pow((r - 24) / 15, 2));
+        const wing = 0.35 + 0.65 * Math.pow(Math.sin(ang * 1.1 + 0.25), 2);
+        const v = Math.pow(ring, 2.2) * band * wing + (Math.random() - 0.5) * 0.06;
+        row += ramp[Math.max(0, Math.min(ramp.length - 1, Math.floor(v * ramp.length * 1.15)))];
       }
+      out += row + "\n";
     }
-    if (!still) requestAnimationFrame(draw);
+    art.textContent = out;
   };
-  requestAnimationFrame(draw);
+  const t0 = performance.now();
+  const loop = now => { frame((now - t0) / 900); setTimeout(() => requestAnimationFrame(loop), 90); };
+  if (still) frame(1.2); else requestAnimationFrame(loop);
 
-  // fade sections in as they scroll into view
-  const io = new IntersectionObserver(entries => entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { threshold: 0.12 });
+  // sections fade in
+  const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { threshold: 0.1 });
   document.querySelectorAll(".reveal").forEach(el => io.observe(el));
 
-  // the session plays out line by line, then the next prompt is typed
+  // the session plays out, then the next prompt is typed
   const lines = [...document.querySelectorAll("#lines .ln")], typed = document.getElementById("typed");
   const spin = document.getElementById("spin"), state = document.getElementById("state");
   const frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; let f = 0;
   const spinner = setInterval(() => { spin.textContent = frames[f++ % frames.length]; }, 90);
   const finish = () => { clearInterval(spinner); state.innerHTML = '<span class="m">~/projects/app</span>  <span class="f">main</span>'; };
   const next = "add a test for week 53";
+  const type = i => { if (i <= next.length) { typed.textContent = next.slice(0, i); setTimeout(() => type(i + 1), 55 + Math.random() * 60); } };
   const play = () => {
     if (still) { lines.forEach(l => l.classList.add("on")); finish(); typed.textContent = next; return; }
-    lines.forEach((l, i) => setTimeout(() => { l.classList.add("on"); if (i === lines.length - 1) { finish(); type(0); } }, 500 + i * 380));
+    lines.forEach((l, i) => setTimeout(() => { l.classList.add("on"); if (i === lines.length - 1) { finish(); type(0); } }, 400 + i * 380));
   };
-  const type = i => { if (i <= next.length) { typed.textContent = next.slice(0, i); setTimeout(() => type(i + 1), 55 + Math.random() * 60); } };
-  const shot = document.querySelector(".shot");
-  const start = new IntersectionObserver(e => { if (e[0].isIntersecting) { play(); start.disconnect(); } }, { threshold: 0.25 });
-  start.observe(shot);
-
-  // a soft spotlight that follows the pointer on cards
-  document.querySelectorAll(".card").forEach(card => card.addEventListener("pointermove", e => {
-    const r = card.getBoundingClientRect();
-    card.style.setProperty("--x", `${e.clientX - r.left}px`); card.style.setProperty("--y", `${e.clientY - r.top}px`);
-  }));
+  const start = new IntersectionObserver(e => { if (e[0].isIntersecting) { play(); start.disconnect(); } }, { threshold: 0.3 });
+  start.observe(document.querySelector(".term"));
 
   // install tabs and copy
-  const cmd = document.getElementById("cmd"), copy = document.getElementById("copy");
+  const cmds = {
+    unix: ["# Installs into ~/.nanocode. Gets Python for you if it's missing.", "curl -fsSL https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.sh | sh"],
+    win: ["# PowerShell. Installs into %USERPROFILE%\\.nanocode, no admin rights.", "irm https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.ps1 | iex"],
+  };
+  const cmd = document.getElementById("cmd"), comment = document.getElementById("comment"), copy = document.getElementById("copy");
   document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("on"));
-    tab.classList.add("on"); cmd.textContent = tab.dataset.cmd; copy.textContent = "Copy";
+    tab.classList.add("on"); [comment.textContent, cmd.textContent] = cmds[tab.dataset.os]; copy.textContent = "Copy";
   }));
   copy.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(cmd.textContent); copy.textContent = "Copied ✓"; }
+    try { await navigator.clipboard.writeText(cmd.textContent); copy.textContent = "Copied"; }
     catch (e) { copy.textContent = "Select & copy"; }
     setTimeout(() => copy.textContent = "Copy", 1800);
   });
