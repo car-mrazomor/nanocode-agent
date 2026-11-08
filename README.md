@@ -105,7 +105,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | Enter | Send |
 | Shift+Enter, Alt+Enter, Ctrl+J | New line |
 | Ctrl+P | Command palette |
-| Ctrl+X then N / L / M / B / C / U / H / Q | New session / sessions / models / sidebar / compact / undo / help / quit |
+| Ctrl+X then N / F / L / M / B / C / U / H / Q | New session / clone session / sessions / models / sidebar / compact / undo / help / quit |
 | Esc Esc | Stop the reply (press twice) |
 | Ctrl+C | Stop the reply, clear the input, or quit |
 | Ctrl+U (Cmd+Backspace on macOS) | Delete everything before the cursor |
@@ -114,6 +114,8 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | ↑ / ↓ | History |
 | PageUp / PageDown, mouse wheel | Scroll the chat |
 | Tab | Complete |
+
+The chats you open are tabs at the top: click one to switch, × to close it (it stays saved), **+ new** for a new chat and **⧉ clone** to copy the current one and try something else (`/fork` does the same). While you scroll through a long answer, your message stays pinned at the top; click it to jump back to it.
 
 Drag with the mouse to select text in the chat; it's copied when you let go (double-click copies a word). This works like Claude Code's fullscreen mode and OpenCode: the system clipboard is used locally, and OSC 52 over SSH. The wheel scrolls the chat wherever the pointer is. To use your terminal's own selection instead, hold Shift while dragging (Option in iTerm2 and VS Code on macOS, Fn in Terminal.app).
 

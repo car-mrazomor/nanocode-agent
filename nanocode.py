@@ -289,6 +289,7 @@ class State:
         self.selection = None  # {"anchor": (line, char), "head": (line, char), "dragging": bool}
         self.view = {"rows": [], "width": 80, "height": 24}
         self.toast = None  # (text, shown until)
+        self.tabs = []  # [{"id", "title"}] sessions opened in this run, shown as tabs above the chat
         self.pending_permission = None
         self.always_allow = set()
         self.auto_approve = False
@@ -540,8 +541,59 @@ def transcript_rows(width, height):
         r += 1
         if r >= len(wrapped):
             i, r = i + 1, 0
-    st.view = {"rows": shown, "width": width, "height": height}
+    sticky = sticky_prompt(lines, pos[0], width, height)
+    if sticky:
+        rows[:len(sticky[1])] = sticky[1]
+    st.view = {"rows": shown, "width": width, "height": height, "sticky": sticky and (len(sticky[1]), sticky[0])}
     return rows
+
+
+USER_PREFIX = f"{fg('accent')}┃{RESET}{bg('panel')}"  # how user_block starts every row
+_blocks_cache = {"text": None, "blocks": []}
+
+
+def prompt_blocks(lines):
+    """(first, last) line index of each of your messages in the transcript."""
+    if _blocks_cache["text"] is not _lines_cache["text"]:
+        blocks, i = [], 0
+        while i < len(lines):
+            if lines[i].startswith(USER_PREFIX):
+                j = i
+                while j + 1 < len(lines) and lines[j + 1].startswith(USER_PREFIX):
+                    j += 1
+                blocks.append((i, j))
+                i = j + 1
+            else:
+                i += 1
+        _blocks_cache.update(text=_lines_cache["text"], blocks=blocks)
+    return _blocks_cache["blocks"]
+
+
+def sticky_prompt(lines, top_line, width, height):
+    """Like Claude Code: once your message scrolls off the top, it stays pinned there (up to 2 rows).
+    Returns (absolute first line of the message, rows) or None."""
+    if height < 8 or width < 12:
+        return None
+    above = [b for b in prompt_blocks(lines) if b[1] < top_line]
+    if not above:
+        return None
+    first, last = above[-1]
+    text = [parse_line(lines[i])[1][1:].strip() for i in range(first, last + 1)]
+    text = [t for t in text if t]
+    if not text:
+        return None
+    inner = width - 4
+    shown = text[:2]
+    cut = len(text) > 2
+    for k, t in enumerate(shown):
+        if len(t) > inner:
+            shown[k], cut = t[:inner - 1], True
+    if cut:
+        shown[-1] = shown[-1][:inner - 1] + "…"
+    bar, panel = f"fg:{THEME['accent']} bg:{THEME['bg']}", f"bg:{THEME['panel']} fg:{THEME['text']}"
+    rows = [[(bar, "┃"), (panel, "  " + t.ljust(inner) + " ")] for t in shown]
+    rows.append([(f"fg:{THEME['panel']} bg:{THEME['bg']}", "▀" * width)])
+    return first + st.lines_dropped, rows
 
 
 def slice_fragments(fragments, start, end, mark=None):
@@ -702,6 +754,12 @@ def transcript_mouse(event_type, button, x, y):
     if event_type == MouseEventType.SCROLL_DOWN:
         scroll_transcript(-3)
         return True
+    sticky = st.view.get("sticky")
+    if sticky and y < sticky[0] and not (st.selection and st.selection["dragging"]):
+        if event_type == MouseEventType.MOUSE_UP:  # jump to that message
+            st.scroll_top = (sticky[1], 0)
+            invalidate()
+        return event_type in (MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP)
     point = point_to_char(x, y)
     if point is None:
         return False
@@ -1947,7 +2005,7 @@ def sdk_tools():
                            handler=make_handler(t["name"])) for t in active_tools()]
 
 
-async def make_client(resume=None):
+async def make_client(resume=None, fork=False):
     if sdk is None:
         raise RuntimeError("claude-agent-sdk isn't installed, so the Claude provider can't run. "
                            "Reinstall nanocode, or switch provider: nanocode setup")
@@ -1965,7 +2023,10 @@ async def make_client(resume=None):
         setting_sources=[],
         strict_mcp_config=True,
     )
-    if "tools" in {f.name for f in dataclasses.fields(sdk.ClaudeAgentOptions)}:
+    fields = {f.name for f in dataclasses.fields(sdk.ClaudeAgentOptions)}
+    if fork and resume and "fork_session" in fields:
+        options.fork_session = True
+    if "tools" in fields:
         options.tools = []  # no Claude Code built-ins: only nanocode's tools, which handle permissions themselves
 
     async def deny_others(tool_name, _input, _context):
@@ -2004,6 +2065,7 @@ async def sdk_query(text):
             stream_end()
             if msg.session_id:
                 st.session["sdk_session_id"] = msg.session_id
+                st.session["fork"] = False  # a clone now has its own Claude session
             usage = msg.usage or {}
             tokens_in = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens",
                                                         "cache_creation_input_tokens"))
@@ -2366,16 +2428,25 @@ async def recap():
 
 # --- Sessions: .nanocode/sessions/<id>.json ---
 
+SESSION_KEYS = ("id", "title", "created", "sdk_session_id", "fork")
+
+
+def make_session_id():
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
+
+
 def new_session():
-    st.session = {"id": time.strftime("%Y%m%d-%H%M%S"), "title": None, "created": time.time(), "sdk_session_id": None}
+    st.session = {"id": make_session_id(), "title": None, "created": time.time(), "sdk_session_id": None,
+                  "fork": False}
     st.activity, st.changed = [], {}
+    tab_list()
 
 
 def save_session():
     if not st.session.get("title"):
         return
     if not st.session.get("id"):
-        st.session.update(id=time.strftime("%Y%m%d-%H%M%S"), created=time.time())
+        st.session.update(id=make_session_id(), created=time.time())
     try:
         ensure_project_dir()
         sessions_dir().mkdir(parents=True, exist_ok=True)
@@ -2428,25 +2499,121 @@ async def resume_session(arg):
     if not match:
         out(f"{RED}⏺ no saved chat '{arg}' (try /resume to list them){RESET}\n")
         return
+    if st.backend == "sdk" and not match.get("sdk_session_id"):
+        out(f"{RED}⏺ that chat has no Claude session id, so it can't be resumed{RESET}\n")
+        return
+    if match.get("id") != st.session.get("id"):
+        leave_current_chat()
+    await open_session(match)
+    out(f"{GREEN}⏺ Resumed:{RESET} {match['title']} {DIM}({time_ago(match['updated'])}){RESET}\n")
+
+
+async def open_session(match):
+    """Makes a saved chat the current one: its messages (or Claude session), usage and screen."""
+    st.model = match.get("model") or st.model
     if st.backend == "sdk":
-        if not match.get("sdk_session_id"):
-            out(f"{RED}⏺ that chat has no Claude session id, so it can't be resumed{RESET}\n")
-            return
-        st.model = match.get("model") or st.model
         if st.client:
             await st.client.disconnect()
-        st.client = await make_client(resume=match["sdk_session_id"])
+        st.client = await make_client(resume=match.get("sdk_session_id"), fork=bool(match.get("fork")))
     else:
-        st.model = match.get("model") or st.model
         st.messages[:] = match.get("messages") or []
-    st.session = {k: match.get(k) for k in ("id", "title", "created", "sdk_session_id")}
+    st.session = {k: match.get(k) for k in SESSION_KEYS}
     st.usage.update(input=0, output=0, cost=0.0)
     st.usage.update({k: v for k, v in (match.get("usage") or {}).items() if k in st.usage})
     st.activity = [tuple(a) for a in match.get("activity") or []]
     st.changed = {k: list(v) for k, v in (match.get("changed") or {}).items()}
     reset_view(match.get("screen", "") if not st.headless else "")
     st.trim_notice = False
-    out(f"{GREEN}⏺ Resumed:{RESET} {match['title']} {DIM}({time_ago(match['updated'])}){RESET}\n")
+    tab_list()
+
+
+def read_session(session_id):
+    try:
+        return json.loads((sessions_dir() / f"{session_id}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+async def new_chat(announce=True):
+    if st.backend == "sdk":
+        if st.client:
+            await st.client.disconnect()
+        st.client = await make_client()
+    st.messages.clear()
+    new_session()
+    reset_view()
+    st.trim_notice, st.ctx_tokens = False, 0
+    if announce:
+        out(f"{GREEN}⏺ New chat{RESET} {DIM}(the old one is saved: /resume){RESET}\n")
+
+
+def tab_list():
+    """The tabs, with the current chat always among them."""
+    current = st.session.get("id")
+    if current and not any(t["id"] == current for t in st.tabs):
+        st.tabs.append({"id": current, "title": None})
+    for tab in st.tabs:
+        if tab["id"] == current:
+            tab["title"] = st.session.get("title")
+    return st.tabs
+
+
+def leave_current_chat():
+    """Saves the current chat before another one opens; an empty, untitled one just closes."""
+    save_session()
+    if not st.session.get("title"):
+        st.tabs[:] = [t for t in st.tabs if t["id"] != st.session.get("id")]
+
+
+async def switch_tab(session_id):
+    if session_id == st.session.get("id"):
+        return
+    match = read_session(session_id)
+    if not match:
+        st.tabs[:] = [t for t in st.tabs if t["id"] != session_id]
+        show_toast("that chat isn't saved anymore")
+        return
+    if match.get("backend") != st.backend:
+        show_toast(f"that chat is on {match.get('backend')}: /provider {match.get('backend')}")
+        return
+    leave_current_chat()
+    await open_session(match)
+
+
+async def close_tab(session_id):
+    tabs = tab_list()
+    index = next((i for i, t in enumerate(tabs) if t["id"] == session_id), None)
+    if index is None:
+        return
+    if session_id == st.session.get("id"):
+        others = [t for t in tabs if t["id"] != session_id]
+        if others:
+            await switch_tab(others[min(index, len(others) - 1)]["id"])
+        else:
+            save_session()
+            await new_chat(announce=False)
+    st.tabs[:] = [t for t in st.tabs if t["id"] != session_id]
+    save_session()
+
+
+async def fork_session():
+    """A copy of this chat to try something else; the original stays as it is."""
+    if not st.session.get("title"):
+        out(f"{DIM}nothing to clone yet{RESET}\n")
+        return
+    save_session()
+    title = st.session["title"]
+    st.session = {**st.session, "id": make_session_id(), "created": time.time(),
+                  "title": title if title.endswith("(copy)") else f"{title} (copy)"}
+    if st.backend == "sdk" and st.session.get("sdk_session_id"):
+        st.session["fork"] = True  # Claude makes the copy when the next message is sent
+        if st.client:
+            await st.client.disconnect()
+        st.client = await make_client(resume=st.session["sdk_session_id"], fork=True)
+    st.scroll_top = st.selection = None
+    tab_list()
+    save_session()
+    out(f"{GREEN}⏺ Cloned{RESET} {DIM}→ {st.session['title']} (the original is in the other tab){RESET}\n")
 
 
 # --- Commands ---
@@ -2456,6 +2623,7 @@ COMMANDS = {
     "/model": "list models, or switch: /model <name>",
     "/provider": "list providers, or switch: /provider <name>",
     "/resume": "list saved chats, or /resume <n>",
+    "/fork": "clone this chat into a new tab",
     "/compact": "summarize the chat to free up context",
     "/undo": "revert the last file change",
     "/learn": "learn from this chat: save lessons and skills",
@@ -2932,15 +3100,14 @@ async def run_input(text):
         elif word == "/config":
             out(show_config() + "\n")
         elif word == "/c":
-            if st.backend == "sdk":
-                if st.client:
-                    await st.client.disconnect()
-                st.client = await make_client()
-            st.messages.clear()
-            new_session()
-            reset_view()
-            st.trim_notice, st.ctx_tokens = False, 0
-            out(f"{GREEN}⏺ New chat{RESET} {DIM}(the old one is saved: /resume){RESET}\n")
+            leave_current_chat()
+            await new_chat()
+        elif word == "/fork":
+            await fork_session()
+        elif word == "/tab":
+            await switch_tab(arg)
+        elif word == "/close-tab":
+            await close_tab(arg)
         elif word.startswith("/") and word[1:] in list_skills():
             out(f"  {DIM}⎿  loaded skill {word[1:]}{RESET}")
             task = expand_mentions(arg) if arg else f"Run the {word[1:]} skill."
@@ -3375,13 +3542,58 @@ def build_app():
                        align=WindowAlign.RIGHT)]),
     ])
 
-    session = VSplit([
-        HSplit([
-            VSplit([Window(width=2), st.output_window, Window(width=2)]),
-            Window(height=1),
-            VSplit([Window(width=2), HSplit([prompt_panel, footer]), Window(width=2)]),
+    # --- tabs: the chats opened in this run, like OpenCode ---
+    def on_click(action):
+        def handler(event):
+            if event.event_type != MouseEventType.MOUSE_UP:
+                return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
+            action()
+            return None
+        return handler
+
+    def tab_bar():
+        columns = st.app.output.get_size().columns if st.app else 80
+        current = st.session.get("id")
+        actions = [("class:tab.action", " + new ", on_click(run_command("/c"))), ("class:tabbar", " "),
+                   ("class:tab.action", " ⧉ clone ", on_click(run_command("/fork"))), ("class:tabbar", " ")]
+        room = columns - sum(len(f[1]) for f in actions) - 4
+        tabs = list(tab_list())
+        width = max(8, min(28, room // max(1, len(tabs)) - 4))
+        shown, hidden = [], 0
+        for tab in reversed(tabs):  # the newest tabs, and always the current one
+            if (len(shown) + 1) * (width + 5) > room and tab["id"] != current:
+                hidden += 1
+                continue
+            shown.insert(0, tab)
+        parts = [("class:tabbar", " ")]
+        if hidden:
+            parts.append(("class:tabbar.muted", f"‹{hidden} "))
+        for tab in shown:
+            active = tab["id"] == current
+            style = "class:tab.active" if active else "class:tab"
+            title = tab["title"] or "New session"
+            title = title if len(title) <= width else title[:width - 1] + "…"
+            parts += [(style, f" {title} ", on_click(run_command(f"/tab {tab['id']}"))),
+                      (style + " class:tab.close", "× ", on_click(run_command(f"/close-tab {tab['id']}"))),
+                      ("class:tabbar", " ")]
+        used = sum(len(f[1]) for f in parts + actions)
+        parts.append(("class:tabbar", " " * max(0, columns - used)))
+        return parts + actions
+
+    tabs_row = Window(FormattedTextControl(tab_bar), height=1, style="class:tabbar")
+
+    session = HSplit([
+        tabs_row,
+        VSplit([
+            HSplit([
+                Window(height=1),
+                VSplit([Window(width=2), st.output_window, Window(width=2)]),
+                Window(height=1),
+                VSplit([Window(width=2), HSplit([prompt_panel, footer]), Window(width=2)]),
+                Window(height=1),  # a little room under the prompt
+            ]),
+            sidebar,
         ]),
-        sidebar,
     ])
 
     # --- dialogs: command palette, models, sessions, providers ---
@@ -3469,6 +3681,7 @@ def build_app():
         actions = [
             ("New session", "ctrl+x n", run_command("/c")),
             ("Switch session", "ctrl+x l", sessions_dialog),
+            ("Clone session", "ctrl+x f", run_command("/fork")),
             ("Switch model", "ctrl+x m", models_dialog),
             ("Switch provider", "", providers_dialog),
             ("Toggle sidebar", "ctrl+x b", toggle_sidebar),
@@ -3476,7 +3689,7 @@ def build_app():
             ("Undo last file change", "ctrl+x u", run_command("/undo")),
         ]
         actions += [(f"{cmd}  {desc}", "", run_command(cmd)) for cmd, desc in COMMANDS.items()
-                    if cmd not in ("/c", "/compact", "/undo", "/model", "/provider", "/resume")]
+                    if cmd not in ("/c", "/compact", "/undo", "/model", "/provider", "/resume", "/fork")]
         actions += [(f"/{name}  {info['description'][:40]}", "skill", run_command(f"/{name}"))
                     for name, info in list_skills().items()]
         actions.append(("Exit", "ctrl+x q", lambda: st.app.exit()))
@@ -3620,7 +3833,7 @@ def build_app():
     def _(event):
         palette()
 
-    leader = {"n": run_command("/c"), "l": sessions_dialog, "m": models_dialog, "b": toggle_sidebar,
+    leader = {"n": run_command("/c"), "f": run_command("/fork"), "l": sessions_dialog, "m": models_dialog, "b": toggle_sidebar,
               "c": run_command("/compact"), "u": run_command("/undo"), "h": run_command("/help"),
               "q": lambda: st.app.exit()}
     for key, action in leader.items():
@@ -3682,6 +3895,11 @@ def build_app():
         "completion-menu.meta.completion": f"bg:{T['panel2']} fg:{T['muted']}",
         "completion-menu.meta.completion.current": f"bg:{T['accent']} fg:{T['bg']}",
         "scrollbar.background": f"bg:{T['panel2']}", "scrollbar.button": f"bg:{T['border']}",
+        "tabbar": f"bg:{T['panel']}", "tabbar.muted": f"bg:{T['panel']} fg:{T['muted']}",
+        "tab": f"bg:{T['panel2']} fg:{T['muted']}",
+        "tab.active": f"bg:{T['bg']} fg:{T['text']} bold",
+        "tab.close": f"fg:{T['faint']} nobold",
+        "tab.action": f"bg:{T['panel']} fg:{T['accent']}",
     })
 
     app = Application(
