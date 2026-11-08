@@ -47,14 +47,14 @@
   .nav .gh { display: inline-flex; align-items: center; gap: 7px; }
   .nav svg { width: 16px; height: 16px; fill: currentColor; }
 
-  /* hero: dithered arcs, the mark, then the words */
-  .hero { position: relative; text-align: center; border-bottom: 1px solid var(--line); overflow: hidden; }
-  .art { height: min(32vh, 310px); display: flex; justify-content: center; overflow: hidden; pointer-events: none; user-select: none;
-    -webkit-mask-image: linear-gradient(transparent 0%, #000 40% 68%, transparent 94%); mask-image: linear-gradient(transparent 0%, #000 40% 68%, transparent 94%); }
-  .art pre { margin: 0; font: 11px/1.3 var(--mono); letter-spacing: 1px; opacity: .7; flex-shrink: 0; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .hero-content { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; margin-top: -100px; padding: 0 24px 72px; }
-  .mark { width: 72px; height: 72px; filter: drop-shadow(0 0 28px rgba(127,167,201,.45)); }
-  .eyebrow { margin: 22px 0 0; font: 700 12px/1.4 var(--mono); text-transform: uppercase; color: var(--accent); letter-spacing: 0; }
+  /* hero: the word "nanocode" drawn in ASCII as the background; hover scrambles it (like libreservice.se) */
+  .hero { position: relative; text-align: center; border-bottom: 1px solid var(--line); overflow: hidden; min-height: clamp(640px, 92vh, 900px); display: flex; align-items: flex-end; justify-content: center; }
+  #word { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
+  .hero::before { content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    background: radial-gradient(ellipse 40% 34% at 50% 72%, rgba(16,17,19,.78), rgba(16,17,19,.35) 65%, transparent 100%); }
+  .hero-content { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; padding: 0 24px 76px; pointer-events: none; }
+  .hero-content a, .hero-content button { pointer-events: auto; }
+  .eyebrow { margin: 0; font: 700 12px/1.4 var(--mono); text-transform: uppercase; color: var(--accent); letter-spacing: 0; }
   h1 { font-family: var(--display); font-size: clamp(2.4rem, 5.6vw, 3.8rem); font-weight: 600; line-height: 1.08; letter-spacing: -.03em; margin: 20px auto 22px; }
   h1 em { font-family: var(--serif); font-style: italic; font-weight: 400; letter-spacing: -.015em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; padding-right: .06em; }
   .description { color: var(--muted); max-width: 620px; margin: 0 auto; font-size: 1rem; line-height: 1.8; }
@@ -136,8 +136,7 @@
   @media (max-width: 620px) {
     .top .in { padding: 0 16px; }
     .nav a:not(.gh) { display: none; }
-    .art { height: min(26vh, 230px); }
-    .art pre { font-size: 9px; letter-spacing: 1.5px; }
+    .hero { min-height: 780px; }
     .hero-content { padding: 0 16px 56px; }
     .description br, h1 br { display: none; }
     .rail, footer { border: 0; }
@@ -183,13 +182,11 @@
 </div>
 
 <header class="hero">
-  <div class="art" aria-hidden="true"><pre id="art"></pre></div>
+  <canvas id="word" aria-hidden="true"></canvas>
   <div class="hero-content">
-    <svg class="mark" aria-hidden="true"><use href="#logo"/></svg>
     <p class="eyebrow">Open source · One Python file · Fully hackable</p>
     <h1>The coding agent that <br>fits in <em>one file.</em></h1>
-    <p class="description">Reads, edits and runs your code from the terminal. <br>On your Claude subscription, any OpenRouter model, or local models with Ollama. <br>It asks before it touches anything.</p>
-    <p class="ownership">Hackable and fully editable: it's one file — read it, change anything, make it yours.<span>Your keys. Your models. Your machine. Your code.</span></p>
+    <p class="description">Reads, edits and runs your code from the terminal — on your Claude subscription, any OpenRouter model, or local models with Ollama. <br>Hackable and fully editable: read it, change anything, make it yours.</p>
     <div class="actions">
       <a class="action primary" href="#quickstart">Get started</a>
       <a class="action" href="https://github.com/car-mrazomor/nanocode-agent#readme">Read the docs</a>
@@ -286,32 +283,122 @@
 (() => {
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  // dithered arcs rising from behind the mark (ASCII, like OpenClaw's hero), slowly rippling outward
-  const art = document.getElementById("art");
-  const ramp = " .:-=+xX#8@";
-  const COLS = 190, ROWS = 26;
-  const frame = t => {
-    const cx = COLS / 2, cy = ROWS + 5;
-    let out = "";
-    for (let y = 0; y < ROWS; y++) {
-      let row = "";
-      for (let x = 0; x < COLS; x++) {
-        const dx = (x - cx) / 2.2, dy = y - cy;
-        const r = Math.hypot(dx, dy);
-        const ang = Math.atan2(-dy, Math.abs(dx));
-        const ring = Math.cos(r * 0.42 - t) * 0.5 + 0.5;
-        const band = Math.exp(-Math.pow((r - 24) / 15, 2));
-        const wing = 0.35 + 0.65 * Math.pow(Math.sin(ang * 1.1 + 0.25), 2);
-        const v = Math.pow(ring, 2.2) * band * wing + (Math.random() - 0.5) * 0.06;
-        row += ramp[Math.max(0, Math.min(ramp.length - 1, Math.floor(v * ramp.length * 1.15)))];
+  // The word "nanocode" as ASCII in the hero background. Each glyph's density follows how much of the letter
+  // covers its cell. Glyphs fly in, drift a little and now and then swap; under the pointer they scramble
+  // into hex, flash, and settle back.
+  const hero = document.querySelector(".hero"), canvas = document.getElementById("word"), ctx = canvas.getContext("2d");
+  const TIERS = ["@#M&W8", "%*+=x", ":;~-", ".·'`"], HEX = "0123456789ABCDEF";
+  const GRAD = [[111,182,198], [111,156,203], [138,140,196], [173,135,182], [191,137,174]];
+  let W = 0, H = 0, dpr = 1, cell = 9, P = [], grid = null, cols = 0, rows = 0, ox = 0, oy = 0;
+  let mx = -9999, my = -9999, lastMove = 0, busyUntil = 0, born = 0, raf = 0, idle = 0;
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const color = x => { const t = Math.min(.999, Math.max(0, x / W)) * (GRAD.length - 1), i = t | 0, f = t - i;
+    return GRAD[i].map((c, k) => Math.round(lerp(c, GRAD[i + 1][k], f))); };
+  const pick = s => s[Math.random() * s.length | 0];
+
+  function build() {
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    W = hero.clientWidth; H = hero.clientHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cell = W < 620 ? 6 : W < 1000 ? 8 : 9;
+    // draw the word offscreen, as wide as fits, then read how much of each cell it covers
+    const off = document.createElement("canvas"); off.width = W; off.height = H;
+    const o = off.getContext("2d");
+    const narrow = W < 620, words = narrow ? ["nano", "code"] : ["nanocode"];   // stacked on phones, so it stays big
+    let size = 400; o.font = `800 ${size}px Switzer, Inter, system-ui, sans-serif`;
+    const widest = Math.max(...words.map(w => o.measureText(w).width));
+    size = Math.min(size * (W * (narrow ? .9 : .94)) / widest, H * (narrow ? .2 : .38));
+    o.font = `800 ${size}px Switzer, Inter, system-ui, sans-serif`;
+    o.textAlign = "center"; o.textBaseline = "middle"; o.fillStyle = "#fff";
+    words.forEach((w, i) => o.fillText(w, W / 2, narrow ? H * .13 + i * size * .82 : H * .3));
+    const data = o.getImageData(0, 0, W, H).data;
+    cols = Math.ceil(W / cell); rows = Math.ceil(H / cell); grid = new Int32Array(cols * rows).fill(-1);
+    ox = (W - cols * cell) / 2 + cell / 2; oy = (H - rows * cell) / 2 + cell / 2;
+    P = [];
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const x = ox + c * cell, y = oy + r * cell;
+      let cover = 0, n = 0;
+      for (let dy = -.35; dy <= .35; dy += .35) for (let dx = -.35; dx <= .35; dx += .35) {
+        const sx = Math.round(x + dx * cell), sy = Math.round(y + dy * cell);
+        if (sx >= 0 && sy >= 0 && sx < W && sy < H) { cover += data[(sy * W + sx) * 4 + 3] / 255; n++; }
       }
-      out += row + "\n";
+      cover /= n || 1;
+      if (cover < .08) continue;
+      const tier = cover > .85 ? 0 : cover > .55 ? 1 : cover > .3 ? 2 : 3;
+      grid[r * cols + c] = P.length;
+      P.push({ x, y, tier, g: pick(TIERS[tier]), rgb: color(x), ph: Math.random() * 6.28, sp: .4 + Math.random() * .8,
+               sx: (Math.random() * 2 - 1) * 120, sy: (Math.random() * 2 - 1) * 90, delay: (x / W) * 700 + Math.random() * 350,
+               until: 0, flash: 0, cool: 0, swap: 800 + Math.random() * 3000 });
     }
-    art.textContent = out;
-  };
-  const t0 = performance.now();
-  const loop = now => { frame((now - t0) / 900); setTimeout(() => requestAnimationFrame(loop), 90); };
-  if (still) frame(1.2); else requestAnimationFrame(loop);
+    born = performance.now();
+  }
+
+  // scramble the glyphs around a point (pointer, tap, or an automatic ripple)
+  function stir(px, py, radius, now) {
+    const c0 = Math.max(0, Math.floor((px - radius - ox) / cell)), c1 = Math.min(cols - 1, Math.ceil((px + radius - ox) / cell));
+    const r0 = Math.max(0, Math.floor((py - radius - oy) / cell)), r1 = Math.min(rows - 1, Math.ceil((py + radius - oy) / cell));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      const i = grid[r * cols + c]; if (i < 0) continue;
+      const p = P[i]; if (p.until > now || p.cool > now) continue;
+      const d = Math.hypot(p.x - px, p.y - py);
+      if (d < radius && Math.random() < .12 + .6 * (1 - d / radius) ** 2) {
+        p.until = now + 520 + d * 3 + Math.random() * 260; p.flash = p.until + 170; p.cool = p.flash + 2600;
+        busyUntil = Math.max(busyUntil, p.flash + 50);
+      }
+    }
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = `600 ${cell * 1.32}px "JetBrains Mono", ui-monospace, monospace`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const t = now / 1000, age = now - born;
+    for (const p of P) {
+      let k = Math.min(1, Math.max(0, (age - p.delay) / 750)); if (still) k = 1;
+      if (k <= 0) continue;
+      const e = 1 - (1 - k) ** 3;
+      const x = p.x + p.sx * (1 - e) + Math.sin(t * p.sp * 2 + p.ph) * .5 * e;
+      const y = p.y + p.sy * (1 - e) + Math.cos(t * p.sp * 1.6 + p.ph) * .5 * e;
+      if (!still && now > p.swap && p.until < now) { p.g = pick(TIERS[p.tier]); p.swap = now + 1400 + Math.random() * 3600; }
+      const [r, g, b] = p.rgb;
+      if (p.until > now) {                       // scrambling: bright hex
+        ctx.fillStyle = `rgba(${r},${g},${b},${.95 * e})`; ctx.fillText(pick(HEX), x, y);
+      } else if (p.flash > now) {                // the flash before it settles
+        ctx.fillStyle = `rgba(240,242,246,${e})`; ctx.fillText(p.g, x, y);
+      } else {
+        const a = [.5, .38, .28, .18][p.tier] * e;
+        ctx.fillStyle = `rgba(${r},${g},${b},${a})`; ctx.fillText(p.g, x, y);
+      }
+    }
+  }
+
+  // full speed while something moves (intro, pointer, scrambles); a calm 12 fps otherwise
+  function loop() {
+    const now = performance.now();
+    draw(now);
+    const active = now - born < 1500 || now < busyUntil || now - lastMove < 150;
+    if (!active && now - idle > 6500 && document.visibilityState === "visible") {   // an occasional ripple
+      idle = now; const p = P[Math.random() * P.length | 0]; if (p) stir(p.x, p.y, 70, now);
+    }
+    if (active) { sleeping = 0; raf = requestAnimationFrame(loop); }
+    else sleeping = setTimeout(() => { sleeping = 0; raf = requestAnimationFrame(loop); }, 80);
+  }
+  let sleeping = 0;
+  const wake = () => { if (sleeping) { clearTimeout(sleeping); sleeping = 0; raf = requestAnimationFrame(loop); } };
+
+  hero.addEventListener("pointermove", e => {
+    if (e.pointerType === "touch") return;             // touch: a tap stirs instead (pointerdown)
+    const r = canvas.getBoundingClientRect(); mx = e.clientX - r.left; my = e.clientY - r.top; lastMove = performance.now();
+    if (!still) { stir(mx, my, 92, lastMove); wake(); }
+  });
+  hero.addEventListener("pointerleave", () => { mx = my = -9999; });
+  hero.addEventListener("pointerdown", e => { if (still) return; const r = canvas.getBoundingClientRect(); stir(e.clientX - r.left, e.clientY - r.top, 110, performance.now()); wake(); });
+  let resizeTimer = 0;
+  addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { build(); if (still) draw(performance.now() + 9e9); }, 150); });
+  (document.fonts ? Promise.race([document.fonts.ready, new Promise(r => setTimeout(r, 1500))]) : Promise.resolve()).then(() => {
+    build(); idle = performance.now();
+    if (still) draw(performance.now() + 9e9); else loop();
+  });
 
   // sections fade in
   const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { threshold: 0.1 });
