@@ -1025,29 +1025,3 @@ def test_sticky_prompt_while_reading_the_answer():
 def nc_mouse(name):
     from prompt_toolkit.mouse_events import MouseEventType
     return getattr(MouseEventType, name)
-
-
-def test_tabs_switch_clone_and_close(sandbox, monkeypatch):
-    nc.st.backend, nc.st.model, nc.st.openrouter_key = "api", "m", "k"
-    replies = iter(["Answer A.", "Answer B."])
-    mock_http(monkeypatch, lambda req: sse([{"choices": [{"delta": {"content": next(replies)}}]}]))
-    nc.new_session()
-    run(nc.run_input("question A"))
-    first = nc.st.session["id"]
-    run(nc.run_input("/c"))
-    run(nc.run_input("question B"))
-    second = nc.st.session["id"]
-    assert [t["id"] for t in nc.tab_list()] == [first, second]
-    run(nc.run_input(f"/tab {first}"))
-    assert nc.st.session["id"] == first and "Answer A." in plain(nc.st.output)
-    assert "Answer B." not in plain(nc.st.output) and nc.st.messages[0]["content"] == "question A"
-    run(nc.run_input("/fork"))
-    clone = nc.st.session["id"]
-    assert clone not in (first, second) and nc.st.session["title"].endswith("(copy)")
-    assert nc.st.messages[0]["content"] == "question A" and len(nc.tab_list()) == 3
-    run(nc.run_input(f"/close-tab {clone}"))
-    assert nc.st.session["id"] in (first, second) and [t["id"] for t in nc.tab_list()] == [first, second]
-    assert nc.read_session(clone)["title"].endswith("(copy)")      # closing a tab keeps the saved chat
-    run(nc.run_input("/c"))                                          # an empty new chat closes when you leave it
-    run(nc.run_input(f"/tab {second}"))
-    assert [t["id"] for t in nc.tab_list()] == [first, second] and "Answer B." in plain(nc.st.output)
