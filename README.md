@@ -17,6 +17,8 @@ It runs on:
 - **any OpenRouter model**: Claude, GLM, GPT, Gemini, DeepSeek, Kimi, or OpenRouter's auto router
 - **local models through Ollama**: free, private and offline
 
+With tools to read, edit and run code, plan and hand work to sub-agents, search the web through your own browser, use any MCP server, compare models side by side, and handle your email.
+
 > Inspired by [1rgs/nanocode](https://github.com/1rgs/nanocode), a minimal Claude Code alternative in ~250 lines. This project started from it and grew into a full agent.
 
 ```
@@ -99,6 +101,9 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/shells` | Background shells: list them, or `/shells stop <name>` |
 | `/auto` | Toggle auto-approve for edits and commands |
 | `/rea` | Reverse-engineering tools: status, `/rea on`, `/rea off` |
+| `/mcp` | MCP servers: list, `add`, `remove`, `import` (from Claude Code / Claude Desktop), `tools`, `on`/`off` per server or tool |
+| `/compare <prompt>` | Send one prompt to several models and see the answers side by side. `/compare models a, b, c` picks them |
+| `/email [task]` | Summarize and triage your inbox, or do an email task (set up with `nanocode email`) |
 | `/terminal-setup` | Make Shift+Enter, Cmd+Backspace and Cmd+arrows work in your terminal |
 | `/cost`, `/config`, `/help` | Usage, settings, help |
 | `/c`, `/q` | New chat, quit |
@@ -148,6 +153,62 @@ nanocode -p "fix the failing test" --yes                      # allow edits and 
 nanocode -c                                                   # continue the last chat in this folder
 nanocode --provider ollama -m qwen3 -p "summarize README.md"  # one-off provider and model
 ```
+
+## Agents and planning
+
+nanocode chats over many turns and works through tasks on its own: it plans, calls tools, checks the results and keeps going until it's done.
+
+- **Plan.** For tasks with several steps it keeps a checklist (`☐ ◐ ☑`) in the chat and ticks items off as it works.
+- **Sub-agents.** It can hand a side task (exploring the codebase, reading docs) to a sub-agent with a fresh context, which works on its own and reports back only the result. Several run in parallel. They can read, search and use the web, but not edit files or run commands unless you set `"agent_edits": true` in the config.
+
+## Web search
+
+`web_search` and `web_fetch` work with every provider and model, because nanocode runs them itself:
+
+- **Your real browser.** Pages are loaded by your installed Chrome, Chromium, Edge or Brave, headless and with a throwaway profile, so JavaScript-heavy pages work. Without a browser, a plain request is used.
+- **Engines.** DuckDuckGo by default (fast), Bing, or Google (often blocks headless browsers, then DuckDuckGo is used). Pick one with `"search_engine"` in the config.
+- **OpenRouter's own search.** Set `"search_engine": "openrouter"` to let OpenRouter's web plugin search (with your model, or `"search_model"`). It costs a little extra per search.
+- **Asks first.** Going online asks for permission (answer `a` to allow it for the session).
+
+## MCP
+
+Connect any local MCP server and its tools become nanocode's tools, on every provider.
+
+```sh
+/mcp add github npx -y @modelcontextprotocol/server-github
+/mcp import                 # copy the servers you use in Claude Code, Claude Desktop or .mcp.json
+/mcp tools                  # every tool, on or off
+/mcp off github.delete_repo # switch one tool off (or a whole server: /mcp off github)
+```
+
+Servers start with your first message. Small servers' tools are offered directly; servers with more than 20 tools are searched on demand, so the model's tool list stays short. Tools not marked read-only ask before running. `ctrl+p → MCP tools on/off` toggles tools from a list. Servers are stored under `"mcp_servers"` in the config (`command`, `args`, `env`); `${VAR}` in them is filled from your environment. Remote (HTTP) servers aren't supported yet.
+
+## Compare
+
+```
+/compare models anthropic/claude-sonnet-5, z-ai/glm-5.3, ollama:qwen3:8b
+/compare explain this regex: ^(?=.*\d).{8,}$
+```
+
+The prompt goes to every model at once and the answers appear side by side (one under the other in narrow terminals), each with its time, tokens and cost. Models can be OpenRouter models, `ollama:<model>` or `claude:<model>` (your subscription).
+
+**Only what you send, only when you ask.** Compare is a command, not a tool: the model can never start it. It sends just the prompt you typed (and files you attach with `@`), with no chat history, memory or project details, and the answers don't become part of your chat.
+
+## Email
+
+```sh
+nanocode email      # once, in a terminal: address, servers (filled in for Gmail, iCloud, Outlook, Yahoo, Fastmail), password
+```
+
+Then in nanocode:
+
+- **`/email`** summarizes what's new: what needs a reply, what's FYI, what looks like spam, with suggested tags and moves.
+- **`/email <task>`**, or just ask: "draft a reply to Ana saying Friday works", "move the newsletters to archive", "tag everything from my bank as finance".
+- **Drafts match your style:** before writing, it reads a few of your sent emails for tone, greeting and sign-off.
+- **It can't send by itself.** Drafts go to your Drafts folder. Sending only happens when you ask, and you confirm every send, even in auto mode.
+- **Email is untrusted.** nanocode treats email content as information, never as instructions.
+
+It uses IMAP and SMTP (no extra packages). Gmail and iCloud need an app password. The password is stored in `~/.nanocode/config.json`, readable only by you.
 
 ## Background shells
 
@@ -231,7 +292,8 @@ When a task needs one you don't have, nanocode tells you what to install and car
 ## Safety
 
 - **Permissions.** nanocode asks before every file edit or command, unless you choose "just do it" in setup, use `/auto`, or pass `--yes`.
-- **Destructive commands always ask,** even in auto mode: `rm -rf /`, `git push --force`, `git reset --hard`, `mkfs`, and similar.
+- **Destructive commands always ask,** even in auto mode: `rm -rf /`, `git push --force`, `git reset --hard`, `mkfs`, and similar. So does sending an email.
+- **Going online asks:** web searches and page reads, and MCP tools that aren't read-only.
 - **Undo.** `/undo` reverts file changes one at a time.
 - **Private by default.** Chats and project memory stay out of git. Your API key is stored with user-only permissions.
 
