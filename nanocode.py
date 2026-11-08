@@ -45,7 +45,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -201,9 +201,102 @@ async def check_for_update(force=False):
     latest = cache.get("latest")
     if force or time.time() - cache.get("checked", 0) > UPDATE_CHECK_EVERY:
         latest = await asyncio.to_thread(fetch_latest_version) or latest
-    st.update_available = latest if is_newer(latest) else None
+    skipped = update_cache().get("skipped") or []
+    st.update_available = latest if is_newer(latest) and (force or latest not in skipped) else None
     invalidate()
     return latest
+
+
+def skip_update(version):
+    """Like OpenCode's Skip: no more reminders about this version (a newer one still shows)."""
+    cache = update_cache()
+    cache["skipped"] = ((cache.get("skipped") or []) + [version])[-20:]
+    try:
+        (home_dir() / "update.json").write_text(json.dumps(cache))
+    except OSError:
+        pass
+    st.update_available = None
+    invalidate()
+
+
+async def install_update():
+    """Runs the installer in the background while nanocode keeps running (macOS, Linux)."""
+    version = st.update_available
+    st.update_state = "installing"
+    out(f"{fg('muted')}⏺ Installing nanocode {version}…{RESET}")
+    code, output = await asyncio.to_thread(run_installer_quietly)
+    if code == 0:
+        st.update_state = "installed"
+        out(f"{GREEN}⏺ Update successful!{RESET} {DIM}Restart to use nanocode {version}: /exit, or Restart in "
+            f"/update{RESET}\n")
+    else:
+        st.update_state = "failed"
+        tail = "\n".join(ANSI_RE.sub("", output).strip().splitlines()[-6:])
+        out(f"{RED}⏺ The update failed{RESET}\n{DIM}{tail}{RESET}\n  {DIM}try in a terminal: nanocode update{RESET}\n")
+    invalidate()
+
+
+def update_dialog_items():
+    """What /update offers, like OpenCode's update dialog: Skip, then Update (or Restart once installed)."""
+    version = st.update_available
+    if st.update_state == "installed":
+        return "Update successful!", [("Restart", f"close and start nanocode {version}", lambda: restart_app()),
+                                      ("Later", "keep using this version for now", lambda: None)]
+    if os.name == "nt":  # Windows locks files that are in use, so update after nanocode closes
+        update = ("Update", f"close nanocode, install {version}, start again", lambda: restart_app("update"))
+    else:
+        update = ("Update", f"install {version} ({__version__} now)", lambda: start_task(install_update()))
+    return f"Update available · nanocode {version}", [update, ("Skip", "don't remind me about this version",
+                                                             lambda: skip_update(version))]
+
+
+async def cmd_update():
+    if st.update_state == "installing":
+        out(f"{DIM}already installing…{RESET}\n")
+        return
+    if st.update_state != "installed":
+        latest = await check_for_update(force=True)
+        if latest is None:
+            out(f"{YELLOW}⏺ couldn't check for updates (offline?){RESET}\n")
+            return
+        if not is_newer(latest):
+            out(f"{GREEN}⏺ nanocode {__version__} is already up to date{RESET}\n")
+            return
+    title, items = update_dialog_items()
+    if st.ui.get("open_dialog"):
+        st.ui["open_dialog"](title, items)
+    else:
+        out(f"⏺ {title}: run `nanocode update`\n")
+
+
+def restart_app(after="restart"):
+    st.after_exit = after
+    if st.app is not None and st.app.is_running:
+        st.app.exit()
+
+
+def start_task(coro):
+    if st.task and not st.task.done():
+        coro.close()
+        show_toast("busy: wait for the current task")
+        return
+    st.task_started = time.time()
+    st.task = asyncio.ensure_future(coro)
+
+
+def after_exit():
+    """After the UI closes: start the new version (Restart), or update first (Windows)."""
+    action, st.after_exit = st.after_exit, None
+    if action == "update":
+        code = run_installer()
+        if code != 0:
+            return code
+    if action in ("update", "restart"):
+        launcher = home_dir() / "bin" / ("nanocode.cmd" if os.name == "nt" else "nanocode")
+        if launcher.exists() and os.name != "nt":
+            os.execv(str(launcher), [str(launcher)])
+        print(f"nanocode updated: run {'nanocode' if launcher.exists() else str(launcher)} to start the new version")
+    return 0
 
 
 def version_report(latest):
@@ -355,6 +448,9 @@ class State:
         self.toast = None  # (text, shown until)
         self.thinking_now = False  # the model is reasoning right now (shown in the footer)
         self.update_available = None  # newer version on GitHub, if any
+        self.update_state = None  # None, "installing", "installed" or "failed" (in-app /update)
+        self.after_exit = None  # "restart" (start the new version) or "update" (Windows: update, then restart)
+        self.ui = {}  # UI callbacks set by build_app (open_dialog)
         self.no_think = set()  # (backend, model) that rejected the thinking setting; sent without it
         self.pending_permission = None
         self.always_allow = set()
@@ -2782,6 +2878,7 @@ COMMANDS = {
     "/model": "list models, or switch: /model <name>",
     "/provider": "list providers, or switch: /provider <name>",
     "/version": "this version, and whether there's a newer one",
+    "/update": "install the newest nanocode",
     "/think": "how hard the model thinks: /think off|low|medium|high (on = medium)",
     "/resume": "list saved chats, or /resume <n>",
     "/compact": "summarize the chat to free up context",
@@ -3255,11 +3352,12 @@ async def run_input(text):
             await cmd_provider(arg)
         elif word == "/think":
             await cmd_think(arg)
+        elif word == "/update":
+            await cmd_update()
         elif word == "/version":
             latest = await check_for_update(force=True)
             note = f"{YELLOW}" if is_newer(latest) else f"{GREEN}"
-            out(f"{note}⏺ {version_report(latest)}{RESET}" + (f"\n  {DIM}quit nanocode (ctrl+x q), run it, then start "
-                                                              f"nanocode again{RESET}" if is_newer(latest) else "") + "\n")
+            out(f"{note}⏺ {version_report(latest).replace('run `nanocode update`', '/update')}{RESET}\n")
         elif word == "/model":
             await cmd_model(arg)
         elif word == "/resume":
@@ -3642,7 +3740,7 @@ def build_app():
                     ("class:thinking", "◈ thinking  ") if st.thinking_now else ("", ""),
                     ("class:warning" if armed else "class:muted", "esc again to interrupt" if armed else "esc interrupt")]
         branch = git_branch()
-        right = sum(len(text) for _, text in footer_right())
+        right = sum(len(fragment[1]) for fragment in footer_right())
         total = st.app.output.get_size().columns - (SIDEBAR_WIDTH if sidebar_visible() else 0) - 4
         room = max(8, total - right - len(branch) - 5)
         return [("class:muted", f" {fit_left(tilde(os.getcwd()), room)}"), ("class:faint", f"  {branch}" if branch else "")]
@@ -3651,8 +3749,9 @@ def build_app():
         parts = []
         if st.toast and time.monotonic() < st.toast[1]:
             parts.append(("class:success", f"{st.toast[0]}  "))
-        if st.update_available:
-            parts.append(("class:warning", f"↑ {st.update_available}: nanocode update  "))
+        notice = update_notice()
+        if notice:
+            parts += notice + [("", "  ")]
         if st.scroll_top is not None:
             parts.append(("class:muted", "scrolled back · pgdn  "))
         if st.backend != "sdk" and st.ctx_budget and st.messages:
@@ -3725,14 +3824,32 @@ def build_app():
 
     needs_setup = terminal_needs_setup()
 
+    def update_notice():
+        """Like OpenCode: `/update to install v1.2.3`, then `/exit restart to use v1.2.3`; click it to act."""
+        version = st.update_available
+        if not version:
+            return []
+        if st.update_state == "installing":
+            return [("class:muted", f"installing v{version}…")]
+        installed = st.update_state == "installed"
+
+        def click(event):
+            if event.event_type == MouseEventType.MOUSE_UP:
+                restart_app() if installed else start_input("/update")
+                return None
+            return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
+
+        command, rest = ("/exit", f" restart to use v{version}") if installed else ("/update", f" to install v{version}")
+        return [("class:accent", command, click), ("class:muted", rest, click)]
+
     def home_hint():
         name = user_name()
         hello = f"Welcome back, {name}" if name else "Welcome to nanocode"
         hint = [("class:muted", f"{hello} · "), ("class:text", "ctrl+p"), ("class:muted", " commands · "),
                 ("class:text", "/"), ("class:muted", " commands · "), ("class:text", "@"), ("class:muted", " files")]
-        if st.update_available:
-            hint += [("", "\n\n"), ("class:warning", f"nanocode {st.update_available} is available · update with "),
-                     ("class:text", "nanocode update")]
+        notice = update_notice()
+        if notice:
+            hint += [("", "\n\n")] + notice
         if needs_setup:
             hint += [("", "\n\n"), ("class:warning", "Shift+Enter and Cmd keys need a one-time setup in this "
                                                      "terminal: "), ("class:text", "/terminal-setup")]
@@ -3819,6 +3936,8 @@ def build_app():
         st.dialog = {"title": title, "items": items, "index": 0}
         dialog_filter.text = ""
         st.app.layout.focus(dialog_filter)
+
+    st.ui["open_dialog"] = open_dialog
 
     def close_dialog():
         st.dialog = None
@@ -4130,7 +4249,7 @@ def on_enter(buff):
     if not text:
         return False
     if ALIASES.get(text, text) == "/q":
-        st.app.exit()
+        restart_app() if st.update_state == "installed" else st.app.exit()  # like OpenCode: /exit to restart
         return False
     if not start_input(text):
         return True
@@ -4367,6 +4486,24 @@ def run_installer(*args):
     return subprocess.call(cmd)
 
 
+def run_installer_quietly():
+    """The update installer without a terminal (no questions), for /update inside the app. (code, output)"""
+    url = f"{RAW_BASE}/install.sh"
+    try:
+        resp = httpx.get(url, timeout=30, follow_redirects=True)
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        return 1, f"couldn't download the installer: {e}"
+    script = Path(tempfile.mkdtemp()) / "install.sh"
+    script.write_text(resp.text, encoding="utf-8")
+    try:
+        done = subprocess.run(["sh", str(script)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, start_new_session=True, timeout=1800)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+    return done.returncode, done.stdout.decode(errors="replace")
+
+
 async def run_headless(prompt, resume_last=False):
     st.headless = True
     new_session()
@@ -4535,7 +4672,7 @@ def main(argv=None):
         if prompt is not None:
             return asyncio.run(run_headless(prompt, args.resume))
         asyncio.run(run_interactive(args.resume))
-        return 0
+        return after_exit()
     except KeyboardInterrupt:
         return 130
 

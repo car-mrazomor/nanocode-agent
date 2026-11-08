@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import os
 import shutil
 import sys
@@ -1166,3 +1167,65 @@ def test_update_check(sandbox, monkeypatch, capsys):
 
     monkeypatch.setattr(nc.httpx, "get", lambda url, **kw: (_ for _ in ()).throw(httpx.ConnectError("offline")))
     assert nc.main(["version"]) == 0 and "couldn't check for updates" in capsys.readouterr().out
+
+
+def test_update_in_the_app(sandbox, monkeypatch):
+    (nc.home_dir()).mkdir(parents=True, exist_ok=True)
+    (nc.home_dir() / "update.json").write_text(json.dumps({"checked": time.time() + 999, "latest": "99.0.0"}))
+    monkeypatch.setattr(nc, "fetch_latest_version", lambda timeout=4: "99.0.0")
+    opened = []
+    nc.st.ui["open_dialog"] = lambda title, items: opened.append((title, [label for label, _, _ in items], items))
+
+    run(nc.check_for_update())
+    assert nc.st.update_available == "99.0.0"
+    run(nc.run_input("/update"))
+    title, labels, items = opened[-1]
+    assert title == "Update available · nanocode 99.0.0" and labels[-1] == "Skip"
+    assert labels[0] == "Update"
+
+    monkeypatch.setattr(nc, "run_installer_quietly", lambda: (0, "installed"))
+    run(nc.install_update())
+    assert nc.st.update_state == "installed" and "Update successful!" in plain(nc.st.output)
+    run(nc.run_input("/update"))
+    assert opened[-1][0] == "Update successful!" and opened[-1][1][0] == "Restart"
+
+    started = []
+    monkeypatch.setattr(nc.os, "execv", lambda path, argv: started.append(path))
+    (nc.home_dir() / "bin").mkdir()
+    (nc.home_dir() / "bin" / "nanocode").write_text("")
+    nc.restart_app()
+    if os.name != "nt":
+        assert nc.after_exit() == 0 and started and started[0].endswith("nanocode")
+
+    nc.st.update_state = None
+    monkeypatch.setattr(nc, "run_installer_quietly", lambda: (1, "boom\nno network"))
+    run(nc.install_update())
+    assert nc.st.update_state == "failed" and "no network" in plain(nc.st.output)
+
+    nc.skip_update("99.0.0")                       # Skip: no more reminders about this version
+    run(nc.check_for_update())
+    assert nc.st.update_available is None
+
+
+def test_update_notice_renders_on_both_screens(sandbox):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    async def scenario():
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = nc.build_app()
+            nc.st.update_available = "99.0.0"
+            task = asyncio.ensure_future(app.run_async())
+            await asyncio.sleep(0.2)
+            try:
+                app.renderer.render(app, app.layout)  # draws now: an error fails the test instead of hanging
+                nc.st.home = False                   # the chat view's footer shows it too
+                app.renderer.render(app, app.layout)
+                nc.st.update_state = "installed"
+                app.renderer.render(app, app.layout)
+            finally:
+                app.exit()
+                await asyncio.wait_for(task, 5)
+
+    run(scenario())

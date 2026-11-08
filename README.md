@@ -44,7 +44,7 @@ nanocode uninstall           # remove the app, keep config, memory and skills
 nanocode uninstall --purge   # remove everything
 ```
 
-**Updates:** nanocode checks GitHub for a newer version once a day, in the background. When there is one, the start screen and the bar under the prompt say so, with the command to run (`nanocode update`). `/version` checks right away. To turn the check off, set `"update_check": false` in `~/.nanocode/config.json` (or `NANOCODE_NO_UPDATE_CHECK=1`).
+**Updates:** nanocode checks GitHub for a newer version once a day, in the background. When there is one, the start screen says `/update to install v0.5.1` (like OpenCode). Click it or type `/update` to choose **Update** (installs in the background while you keep working) or **Skip** (no more reminders for that version). Once it's installed, `/exit` restarts nanocode on the new version. On Windows, Update closes nanocode first, installs, then you start it again. Outside the app, `nanocode update` does the same, and `/version` checks right away. To turn the check off, set `"update_check": false` in `~/.nanocode/config.json` (or `NANOCODE_NO_UPDATE_CHECK=1`).
 
 ## Start
 
