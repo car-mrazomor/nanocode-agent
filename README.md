@@ -1,8 +1,15 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-wordmark-dark.svg">
+    <img src="assets/logo-wordmark-light.svg" alt="nanocode" width="300">
+  </picture>
+</p>
+
 # nanocode-agent
 
 [![CI](https://github.com/car-mrazomor/nanocode-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/car-mrazomor/nanocode-agent/actions/workflows/ci.yml)
 
-A small, hackable coding agent for your terminal, in one Python file. **Website: [car-mrazomor.github.io/nanocode-agent](https://car-mrazomor.github.io/nanocode-agent/)**
+A small, hackable coding agent for your terminal, in one Python file you can read and edit end to end. **Website: [car-mrazomor.github.io/nanocode-agent](https://car-mrazomor.github.io/nanocode-agent/)**
 
 It runs on:
 
