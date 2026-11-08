@@ -115,7 +115,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | PageUp / PageDown, mouse wheel | Scroll the chat |
 | Tab | Complete |
 
-To select text with the mouse, hold Shift while dragging (Option in iTerm2). To leave the mouse to the terminal instead, set `"mouse": false` in `~/.nanocode/config.json`.
+Drag with the mouse to select text in the chat; it's copied when you let go (double-click copies a word). This works like Claude Code's fullscreen mode and OpenCode: the system clipboard is used locally, and OSC 52 over SSH. The wheel scrolls the chat wherever the pointer is. To use your terminal's own selection instead, hold Shift while dragging (Option in iTerm2 and VS Code on macOS, Fn in Terminal.app).
 
 Most terminals send the same thing for Shift+Enter as for Enter, and many don't pass Cmd shortcuts to apps at all. Run **`/terminal-setup`** once to fix that:
 

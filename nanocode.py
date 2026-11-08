@@ -284,7 +284,11 @@ class State:
         self.live_md = None
         self.live = ""
         self.live_rendered_at = 0.0
-        self.scroll = 0
+        self.scroll_top = None  # (absolute line, row in it) at the top of the chat when scrolled back; None = follow
+        self.lines_dropped = 0  # lines trimmed off the top of the transcript, so positions stay valid
+        self.selection = None  # {"anchor": (line, char), "head": (line, char), "dragging": bool}
+        self.view = {"rows": [], "width": 80, "height": 24}
+        self.toast = None  # (text, shown until)
         self.pending_permission = None
         self.always_allow = set()
         self.auto_approve = False
@@ -337,8 +341,15 @@ def out(text="", end="\n"):
     st.output += text + end
     if len(st.output) > MAX_OUTPUT_CHARS:
         cut = st.output.find("\n", len(st.output) - MAX_OUTPUT_CHARS // 2)
+        st.lines_dropped += st.output.count("\n", 0, cut + 1)
         st.output = st.output[cut + 1:]
     invalidate()
+
+
+def reset_view(text=""):
+    """Replaces the whole transcript (new chat, resumed session) and goes back to following the newest output."""
+    st.output = text
+    st.scroll_top = st.selection = None
 
 
 def messages_width():
@@ -401,24 +412,337 @@ def stream_end():
         invalidate()
 
 
-_view_cache = {"key": None, "text": ""}
+# --- Transcript view: rows, scrolling, mouse selection (like Claude Code's fullscreen mode and OpenCode) ---
+
+_lines_cache = {"text": None, "lines": []}
+_parsed = {}
+_wrapped = {}
 
 
-def visible_output():
-    key = (st.version, st.scroll)
-    if _view_cache["key"] != key:
-        text = st.output + st.live
-        if st.scroll:
-            lines = text.split("\n")
-            text = "\n".join(lines[: max(1, len(lines) - st.scroll)])
-        _view_cache.update(key=key, text=text)
-    return _view_cache["text"]
+def transcript_lines():
+    text = st.output + st.live
+    if _lines_cache["text"] is not text:
+        _lines_cache.update(text=text, lines=text.split("\n"))
+    return _lines_cache["lines"]
 
 
-def scroll_transcript(lines):
-    """Positive scrolls back in the transcript, negative toward the newest output."""
-    st.scroll = max(0, min(st.scroll + lines, (st.output + st.live).count("\n")))
+def parse_line(line):
+    """(formatted fragments, plain text) of one transcript line."""
+    hit = _parsed.get(line)
+    if hit is None:
+        if len(_parsed) > 30000:
+            _parsed.clear()
+        line = line.replace("\t", "    ")
+        if "\x1b" in line:
+            from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+            fragments = [(f[0], f[1]) for f in to_formatted_text(ANSI(line)) if "[ZeroWidthEscape]" not in f[0]]
+        else:
+            fragments = [("", line)]
+        hit = _parsed[line] = (fragments, "".join(text for _, text in fragments))
+    return hit
+
+
+def char_width(ch):
+    from prompt_toolkit.utils import get_cwidth
+    return get_cwidth(ch)
+
+
+def wrap_line(line, width):
+    """The screen rows of a line as (start, end) character ranges of its plain text."""
+    key = (line, width)
+    hit = _wrapped.get(key)
+    if hit is None:
+        if len(_wrapped) > 30000:
+            _wrapped.clear()
+        plain = parse_line(line)[1]
+        rows, start, used, i = [], 0, 0, 0
+        while i < len(plain):
+            w = char_width(plain[i])
+            if used + w > width and i > start:
+                space = plain.rfind(" ", start, i + 1)  # break after a word when the row has a space
+                cut = space + 1 if space > start and plain[start:space].strip() else i
+                rows.append((start, cut))
+                start, used, i = cut, 0, cut
+                continue
+            used += w
+            i += 1
+        rows.append((start, len(plain)))
+        hit = _wrapped[key] = rows
+    return hit
+
+
+def step_rows(lines, width, pos, delta):
+    """Moves a (line, row) position by delta screen rows, stopping at the first and last row."""
+    i, r = pos
+    while delta < 0:
+        if r > 0:
+            take = min(r, -delta)
+            r, delta = r - take, delta + take
+        elif i > 0:
+            i, delta = i - 1, delta + 1
+            r = len(wrap_line(lines[i], width)) - 1
+        else:
+            break
+    while delta > 0:
+        count = len(wrap_line(lines[i], width))
+        if r < count - 1:
+            take = min(count - 1 - r, delta)
+            r, delta = r + take, delta - take
+        elif i < len(lines) - 1:
+            i, r, delta = i + 1, 0, delta - 1
+        else:
+            break
+    return i, r
+
+
+def view_top(lines, width, height):
+    """The (line, row) shown at the top of the chat. Follows the newest output unless scrolled back."""
+    last = (len(lines) - 1, len(wrap_line(lines[-1], width)) - 1)
+    if st.scroll_top is not None:
+        line, row = st.scroll_top
+        index = line - st.lines_dropped
+        top = (0, 0) if index < 0 else (min(index, len(lines) - 1), row)
+        top = (top[0], min(top[1], len(wrap_line(lines[top[0]], width)) - 1))
+        if step_rows(lines, width, top, height - 1) != last:
+            return top
+        st.scroll_top = None  # scrolled back down to the newest output
+    return step_rows(lines, width, last, -(height - 1))
+
+
+def selection_range():
+    sel = st.selection
+    if not sel or sel["anchor"] == sel["head"]:
+        return None
+    start, end = sorted((sel["anchor"], sel["head"]))
+    return start, (end[0], end[1] + 1)  # the character under the pointer is included
+
+
+def transcript_rows(width, height):
+    """The visible chat rows as formatted lines, and remembers where each row comes from for the mouse."""
+    lines = transcript_lines()
+    width, height = max(1, width), max(1, height)
+    pos = view_top(lines, width, height)
+    selected = selection_range()
+    rows, shown = [], []
+    i, r = pos
+    while len(rows) < height and i < len(lines):
+        wrapped = wrap_line(lines[i], width)
+        fragments, plain = parse_line(lines[i])
+        start, end = wrapped[r]
+        absolute = i + st.lines_dropped
+        mark = None
+        if selected and selected[0][0] <= absolute <= selected[1][0]:
+            a = selected[0][1] if absolute == selected[0][0] else 0
+            b = selected[1][1] if absolute == selected[1][0] else len(plain) + 1
+            mark = (max(a, start), min(b, end))
+        rows.append(slice_fragments(fragments, start, end, mark))
+        shown.append((absolute, start, end, plain))
+        r += 1
+        if r >= len(wrapped):
+            i, r = i + 1, 0
+    st.view = {"rows": shown, "width": width, "height": height}
+    return rows
+
+
+def slice_fragments(fragments, start, end, mark=None):
+    """The fragments covering characters start..end, with mark (a, b) shown as selected."""
+    out_fragments, offset = [], 0
+    for style, text in fragments:
+        a, b = max(start, offset), min(end, offset + len(text))
+        if a < b:
+            piece = text[a - offset:b - offset]
+            if mark and mark[0] < b and mark[1] > a:
+                m0, m1 = max(mark[0], a) - a, min(mark[1], b) - a
+                for part, selected in ((piece[:m0], False), (piece[m0:m1], True), (piece[m1:], False)):
+                    if part:
+                        out_fragments.append((f"{style} {SELECTED_STYLE}" if selected else style, part))
+            else:
+                out_fragments.append((style, piece))
+        offset += len(text)
+        if offset >= end:
+            break
+    return out_fragments
+
+
+SELECTED_STYLE = f"bg:{THEME['accent']} fg:{THEME['bg']}"
+
+
+def scroll_transcript(rows):
+    """Positive scrolls back in the chat, negative toward the newest output."""
+    lines = transcript_lines()
+    width, height = st.view["width"], st.view["height"]
+    top = view_top(lines, width, height)
+    if rows < 0 and st.scroll_top is None:
+        return
+    i, r = step_rows(lines, width, top, -rows)
+    st.scroll_top = (i + st.lines_dropped, r)
+    view_top(lines, width, height)  # back to following when this reached the bottom
     invalidate()
+
+
+def scroll_to_bottom():
+    st.scroll_top = None
+    invalidate()
+
+
+def point_to_char(x, y):
+    """(absolute line, character) under a mouse position in the chat."""
+    rows = st.view["rows"]
+    if not rows:
+        return None
+    absolute, start, end, plain = rows[max(0, min(y, len(rows) - 1))]
+    if y >= len(rows):
+        return absolute, end
+    used = 0
+    for index in range(start, end):
+        used += char_width(plain[index])
+        if used > x:
+            return absolute, index
+    return absolute, end
+
+
+def selected_text():
+    selected = selection_range()
+    if not selected:
+        return ""
+    (l0, c0), (l1, c1) = selected
+    lines = transcript_lines()
+    parts = []
+    for absolute in range(l0, l1 + 1):
+        index = absolute - st.lines_dropped
+        if 0 <= index < len(lines):
+            plain = parse_line(lines[index])[1]
+            parts.append(plain[c0 if absolute == l0 else 0: c1 if absolute == l1 else len(plain)].rstrip())
+    return "\n".join(parts)
+
+
+def word_at(absolute, char):
+    """The (start, end) of the word around a character, for double-click."""
+    index = absolute - st.lines_dropped
+    lines = transcript_lines()
+    if not 0 <= index < len(lines):
+        return char, char
+    plain = parse_line(lines[index])[1]
+    start = end = min(char, len(plain))
+    while start > 0 and not plain[start - 1].isspace():
+        start -= 1
+    while end < len(plain) and not plain[end].isspace():
+        end += 1
+    return start, end
+
+
+def copy_to_clipboard(text):
+    """Copies text like Claude Code does: the system clipboard when local, OSC 52 through the terminal over SSH.
+    Returns how it was copied."""
+    data = text.encode()
+    local = not (os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"))
+    commands = []
+    if local:
+        if sys.platform == "darwin":
+            commands = [["pbcopy"]]
+        elif os.name == "nt":
+            commands, data = [["clip"]], text.encode("utf-16")
+        else:
+            if os.environ.get("WAYLAND_DISPLAY"):
+                commands.append(["wl-copy"])
+            if os.environ.get("DISPLAY"):
+                commands += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for command in commands:
+        if shutil.which(command[0]):
+            try:
+                subprocess.run(command, input=data, timeout=3, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return "native"
+            except (OSError, subprocess.SubprocessError):
+                continue
+    if os.environ.get("TMUX") and shutil.which("tmux"):
+        try:
+            subprocess.run(["tmux", "load-buffer", "-w", "-"], input=text.encode(), timeout=3, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return "tmux"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    import base64
+    sequence = f"\x1b]52;c;{base64.b64encode(text.encode()).decode()}\x07"
+    if os.environ.get("STY"):
+        sequence = f"\x1bP{sequence}\x1b\\"
+    if st.app is not None and st.app.is_running:
+        st.app.output.write_raw(sequence)
+        st.app.output.flush()
+    return "osc52"
+
+
+def show_toast(text, seconds=2.5):
+    st.toast = (text, time.monotonic() + seconds)
+    invalidate()
+
+
+def finish_selection():
+    """Mouse released: copies what was selected (copy on select)."""
+    sel = st.selection
+    if not sel:
+        return
+    sel["dragging"] = False
+    text = selected_text()
+    if not text.strip():
+        st.selection = None
+        invalidate()
+        return
+    how = copy_to_clipboard(text)
+    count = len(text)
+    show_toast(f"copied {count} character{'s' if count != 1 else ''}" + (" via OSC 52" if how == "osc52" else ""))
+
+
+def transcript_mouse(event_type, button, x, y):
+    """Mouse in the chat: wheel scrolls, drag selects and copies on release, double-click selects a word."""
+    from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+    if event_type == MouseEventType.SCROLL_UP:
+        scroll_transcript(3)
+        return True
+    if event_type == MouseEventType.SCROLL_DOWN:
+        scroll_transcript(-3)
+        return True
+    point = point_to_char(x, y)
+    if point is None:
+        return False
+    sel = st.selection
+    if event_type == MouseEventType.MOUSE_DOWN and button == MouseButton.LEFT:
+        st.selection = {"anchor": point, "head": point, "dragging": True}
+        invalidate()
+        return True
+    if event_type == MouseEventType.MOUSE_MOVE:
+        if button == MouseButton.NONE or not sel or not sel["dragging"]:
+            return False
+        sel["head"] = point
+        if y <= 0:
+            scroll_transcript(1)
+        elif y >= st.view["height"] - 1:
+            scroll_transcript(-1)
+        invalidate()
+        return True
+    if event_type == MouseEventType.MOUSE_UP:
+        now = time.monotonic()
+        double = now - st.view.get("last_click", 0) < 0.35 and st.view.get("last_point") == point
+        st.view.update(last_click=now, last_point=point)
+        if double:
+            start, end = word_at(*point)
+            if end > start:
+                st.selection = {"anchor": (point[0], start), "head": (point[0], end - 1), "dragging": False}
+        if st.selection:
+            finish_selection()
+        return True
+    return False
+
+
+def install_mouse_mode():
+    """Mouse reporting for clicks, drags and the wheel only (prompt_toolkit's default also reports every
+    pointer move, which floods the app with redraws)."""
+    try:
+        from prompt_toolkit.output.vt100 import Vt100_Output
+    except ImportError:
+        return
+    Vt100_Output.enable_mouse_support = lambda self: self.write_raw("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+    Vt100_Output.disable_mouse_support = lambda self: self.write_raw("\x1b[?1006l\x1b[?1002l\x1b[?1000l")
 
 
 def fmt_tokens(n):
@@ -2120,7 +2444,7 @@ async def resume_session(arg):
     st.usage.update({k: v for k, v in (match.get("usage") or {}).items() if k in st.usage})
     st.activity = [tuple(a) for a in match.get("activity") or []]
     st.changed = {k: list(v) for k, v in (match.get("changed") or {}).items()}
-    st.output = match.get("screen", "") if not st.headless else ""
+    reset_view(match.get("screen", "") if not st.headless else "")
     st.trim_notice = False
     out(f"{GREEN}⏺ Resumed:{RESET} {match['title']} {DIM}({time_ago(match['updated'])}){RESET}\n")
 
@@ -2152,7 +2476,7 @@ KEYS_HELP = [("Enter", "send"), ("Shift+Enter / Alt+Enter / Ctrl+J", "new line")
              ("Ctrl+U (Cmd+Backspace)", "delete everything before the cursor"),
              ("Ctrl/Alt+← →", "jump by word"), ("Home/End, Ctrl+A/E", "start/end of line"),
              ("Esc", "stop the reply"), ("Ctrl+C", "stop the reply, clear the input, or quit"),
-             ("↑ / ↓", "input history"), ("PageUp / PageDown, wheel", "scroll the chat"), ("Tab", "complete commands, models, @files")]
+             ("↑ / ↓", "input history"), ("PageUp / PageDown, wheel", "scroll the chat"), ("Drag / double-click", "select and copy"), ("Tab", "complete commands, models, @files")]
 
 
 def show_help():
@@ -2614,7 +2938,8 @@ async def run_input(text):
                 st.client = await make_client()
             st.messages.clear()
             new_session()
-            st.output, st.trim_notice, st.ctx_tokens = "", False, 0
+            reset_view()
+            st.trim_notice, st.ctx_tokens = False, 0
             out(f"{GREEN}⏺ New chat{RESET} {DIM}(the old one is saved: /resume){RESET}\n")
         elif word.startswith("/") and word[1:] in list_skills():
             out(f"  {DIM}⎿  loaded skill {word[1:]}{RESET}")
@@ -2706,7 +3031,7 @@ def start_input(text):
         out(f"   {fg('muted')}still working; press Esc twice to stop{RESET}")
         return False
     st.home = False
-    st.scroll = 0
+    st.scroll_top = st.selection = None
     st.task_started = time.time()
     st.task = asyncio.ensure_future(run_input(text))
     return True
@@ -2795,14 +3120,13 @@ def build_app():
         ANSI_SEQUENCES[seq] = Keys.ControlJ
     from prompt_toolkit.application import Application
     from prompt_toolkit.completion import Completer, Completion
-    from prompt_toolkit.data_structures import Point
     from prompt_toolkit.filters import Condition, completion_is_selected, has_completions
-    from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import (ConditionalContainer, DynamicContainer, Float, FloatContainer, HSplit, Layout,
                                        VSplit, Window, WindowAlign)
-    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
+    from prompt_toolkit.mouse_events import MouseButton, MouseEventType
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.layout.menus import CompletionsMenu
     from prompt_toolkit.layout.processors import Processor, Transformation
@@ -2810,6 +3134,7 @@ def build_app():
     from prompt_toolkit.widgets import TextArea
 
     T = THEME
+    install_mouse_mode()
 
     class NanoCompleter(Completer):
         def get_completions(self, document, complete_event):
@@ -2868,26 +3193,49 @@ def build_app():
         history = InMemoryHistory()
 
     # --- transcript ---
-    def wheel(window):
-        """The mouse wheel scrolls the transcript, wherever the pointer is."""
-        window._scroll_up = lambda: scroll_transcript(3)
-        window._scroll_down = lambda: scroll_transcript(-3)
-        return window
+    class TranscriptControl(UIControl):
+        def create_content(self, width, height):
+            rows = transcript_rows(width, height)
+            return UIContent(get_line=lambda i: rows[i], line_count=len(rows), show_cursor=False)
 
-    st.output_window = Window(
-        FormattedTextControl(lambda: ANSI(visible_output()),
-                             get_cursor_position=lambda: Point(x=0, y=visible_output().count("\n")),
-                             show_cursor=False),
-        wrap_lines=True, style="class:transcript",
-    )
-    wheel(st.output_window)
+        def mouse_handler(self, event):
+            handled = transcript_mouse(event.event_type, event.button, event.position.x, event.position.y)
+            return None if handled else NotImplemented
+
+    st.output_window = Window(TranscriptControl(), style="class:transcript")
 
     # --- prompt panel ---
     st.input_box = TextArea(multiline=True, height=Dimension(min=1, max=10), dont_extend_height=True,
                             completer=NanoCompleter(), complete_while_typing=True, history=history,
                             style="class:panel", input_processors=[Placeholder()])
     st.input_box.accept_handler = on_enter
-    wheel(st.input_box.window)
+    input_mouse_default = st.input_box.control.mouse_handler
+
+    def input_mouse(event):
+        """The wheel scrolls the chat from here too; a chat selection dragged down here keeps going."""
+        kind = event.event_type
+        if kind in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+            scroll_transcript(3 if kind == MouseEventType.SCROLL_UP else -3)
+            return None
+        if st.selection and st.selection["dragging"]:
+            if kind == MouseEventType.MOUSE_UP:
+                finish_selection()
+            elif kind == MouseEventType.MOUSE_MOVE and event.button != MouseButton.NONE:
+                scroll_transcript(-1)
+                st.selection["head"] = point_to_char(10 ** 6, 10 ** 6)
+            return None
+        if kind == MouseEventType.MOUSE_DOWN and st.selection:
+            st.selection = None
+        result = input_mouse_default(event)
+        buff = st.input_box.buffer
+        if kind == MouseEventType.MOUSE_UP and buff.selection_state:
+            start, end = buff.document.selection_range()
+            if buff.text[start:end].strip():
+                how = copy_to_clipboard(buff.text[start:end])
+                show_toast(f"copied {end - start} characters" + (" via OSC 52" if how == "osc52" else ""))
+        return result
+
+    st.input_box.control.mouse_handler = input_mouse
 
     def meta_row():
         mode = ("Auto", "class:mode.auto") if st.auto_approve else ("Ask", "class:mode")
@@ -2927,8 +3275,10 @@ def build_app():
 
     def footer_right():
         parts = []
-        if st.scroll:
-            parts.append(("class:muted", f"↑{st.scroll} pgdn  "))
+        if st.toast and time.monotonic() < st.toast[1]:
+            parts.append(("class:success", f"{st.toast[0]}  "))
+        if st.scroll_top is not None:
+            parts.append(("class:muted", "scrolled back · pgdn  "))
         if st.backend != "sdk" and st.ctx_budget and st.messages:
             pct = min(100, st.ctx_tokens * 100 // st.ctx_budget)
             parts.append(("class:warning" if pct >= 70 else "class:muted", f"{pct}% context  "))
@@ -3200,6 +3550,8 @@ def build_app():
         buff = event.current_buffer
         if buff.complete_state:
             buff.cancel_completion()
+        elif st.selection:
+            st.selection = None
         elif st.pending_permission is not None:
             interrupt()
         elif busy():
@@ -3345,7 +3697,7 @@ def build_app():
         style=style,
         color_depth=color_depth(),
         full_screen=True,
-        mouse_support=st.config.get("mouse", True) is not False,
+        mouse_support=True,
         refresh_interval=0.1,
     )
     app.ttimeoutlen = 0.05

@@ -924,19 +924,20 @@ def test_kitty_keys_and_vertical_moves_in_the_input(sandbox):
     assert seen["history"] == "older prompt"
 
 
-def test_mouse_wheel_scrolls_the_chat_not_the_prompt_history(sandbox):
+def test_mouse_scroll_select_and_copy(sandbox, monkeypatch):
     from prompt_toolkit.application import create_app_session
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
+    copied = []
+    monkeypatch.setattr(nc, "copy_to_clipboard", lambda text: copied.append(text) or "native")
     seen = {}
 
     async def scenario():
         with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
             app = nc.build_app()
             nc.st.home = False
-            nc.st.output = "\n".join(f"line {i}" for i in range(300))
-            nc.st.version += 1
+            nc.reset_view("\n".join(f"line {i}" for i in range(300)))
             box = nc.st.input_box
             box.accept_handler = lambda buff: False
             task = asyncio.ensure_future(app.run_async())
@@ -948,20 +949,56 @@ def test_mouse_wheel_scrolls_the_chat_not_the_prompt_history(sandbox):
 
             await keys("old prompt\r")
             await keys("draft")
-            rows = app.output.get_size().rows
-            await keys("\x1b[<64;5;3M" * 2)                 # wheel up over the transcript
-            seen["over_chat"] = nc.st.scroll
-            await keys(f"\x1b[<64;20;{rows - 4}M")            # wheel up over the prompt
-            seen["over_prompt"] = (nc.st.scroll, box.text)
-            await keys("\x1b[<65;5;3M" * 5)                 # wheel down, back to the newest output
-            seen["back"] = nc.st.scroll
+            screen = app.renderer._last_screen.visible_windows_to_write_positions
+            chat, prompt = screen[nc.st.output_window], screen[box.window]
+            height = nc.st.view["height"]
+            seen["full"] = [row[0] for row in nc.st.view["rows"]] == list(range(300 - height, 300))
+
+            def at(x, y):  # 1-based terminal cell inside the chat
+                return f"{chat.xpos + x + 1};{chat.ypos + y + 1}"
+
+            await keys(f"\x1b[<64;{at(2, 3)}M" * 2)                       # wheel up over the chat
+            seen["over_chat"] = nc.st.scroll_top
+            await keys(f"\x1b[<64;{prompt.xpos + 3};{prompt.ypos + 1}M")   # wheel up over the prompt
+            seen["over_prompt"] = (nc.st.scroll_top, box.text)
+            seen["full_after_scroll"] = len(nc.st.view["rows"]) == height
+            for _ in range(500):                                          # far past the top: still a full screen
+                inp.send_text(f"\x1b[<64;{at(2, 3)}M")
+            await asyncio.sleep(0.3)
+            seen["top"] = (nc.st.scroll_top, len(nc.st.view["rows"]) == height)
+            await keys(f"\x1b[<0;{at(0, 0)}M\x1b[<32;{at(2, 1)}M\x1b[<32;{at(3, 1)}M\x1b[<0;{at(3, 1)}m")
+            seen["drag"] = list(copied)
+            await keys(f"\x1b[<0;{at(2, 2)}M\x1b[<0;{at(2, 2)}m\x1b[<0;{at(2, 2)}M\x1b[<0;{at(2, 2)}m")
+            seen["double"] = copied[-1]
+            await keys(f"\x1b[<0;{at(5, 4)}M\x1b[<0;{at(5, 4)}m")       # a plain click clears the selection
+            seen["cleared"] = nc.st.selection
+            await keys(f"\x1b[<65;{at(2, 3)}M" * 200, 0.3)              # wheel down, back to the newest output
+            seen["back"] = nc.st.scroll_top
             app.exit()
             await task
 
     run(scenario())
-    assert seen["over_chat"] == 6
-    assert seen["over_prompt"] == (9, "draft")
-    assert seen["back"] == 0
+    assert seen["full"]
+    assert seen["over_chat"] is not None
+    assert seen["over_prompt"][1] == "draft" and seen["over_prompt"][0][0] == seen["over_chat"][0] - 3
+    assert seen["full_after_scroll"]
+    assert seen["top"] == ((0, 0), True)
+    assert seen["drag"] == ["line 0\nline"]
+    assert seen["double"] == "line"
+    assert seen["cleared"] is None
+    assert seen["back"] is None
+
+
+def test_transcript_rows_wrap_and_select():
+    nc.reset_view("short\n" + "abcdefghij" * 3 + "\n\x1b[1mbold\x1b[0m end")
+    rows = nc.transcript_rows(10, 10)
+    assert ["".join(t for _, t in row) for row in rows] == ["short", "abcdefghij", "abcdefghij", "abcdefghij",
+                                                          "bold end"]
+    nc.st.selection = {"anchor": (1, 28), "head": (2, 1), "dragging": False}
+    assert nc.selected_text() == "ij\nbo"
+    rows = nc.transcript_rows(10, 10)
+    assert any(nc.SELECTED_STYLE in style for style, _ in rows[3])
+    nc.reset_view()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows reads keys through the console API, not this protocol")
