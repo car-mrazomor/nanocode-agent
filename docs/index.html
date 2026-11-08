@@ -48,8 +48,8 @@
   .nav svg { width: 16px; height: 16px; fill: currentColor; }
 
   /* hero: the word "nanocode" drawn in ASCII as the background; hover scrambles it (like libreservice.se) */
-  .hero { position: relative; text-align: center; border-bottom: 1px solid var(--line); overflow: hidden; min-height: clamp(640px, 92vh, 900px); display: flex; align-items: flex-end; justify-content: center; }
-  #word { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
+  .hero { position: relative; text-align: center; border-bottom: 1px solid var(--line); overflow: hidden; min-height: clamp(600px, 84vh, 800px); display: flex; align-items: flex-end; justify-content: center; }
+  #glow, #word { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
   .hero::before { content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
     background: radial-gradient(ellipse 40% 34% at 50% 72%, rgba(16,17,19,.78), rgba(16,17,19,.35) 65%, transparent 100%); }
   .hero-content { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; padding: 0 24px 76px; pointer-events: none; }
@@ -136,7 +136,7 @@
   @media (max-width: 620px) {
     .top .in { padding: 0 16px; }
     .nav a:not(.gh) { display: none; }
-    .hero { min-height: 780px; }
+    .hero { min-height: 660px; }
     .hero-content { padding: 0 16px 56px; }
     .description br, h1 br { display: none; }
     .rail, footer { border: 0; }
@@ -182,6 +182,7 @@
 </div>
 
 <header class="hero">
+  <canvas id="glow" aria-hidden="true"></canvas>
   <canvas id="word" aria-hidden="true"></canvas>
   <div class="hero-content">
     <p class="eyebrow">Open source · One Python file · Fully hackable</p>
@@ -322,17 +323,17 @@
     dpr = Math.min(devicePixelRatio || 1, 2);
     W = hero.clientWidth; H = hero.clientHeight;
     canvas.width = W * dpr; canvas.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    cell = W < 620 ? 4 : 5;                       // small, fine glyphs
+    cell = W < 620 ? 3 : 4;                       // small, fine glyphs
     // draw the word offscreen, as wide as fits, then read how much of each cell it covers
     const off = document.createElement("canvas"); off.width = W; off.height = H;
     const o = off.getContext("2d");
-    const narrow = W < 620, words = narrow ? ["nano", "code"] : ["nanocode"];   // stacked on phones, so it stays big
+    const narrow = W < 620, words = ["nanocode"];
     let size = 400; o.font = `800 ${size}px Switzer, Inter, system-ui, sans-serif`;
     const widest = Math.max(...words.map(w => o.measureText(w).width));
-    size = Math.min(size * (W * (narrow ? .9 : .94)) / widest, H * (narrow ? .2 : .38));
+    size = Math.min(size * Math.min(W * (narrow ? .7 : .4), 620) / widest, H * .16);   // small: about 40% of the width
     o.font = `800 ${size}px Switzer, Inter, system-ui, sans-serif`;
     o.textAlign = "center"; o.textBaseline = "middle"; o.fillStyle = "#fff";
-    words.forEach((w, i) => o.fillText(w, W / 2, narrow ? H * .13 + i * size * .82 : H * .3));
+    words.forEach(w => o.fillText(w, W / 2, H * (narrow ? .2 : .24)));
     const data = o.getImageData(0, 0, W, H).data;
     cols = Math.ceil(W / cell); rows = Math.ceil(H / cell); grid = new Int32Array(cols * rows).fill(-1);
     ox = (W - cols * cell) / 2 + cell / 2; oy = (H - rows * cell) / 2 + cell / 2;
@@ -352,7 +353,7 @@
                sx: (Math.random() * 2 - 1) * 120, sy: (Math.random() * 2 - 1) * 90, delay: (x / W) * 700 + Math.random() * 350,
                until: 0, flash: 0, cool: 0, swap: 800 + Math.random() * 3000 });
     }
-    buildAtlas();
+    buildAtlas(); sizeGlow(); lastGlow = -1e9;
     born = performance.now();
   }
 
@@ -373,21 +374,33 @@
   }
 
   let gx = 0, gy = 0;                          // where the whole word has floated to
+  // Soft glows in the gradient colors, drifting and changing color very slowly. Worked out per pixel in full
+  // precision with a little noise (dithering), so the fade is smooth instead of showing rings, at a quarter
+  // of the resolution (the browser smooths it when scaling up) and only a few times a second.
+  const glowCanvas = document.getElementById("glow"), gctx = glowCanvas.getContext("2d");
+  let gw = 0, gh = 0, gimg = null, lastGlow = -1e9;
+  function sizeGlow() { gw = Math.max(1, Math.ceil(W / 4)); gh = Math.max(1, Math.ceil(H / 4)); glowCanvas.width = gw; glowCanvas.height = gh; gimg = gctx.createImageData(gw, gh); }
   function backdrop(t) {
-    // soft glows in the gradient colors, drifting and changing color very slowly
-    for (let i = 0; i < 3; i++) {
-      const cx = W * (.5 + .38 * Math.cos(t * .035 + i * 2.1)), cy = H * (.42 + .3 * Math.sin(t * .028 + i * 1.7));
-      const [r, g, b] = shade(i / 3 + t * .006), rad = Math.max(W, H) * .62;
-      const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
-      glow.addColorStop(0, `rgba(${r},${g},${b},.085)`); glow.addColorStop(1, `rgba(${r},${g},${b},0)`);
-      ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+    const blobs = [0, 1, 2].map(i => ({
+      x: gw * (.5 + .38 * Math.cos(t * .035 + i * 2.1)), y: gh * (.45 + .3 * Math.sin(t * .028 + i * 1.7)),
+      c: shade(i / 3 + t * .006), k: 1 / (2 * (Math.max(gw, gh) * .3) ** 2) }));
+    const d = gimg.data, base = [16, 17, 19], strength = .12;
+    for (let y = 0, o = 0; y < gh; y++) for (let x = 0; x < gw; x++, o += 4) {
+      let r = base[0], g = base[1], b = base[2];
+      for (const bl of blobs) {
+        const w = strength * Math.exp(-((x - bl.x) ** 2 + (y - bl.y) ** 2) * bl.k);
+        r += (bl.c[0] - base[0]) * w; g += (bl.c[1] - base[1]) * w; b += (bl.c[2] - base[2]) * w;
+      }
+      const n = Math.random() - .5;   // dithering
+      d[o] = r + n; d[o + 1] = g + n; d[o + 2] = b + n; d[o + 3] = 255;
     }
+    gctx.putImageData(gimg, 0, 0);
   }
 
   function draw(now) {
     ctx.clearRect(0, 0, W, H);
     const t = (still ? 0 : now) / 1000, age = now - born;
-    backdrop(t);
+    if (now - lastGlow > 140 || still) { lastGlow = now; backdrop(t); }
     gx = Math.cos(t * .22) * cell * 3; gy = Math.sin(t * .22) * cell * 2;   // a slow, wide circle
     const drift = t * .012;                                                  // colors travel slowly along the word
     for (const p of P) {
@@ -415,7 +428,7 @@
     draw(now);
     const active = now - born < 1500 || now < busyUntil || now - lastMove < 150;
     if (!active && now - idle > 6500 && document.visibilityState === "visible") {   // an occasional ripple
-      idle = now; const p = P[Math.random() * P.length | 0]; if (p) stir(p.x, p.y, 70, now);
+      idle = now; const p = P[Math.random() * P.length | 0]; if (p) stir(p.x + gx, p.y + gy, 44, now);
     }
     if (active) { sleeping = 0; raf = requestAnimationFrame(loop); }
     else sleeping = setTimeout(() => { sleeping = 0; raf = requestAnimationFrame(loop); }, 45);
@@ -426,10 +439,10 @@
   hero.addEventListener("pointermove", e => {
     if (e.pointerType === "touch") return;             // touch: a tap stirs instead (pointerdown)
     const r = canvas.getBoundingClientRect(); mx = e.clientX - r.left; my = e.clientY - r.top; lastMove = performance.now();
-    if (!still) { stir(mx, my, 92, lastMove); wake(); }
+    if (!still) { stir(mx, my, 56, lastMove); wake(); }
   });
   hero.addEventListener("pointerleave", () => { mx = my = -9999; });
-  hero.addEventListener("pointerdown", e => { if (still) return; const r = canvas.getBoundingClientRect(); stir(e.clientX - r.left, e.clientY - r.top, 110, performance.now()); wake(); });
+  hero.addEventListener("pointerdown", e => { if (still) return; const r = canvas.getBoundingClientRect(); stir(e.clientX - r.left, e.clientY - r.top, 70, performance.now()); wake(); });
   let resizeTimer = 0;
   addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { build(); if (still) draw(performance.now() + 9e9); }, 150); });
   (document.fonts ? Promise.race([document.fonts.ready, new Promise(r => setTimeout(r, 1500))]) : Promise.resolve()).then(() => {
