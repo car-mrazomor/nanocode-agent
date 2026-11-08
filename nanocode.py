@@ -629,6 +629,49 @@ def scroll_transcript(rows):
     st.scroll_top = (i + st.lines_dropped, r)
     view_top(lines, width, height)  # back to following when this reached the bottom
     invalidate()
+    return (i, r) != top
+
+
+_wheel = {"time": 0.0, "direction": 0, "streak": 0, "pending": 0, "task": None}
+
+
+def wheel_scroll(direction):
+    """One wheel event (+1 up, -1 down). Like Claude Code's wheel acceleration: a lone notch moves 3 rows, a
+    trackpad's stream of events starts at 1 row each and speeds up the longer it keeps going. The rows are then
+    scrolled smoothly, a few per frame, so many events in a burst become one fluid movement."""
+    now = time.monotonic()
+    gap = now - _wheel["time"]
+    same = direction == _wheel["direction"]
+    if gap < 0.08 and same:
+        _wheel["streak"] += 1
+        rows = 1 + min(_wheel["streak"] // 8, 3)
+    else:
+        _wheel["streak"] = 0
+        rows = 3
+        if not same:
+            _wheel["pending"] = 0
+    _wheel.update(time=now, direction=direction)
+    if direction < 0 and st.scroll_top is None:
+        return
+    _wheel["pending"] += rows * direction
+    task = _wheel["task"]
+    if task is None or task.done():
+        try:
+            _wheel["task"] = asyncio.get_running_loop().create_task(_animate_scroll())
+        except RuntimeError:  # no event loop (tests calling directly): scroll at once
+            scroll_transcript(_wheel["pending"])
+            _wheel["pending"] = 0
+
+
+async def _animate_scroll():
+    """Moves toward the wanted position about once a frame: fast when far, one row at a time when close."""
+    while _wheel["pending"]:
+        pending = _wheel["pending"]
+        step = max(1, abs(pending) // 3) * (1 if pending > 0 else -1)
+        _wheel["pending"] -= step
+        if not scroll_transcript(step):
+            _wheel["pending"] = 0  # reached the top or the newest output
+        await asyncio.sleep(1 / 60)
 
 
 def scroll_to_bottom():
@@ -748,10 +791,10 @@ def transcript_mouse(event_type, button, x, y):
     """Mouse in the chat: wheel scrolls, drag selects and copies on release, double-click selects a word."""
     from prompt_toolkit.mouse_events import MouseButton, MouseEventType
     if event_type == MouseEventType.SCROLL_UP:
-        scroll_transcript(3)
+        wheel_scroll(1)
         return True
     if event_type == MouseEventType.SCROLL_DOWN:
-        scroll_transcript(-3)
+        wheel_scroll(-1)
         return True
     sticky = st.view.get("sticky")
     if sticky and y < sticky[0] and not (st.selection and st.selection["dragging"]):
@@ -800,6 +843,20 @@ def install_mouse_mode():
         return
     Vt100_Output.enable_mouse_support = lambda self: self.write_raw("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
     Vt100_Output.disable_mouse_support = lambda self: self.write_raw("\x1b[?1006l\x1b[?1002l\x1b[?1000l")
+    if getattr(Vt100_Output, "_nanocode_sync", False):
+        return
+    plain_flush = Vt100_Output.flush
+
+    def flush(self):
+        # Synchronized output (mode 2026): the terminal shows each frame whole instead of half-drawn ones while
+        # it's being written. Terminals that don't know it ignore it.
+        if self._buffer and st.app is not None and st.app.is_running and os.environ.get("TERM") != "linux":
+            self._buffer.insert(0, "\x1b[?2026h")
+            self._buffer.append("\x1b[?2026l")
+        plain_flush(self)
+
+    Vt100_Output.flush = flush
+    Vt100_Output._nanocode_sync = True
 
 
 def fmt_tokens(n):
@@ -3297,7 +3354,7 @@ def build_app():
         """The wheel scrolls the chat from here too; a chat selection dragged down here keeps going."""
         kind = event.event_type
         if kind in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
-            scroll_transcript(3 if kind == MouseEventType.SCROLL_UP else -3)
+            wheel_scroll(1 if kind == MouseEventType.SCROLL_UP else -1)
             return None
         if st.selection and st.selection["dragging"]:
             if kind == MouseEventType.MOUSE_UP:
@@ -3781,8 +3838,18 @@ def build_app():
         color_depth=color_depth(),
         full_screen=True,
         mouse_support=True,
-        refresh_interval=0.1,
+        min_redraw_interval=1 / 60,
     )
+    async def ticker():
+        """Redraws on a timer only while something moves (spinner, elapsed time) or is about to go away."""
+        while True:
+            await asyncio.sleep(0.1)
+            now = time.time()
+            if ((st.task and not st.task.done()) or (st.toast and time.monotonic() < st.toast[1] + 0.2)
+                    or (st.interrupt_armed and now - st.interrupt_armed < 2.2)):
+                app.invalidate()
+
+    app.pre_run_callables.append(lambda: app.create_background_task(ticker()))
     app.ttimeoutlen = 0.05
     app.timeoutlen = 0.1
     st.app = app

@@ -1025,3 +1025,20 @@ def test_sticky_prompt_while_reading_the_answer():
 def nc_mouse(name):
     from prompt_toolkit.mouse_events import MouseEventType
     return getattr(MouseEventType, name)
+
+
+def test_wheel_acceleration(monkeypatch):
+    nc.reset_view("\n".join(f"line {i}" for i in range(500)))
+    nc.transcript_rows(80, 20)
+    clock = [100.0]
+    monkeypatch.setattr(nc.time, "monotonic", lambda: clock[0])
+    moved = []
+    monkeypatch.setattr(nc, "scroll_transcript", lambda rows: moved.append(rows) or True)
+    nc.wheel_scroll(1)                       # a lone notch: 3 rows
+    clock[0] += 1
+    nc.wheel_scroll(1)
+    for _ in range(30):                      # a trackpad stream: 1 row each, then faster
+        clock[0] += 0.01
+        nc.wheel_scroll(1)
+    assert moved[:2] == [3, 3] and moved[2] == 1 and moved[-1] == 4
+    nc.reset_view()
