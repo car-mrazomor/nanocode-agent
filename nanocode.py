@@ -45,7 +45,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -602,19 +602,27 @@ def transcript_lines():
     return _lines_cache["lines"]
 
 
+USER_MARK = "\x1e"  # starts each line of your message; the panel is drawn at the current width (resizes cleanly)
+
+
 def parse_line(line):
     """(formatted fragments, plain text) of one transcript line."""
     hit = _parsed.get(line)
     if hit is None:
         if len(_parsed) > 30000:
             _parsed.clear()
+        key = line
         line = line.replace("\t", "    ")
+        if line.startswith(USER_MARK):
+            text = line[1:]
+            hit = _parsed[key] = ([(f"bg:{THEME['panel']} fg:{THEME['text']}", text)], text)
+            return hit
         if "\x1b" in line:
             from prompt_toolkit.formatted_text import ANSI, to_formatted_text
             fragments = [(f[0], f[1]) for f in to_formatted_text(ANSI(line)) if "[ZeroWidthEscape]" not in f[0]]
         else:
             fragments = [("", line)]
-        hit = _parsed[line] = (fragments, "".join(text for _, text in fragments))
+        hit = _parsed[key] = (fragments, "".join(text for _, text in fragments))
     return hit
 
 
@@ -631,6 +639,8 @@ def wrap_line(line, width):
         if len(_wrapped) > 30000:
             _wrapped.clear()
         plain = parse_line(line)[1]
+        if line.startswith(USER_MARK):  # inside the panel: bar, two spaces each side
+            width = max(4, width - 5)
         rows, start, used, i = [], 0, 0, 0
         while i < len(plain):
             w = char_width(plain[i])
@@ -711,8 +721,16 @@ def transcript_rows(width, height):
             a = selected[0][1] if absolute == selected[0][0] else 0
             b = selected[1][1] if absolute == selected[1][0] else len(plain) + 1
             mark = (max(a, start), min(b, end))
-        rows.append(slice_fragments(fragments, start, end, mark))
-        shown.append((absolute, start, end, plain))
+        piece = slice_fragments(fragments, start, end, mark)
+        if lines[i].startswith(USER_MARK):
+            panel = f"bg:{THEME['panel']}"
+            used = sum(char_width(ch) for ch in plain[start:end])
+            piece = [(f"fg:{THEME['accent']} bg:{THEME['bg']}", "┃"), (panel, "  ")] + piece + \
+                [(panel, " " * max(0, width - 3 - used))]
+            shown.append((absolute, start, end, plain, 3))
+        else:
+            shown.append((absolute, start, end, plain, 0))
+        rows.append(piece)
         r += 1
         if r >= len(wrapped):
             i, r = i + 1, 0
@@ -732,9 +750,9 @@ def prompt_blocks(lines):
     if _blocks_cache["text"] is not _lines_cache["text"]:
         blocks, i = [], 0
         while i < len(lines):
-            if lines[i].startswith(USER_PREFIX):
+            if lines[i].startswith((USER_PREFIX, USER_MARK)):
                 j = i
-                while j + 1 < len(lines) and lines[j + 1].startswith(USER_PREFIX):
+                while j + 1 < len(lines) and lines[j + 1].startswith((USER_PREFIX, USER_MARK)):
                     j += 1
                 blocks.append((i, j))
                 i = j + 1
@@ -753,7 +771,7 @@ def sticky_prompt(lines, top_line, width, height):
     if not above:
         return None
     first, last = above[-1]
-    text = [parse_line(lines[i])[1][1:].strip() for i in range(first, last + 1)]
+    text = [parse_line(lines[i])[1].lstrip("┃").strip() for i in range(first, last + 1)]
     text = [t for t in text if t]
     if not text:
         return None
@@ -860,9 +878,10 @@ def point_to_char(x, y):
     rows = st.view["rows"]
     if not rows:
         return None
-    absolute, start, end, plain = rows[max(0, min(y, len(rows) - 1))]
+    absolute, start, end, plain, offset = rows[max(0, min(y, len(rows) - 1))]
     if y >= len(rows):
         return absolute, end
+    x -= offset
     used = 0
     for index in range(start, end):
         used += char_width(plain[index])
@@ -3292,19 +3311,10 @@ async def refresh_sdk_prompt():
 
 
 def user_block(text):
-    """Your message: an accent bar on the left, on a raised panel."""
-    width = messages_width()
-    inner = max(10, width - 1)
-    bar, panel = f"{fg('accent')}┃{RESET}", bg("panel")
-    body = []
-    for line in text.split("\n"):
-        indent = " " * (len(line) - len(line.lstrip(" ")))
-        chunks = textwrap.wrap(line.strip(" "), max(10, inner - 4 - len(indent)), replace_whitespace=False)
-        body += [indent + chunks[0]] + chunks[1:] if chunks else [""]
-    rows = [f"{bar}{panel}{' ' * inner}{RESET}"]
-    rows += [f"{bar}{panel}  {fg('text')}{line.ljust(inner - 4)}  {RESET}" for line in body]
-    rows.append(f"{bar}{panel}{' ' * inner}{RESET}")
-    return "\n" + "\n".join(rows)
+    """Your message: an accent bar on the left, on a raised panel. Kept as plain lines with a marker, so the
+    panel and its wrapping are drawn at the current width and stay neat when the window is resized."""
+    lines = [USER_MARK + ANSI_RE.sub("", line).replace("\x1e", "") for line in text.split("\n")]
+    return "\n" + "\n".join([USER_MARK] + lines + [USER_MARK])
 
 
 def short_title(text, limit=60):

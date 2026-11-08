@@ -828,11 +828,19 @@ def test_tui_home_palette_leader_and_interrupt(sandbox, monkeypatch):
     assert "interrupted" in plain(nc.st.output)
 
 
-def test_user_block_wraps_inside_the_panel(sandbox):
-    block = plain(nc.user_block("word " * 40))
-    rows = block.strip("\n").split("\n")
-    assert all(row.startswith("┃") for row in rows)
-    assert len({len(row) for row in rows}) == 1 and len(rows) > 3
+def test_user_block_fits_any_width_after_a_resize(sandbox):
+    nc.reset_view(nc.user_block("word " * 40 + "\n  indented line") + "\nanswer")
+    for width in (40, 70, 120, 30):                # the panel is redrawn at whatever width the window has now
+        texts = ["".join(t for _, t in row) for row in nc.transcript_rows(width, 50)]
+        panel = [t for t in texts if t.startswith("┃")]
+        assert len(panel) >= 4 and all(len(t) == width for t in panel), (width, panel)
+        assert all(t[3:].rstrip() == "" or not t[3:].startswith("  ") or "indented" in t for t in panel)
+        assert texts[-1] == "answer"
+    words = " ".join(t[1:].strip() for t in texts if t.startswith("┃")).split()
+    assert words.count("word") == 40 and "indented" in words
+    nc.st.selection = {"anchor": (2, 0), "head": (3, 100), "dragging": False}
+    assert nc.selected_text() == ("word " * 40).strip() + "\n  indented line"  # your text, without the bar
+    nc.reset_view()
 
 
 def test_at_file_completion(sandbox):
