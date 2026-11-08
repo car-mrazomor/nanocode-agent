@@ -924,6 +924,46 @@ def test_kitty_keys_and_vertical_moves_in_the_input(sandbox):
     assert seen["history"] == "older prompt"
 
 
+def test_mouse_wheel_scrolls_the_chat_not_the_prompt_history(sandbox):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    seen = {}
+
+    async def scenario():
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = nc.build_app()
+            nc.st.home = False
+            nc.st.output = "\n".join(f"line {i}" for i in range(300))
+            nc.st.version += 1
+            box = nc.st.input_box
+            box.accept_handler = lambda buff: False
+            task = asyncio.ensure_future(app.run_async())
+            await asyncio.sleep(0.2)
+
+            async def keys(text, wait=0.15):
+                inp.send_text(text)
+                await asyncio.sleep(wait)
+
+            await keys("old prompt\r")
+            await keys("draft")
+            rows = app.output.get_size().rows
+            await keys("\x1b[<64;5;3M" * 2)                 # wheel up over the transcript
+            seen["over_chat"] = nc.st.scroll
+            await keys(f"\x1b[<64;20;{rows - 4}M")            # wheel up over the prompt
+            seen["over_prompt"] = (nc.st.scroll, box.text)
+            await keys("\x1b[<65;5;3M" * 5)                 # wheel down, back to the newest output
+            seen["back"] = nc.st.scroll
+            app.exit()
+            await task
+
+    run(scenario())
+    assert seen["over_chat"] == 6
+    assert seen["over_prompt"] == (9, "draft")
+    assert seen["back"] == 0
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows reads keys through the console API, not this protocol")
 def test_no_setup_hint_when_keys_are_reported(sandbox, monkeypatch):
     monkeypatch.setenv("KITTY_WINDOW_ID", "1")

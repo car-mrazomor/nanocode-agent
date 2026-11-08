@@ -415,6 +415,12 @@ def visible_output():
     return _view_cache["text"]
 
 
+def scroll_transcript(lines):
+    """Positive scrolls back in the transcript, negative toward the newest output."""
+    st.scroll = max(0, min(st.scroll + lines, (st.output + st.live).count("\n")))
+    invalidate()
+
+
 def fmt_tokens(n):
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
@@ -2146,7 +2152,7 @@ KEYS_HELP = [("Enter", "send"), ("Shift+Enter / Alt+Enter / Ctrl+J", "new line")
              ("Ctrl+U (Cmd+Backspace)", "delete everything before the cursor"),
              ("Ctrl/Alt+← →", "jump by word"), ("Home/End, Ctrl+A/E", "start/end of line"),
              ("Esc", "stop the reply"), ("Ctrl+C", "stop the reply, clear the input, or quit"),
-             ("↑ / ↓", "input history"), ("PageUp / PageDown", "scroll"), ("Tab", "complete commands, models, @files")]
+             ("↑ / ↓", "input history"), ("PageUp / PageDown, wheel", "scroll the chat"), ("Tab", "complete commands, models, @files")]
 
 
 def show_help():
@@ -2862,18 +2868,26 @@ def build_app():
         history = InMemoryHistory()
 
     # --- transcript ---
+    def wheel(window):
+        """The mouse wheel scrolls the transcript, wherever the pointer is."""
+        window._scroll_up = lambda: scroll_transcript(3)
+        window._scroll_down = lambda: scroll_transcript(-3)
+        return window
+
     st.output_window = Window(
         FormattedTextControl(lambda: ANSI(visible_output()),
                              get_cursor_position=lambda: Point(x=0, y=visible_output().count("\n")),
                              show_cursor=False),
         wrap_lines=True, style="class:transcript",
     )
+    wheel(st.output_window)
 
     # --- prompt panel ---
     st.input_box = TextArea(multiline=True, height=Dimension(min=1, max=10), dont_extend_height=True,
                             completer=NanoCompleter(), complete_while_typing=True, history=history,
                             style="class:panel", input_processors=[Placeholder()])
     st.input_box.accept_handler = on_enter
+    wheel(st.input_box.window)
 
     def meta_row():
         mode = ("Auto", "class:mode.auto") if st.auto_approve else ("Ask", "class:mode")
@@ -3244,13 +3258,11 @@ def build_app():
 
     @kb.add("pageup", filter=no_dialog)
     def _(event):
-        st.scroll = min(st.scroll + page(), (st.output + st.live).count("\n"))
-        invalidate()
+        scroll_transcript(page())
 
     @kb.add("pagedown", filter=no_dialog)
     def _(event):
-        st.scroll = max(0, st.scroll - page())
-        invalidate()
+        scroll_transcript(-page())
 
     @kb.add("c-p", filter=no_dialog)
     def _(event):
@@ -3333,6 +3345,7 @@ def build_app():
         style=style,
         color_depth=color_depth(),
         full_screen=True,
+        mouse_support=st.config.get("mouse", True) is not False,
         refresh_interval=0.1,
     )
     app.ttimeoutlen = 0.05

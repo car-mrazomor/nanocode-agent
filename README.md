@@ -112,8 +112,10 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | Ctrl+← →, Alt/Option+← → | Jump by word |
 | Home / End, Ctrl+A / Ctrl+E | Start / end of line |
 | ↑ / ↓ | History |
-| PageUp / PageDown | Scroll |
+| PageUp / PageDown, mouse wheel | Scroll the chat |
 | Tab | Complete |
+
+To select text with the mouse, hold Shift while dragging (Option in iTerm2). To leave the mouse to the terminal instead, set `"mouse": false` in `~/.nanocode/config.json`.
 
 Most terminals send the same thing for Shift+Enter as for Enter, and many don't pass Cmd shortcuts to apps at all. Run **`/terminal-setup`** once to fix that:
 
