@@ -45,7 +45,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -3609,8 +3609,7 @@ def build_app():
                 return None
             return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
 
-        think = ("class:panel.muted", "thinking off", cycle) if level == "off" else \
-            ("class:think", f"thinking {level}", cycle)
+        think = ("class:think", f"◈ {level} · /think", cycle)
         return [(mode[1], mode[0]), ("class:panel", "  "), ("class:panel.text", pretty_model(st.model)),
                 ("class:panel", "  "), ("class:panel.muted", provider_label()), ("class:panel", "  "), think]
 
@@ -3638,7 +3637,7 @@ def build_app():
             frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 10) % 10]
             armed = st.interrupt_armed and time.time() - st.interrupt_armed < 2
             return [("class:accent", f" {frame} "), ("class:muted", f"{fmt_duration(time.time() - st.task_started)}  "),
-                    ("class:thinking", "thinking  ") if st.thinking_now else ("", ""),
+                    ("class:thinking", "◈ thinking  ") if st.thinking_now else ("", ""),
                     ("class:warning" if armed else "class:muted", "esc again to interrupt" if armed else "esc interrupt")]
         branch = git_branch()
         right = sum(len(text) for _, text in footer_right())
@@ -4038,7 +4037,7 @@ def build_app():
         "placeholder": f"fg:{T['faint']}",
         "mode": f"bg:{T['panel']} fg:{T['accent']} bold",
         "mode.auto": f"bg:{T['panel']} fg:{T['warning']} bold",
-        "think": f"bg:{T['panel']} fg:{T['accent2']}", "thinking": f"fg:{T['accent2']}",
+        "think": f"bg:{T['panel']} fg:{T['faint']}", "thinking": f"fg:{T['muted']}",
         "bar": f"bg:{T['bg']} fg:{T['accent']}",
         "bar.busy": f"bg:{T['bg']} fg:{T['accent2']}",
         "bar.warning": f"bg:{T['bg']} fg:{T['warning']}",

@@ -79,7 +79,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | Command | What it does |
 |---|---|
 | `/provider [name]` | List providers, or switch (Claude subscription, OpenRouter, Ollama) |
-| `/think [level]` | How hard the model thinks: `off`, `low`, `medium` (default) or `high`. Shown under the prompt; click it to change |
+| `/think [level]` | How hard the model thinks: `off`, `low`, `medium` (default) or `high`. Shown under the prompt as `◈ medium · /think`; click it to change |
 | `/model [name]` | List models (with prices, or what's installed in Ollama), or switch. Tab completes |
 | `/resume [n]` | Continue a saved chat. Every chat is saved per project |
 | `/recap` | What happened this session (files changed, commands run, cost) and what's next |
