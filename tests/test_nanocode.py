@@ -1108,3 +1108,33 @@ def test_think_level_reaches_claude(sandbox, monkeypatch):
     run(nc.make_client())
     assert made[0].thinking == {"type": "adaptive"} and made[0].effort == "medium"
     assert made[1].thinking == {"type": "disabled"} and made[1].effort is None
+
+
+def test_small_model_mistakes_are_handled(sandbox, tmp_path, monkeypatch):
+    install_fake_rea(tmp_path)
+
+    async def scenario():
+        try:
+            wrapped, err = await nc.run_tool("rea_call", {"tool": "rea_search", "arguments": {"query": "apk"}})
+            own, own_err = await nc.run_tool("rea_call", {"tool": "glob", "arguments": '{"pattern": "*.nothing"}'})
+            missing, missing_err = await nc.run_tool("rea_call", {"tool": "rea_schema"})
+            return wrapped, err, own, own_err, missing, missing_err
+        finally:
+            await nc.st.rea.close()
+
+    wrapped, err, own, own_err, missing, missing_err = run(scenario())
+    assert not err and "install_adb_package" in wrapped                       # ran rea_search instead of failing
+    assert not own_err and missing_err and "rea_schema needs: tool" in missing
+
+    names = lambda: {t["name"] for t in nc.active_tools()}           # noqa: E731
+    nc.st.backend, nc.st.model = "ollama", "qwen2.5:0.5b"
+    assert "rea_call" not in names() and "read" in names() and "Reverse engineering" not in nc.build_system_prompt()
+    nc.st.model = "qwen3:8b"
+    assert "rea_call" in names()
+
+    nc.st.backend, nc.st.model = "ollama", "qwen2.5:0.5b"
+    mock_http(monkeypatch, lambda req: httpx.Response(200, text="\n".join(json.dumps(x) for x in [
+        {"message": {"content": "The ball is 5 cents."}, "done": False},
+        {"message": {"content": "\n</tool_response>"}, "done": True}]) + "\n"))
+    run(nc.send("bat and ball"))
+    assert "</tool_response>" not in nc.st.output and nc.st.messages[-1]["content"] == "The ball is 5 cents."

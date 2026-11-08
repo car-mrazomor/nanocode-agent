@@ -364,7 +364,17 @@ def messages_width():
     return max(20, columns - 4)
 
 
+LEAKED_TAGS = re.compile(r"</?(?:tool_response|tool_call|tool_calls|tool_result|function_call|function_calls)>"
+                         r"|<\|im_(?:start|end)\|>|<\|(?:eot_id|end_of_text|endoftext)\|>")
+
+
+def clean_reply(text):
+    """Removes chat-format tags that small models sometimes leak into their answer."""
+    return LEAKED_TAGS.sub("", text) if text else text
+
+
 def render_markdown(text):
+    text = clean_reply(text)
     width = max(20, messages_width() - 3)
     from rich.theme import Theme
     buf = io.StringIO()
@@ -1994,13 +2004,20 @@ async def rea_tool_spec(name):
       {"tool": {"type": "string"}, "arguments": {"type": "object"},
        "timeout": {"type": "integer", "description": "seconds (default 600)"}}, ["tool"])
 async def tool_rea_call(args):
-    spec = await rea_tool_spec(args["tool"])
     arguments = args.get("arguments") or {}
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except json.JSONDecodeError:
             raise ToolError("`arguments` must be a JSON object")
+    own = TOOLS.get(args["tool"])
+    if own and own["name"] != "rea_call":
+        # Small models sometimes wrap nanocode's own tools (rea_search, read, ...) in rea_call: just run them.
+        missing = [k for k in own["schema"]["required"] if arguments.get(k) in (None, "")]
+        if missing:
+            raise ToolError(f"{own['name']} needs: {', '.join(missing)}. Call {own['name']} directly, not via rea_call")
+        return await own["fn"](arguments)
+    spec = await rea_tool_spec(args["tool"])
     if rea_is_risky(spec) and not await allowed("rea", f"{spec['name']} {json.dumps(arguments)}"):
         return DENIED
     timeout = min(max(int(args.get("timeout") or 600), 5), 3600)
@@ -2018,9 +2035,32 @@ async def tool_rea_call(args):
     return text or "(no output)"
 
 
+def model_size_billions(model):
+    """Parameter count in billions for an Ollama model, from its tag (qwen2.5:0.5b) or `ollama list`; None if unknown."""
+    match = re.search(r"[:\-_](\d+(?:\.\d+)?)([bm])\b", model.lower())
+    if match:
+        return float(match.group(1)) / (1000 if match.group(2) == "m" else 1)
+    for info in st.ollama_models:
+        if info["name"] == model:
+            size = re.match(r"(\d+(?:\.\d+)?)\s*([BM])", str(info.get("params", "")).upper())
+            if size:
+                return float(size.group(1)) / (1000 if size.group(2) == "M" else 1)
+    return None
+
+
+def tiny_model():
+    """Very small local models get confused by a long tool list, so they get the basics only."""
+    size = model_size_billions(st.model) if st.backend == "ollama" else None
+    return size is not None and size < 3
+
+
+def rea_offered():
+    return rea_enabled() and not tiny_model()
+
+
 def active_tools():
-    """Tools offered to the model: REA's only when it's installed and enabled."""
-    return [t for t in TOOLS.values() if not t["name"].startswith("rea_") or rea_enabled()]
+    """Tools offered to the model: REA's only when it's installed and enabled (and the model isn't tiny)."""
+    return [t for t in TOOLS.values() if not t["name"].startswith("rea_") or rea_offered()]
 
 
 def build_system_prompt():
@@ -2041,7 +2081,7 @@ def build_system_prompt():
         lines = ["# Skills\nLoad a skill with the `skill` tool before a task that matches its description:"]
         lines += [f"- {name}: {info['description'][:200]}" for name, info in skills.items()]
         parts.append("\n".join(lines))
-    if rea_enabled():
+    if rea_offered():
         parts.append(
             "# Reverse engineering\nFor reverse-engineering work (native binaries, apps, APKs, Electron/JS bundles, "
             f"websites, firmware, devices), load the `{REA_SKILL}` skill first, then use REA: rea_search to "
@@ -2320,6 +2360,7 @@ async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
             raise RuntimeError(f"connection lost mid-reply ({type(e).__name__}); try again") from e
         raise RetryableError(f"network error ({type(e).__name__})") from e
     stream_end()
+    text = clean_reply(text).strip() if LEAKED_TAGS.search(text or "") else text
     message = {"role": "assistant", "content": text or None}
     if tool_calls:
         message["tool_calls"] = [
@@ -2439,6 +2480,7 @@ async def _ollama_stream(system_prompt, messages, use_tools, think):
     except httpx.ReadTimeout as e:
         raise RuntimeError("Ollama stopped responding (15 min without output). Try a smaller model or context.") from e
     stream_end()
+    text = clean_reply(text).strip() if LEAKED_TAGS.search(text or "") else text
     message = {"role": "assistant", "content": text or None}
     if tool_calls:
         message["tool_calls"] = tool_calls
