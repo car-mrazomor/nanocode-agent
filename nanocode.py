@@ -45,7 +45,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -3542,7 +3542,7 @@ def build_app():
 
     class Placeholder(Processor):
         def apply_transformation(self, ti):
-            if ti.document.text == "" and ti.lineno == 0:
+            if st.home and ti.document.text == "" and ti.lineno == 0:  # only on the start screen
                 hint = PLACEHOLDERS[int(st.session.get("created", 0)) % len(PLACEHOLDERS)]
                 return Transformation([("class:placeholder", f'Ask anything... "{hint}"')])
             return Transformation(ti.fragments)
