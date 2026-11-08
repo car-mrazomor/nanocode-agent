@@ -473,7 +473,6 @@ class State:
         self.input_box = None
         self.rea = None
         self.home = True  # the start screen, until the first message or command
-        self.sidebar_on = True
         self.dialog = None
         self.interrupt_armed = 0.0
         self.activity = []  # (tool, preview, is_error) this session, for /recap
@@ -516,13 +515,10 @@ def reset_view(text=""):
 
 
 def messages_width():
-    """Width of the transcript column (terminal minus sidebar and padding)."""
+    """Width of the transcript column (the terminal minus padding)."""
     if st.app is None or not st.app.is_running:
         return 80
-    columns = st.app.output.get_size().columns
-    if sidebar_visible():
-        columns -= SIDEBAR_WIDTH
-    return max(20, columns - 4)
+    return max(20, st.app.output.get_size().columns - 4)
 
 
 LEAKED_TAGS = re.compile(r"</?(?:tool_response|tool_call|tool_calls|tool_result|function_call|function_calls)>"
@@ -3466,16 +3462,9 @@ def banner():
     return "\n" + "\n".join(rows) + "\n"
 
 
-SIDEBAR_WIDTH = 42
 PLACEHOLDERS = ["Fix a TODO in the codebase", "What is the tech stack of this project?", "Fix broken tests",
                 "Explain how this repo is structured", "Add tests for the last change"]
 LOGO_HEX = ["#6fb6c6", "#6aa9cc", "#6f9ccb", "#7a92c8", "#8a8cc4", "#9b88bf", "#ad87b6", "#bf89ae"]
-
-
-def sidebar_visible():
-    if st.app is None or not st.app.is_running or not st.sidebar_on or st.home:
-        return False
-    return st.app.output.get_size().columns >= 110
 
 
 def start_input(text):
@@ -3741,7 +3730,7 @@ def build_app():
                     ("class:warning" if armed else "class:muted", "esc again to interrupt" if armed else "esc interrupt")]
         branch = git_branch()
         right = sum(len(fragment[1]) for fragment in footer_right())
-        total = st.app.output.get_size().columns - (SIDEBAR_WIDTH if sidebar_visible() else 0) - 4
+        total = st.app.output.get_size().columns - 4
         room = max(8, total - right - len(branch) - 5)
         return [("class:muted", f" {fit_left(tilde(os.getcwd()), room)}"), ("class:faint", f"  {branch}" if branch else "")]
 
@@ -3764,53 +3753,6 @@ def build_app():
 
     footer = VSplit([Window(FormattedTextControl(footer_left), height=1),
                      Window(FormattedTextControl(footer_right), height=1, align=WindowAlign.RIGHT)])
-
-    # --- sidebar ---
-    def sidebar_text():
-        width = SIDEBAR_WIDTH - 4
-        lines = []
-        title = st.session.get("title") or "New session"
-        for chunk in textwrap.wrap(title, width)[:3]:
-            lines += [("class:sidebar.title", chunk), ("", "\n")]
-        lines.append(("", "\n"))
-        lines += [("class:sidebar.heading", "Context"), ("", "\n")]
-        tokens = st.usage["input"] + st.usage["output"]
-        lines += [("class:sidebar.text", f"{tokens:,} tokens"), ("", "\n")]
-        if st.backend != "sdk" and st.ctx_budget:
-            lines += [("class:sidebar.muted", f"{min(100, st.ctx_tokens * 100 // st.ctx_budget)}% used"), ("", "\n")]
-        lines += [("class:sidebar.muted", f"{fmt_cost(st.usage['cost'])} spent"), ("", "\n"), ("", "\n")]
-        if st.changed:
-            lines += [("class:sidebar.heading", "Modified Files"), ("", "\n")]
-            for path, (added, removed) in list(st.changed.items())[-12:]:
-                name = path if len(path) <= width - 12 else "…" + path[-(width - 13):]
-                lines += [("class:sidebar.text", name), ("class:success", f" +{added}"),
-                          ("class:error", f" -{removed}"), ("", "\n")]
-            lines.append(("", "\n"))
-        if st.shells:
-            lines += [("class:sidebar.heading", "Shells"), ("", "\n")]
-            for name, info in st.shells.items():
-                lines += [("class:accent", "● "), ("class:sidebar.text", name),
-                          ("class:sidebar.muted", f"  {info['command'][:width - len(name) - 4]}"), ("", "\n")]
-            lines.append(("", "\n"))
-        if rea_runtime() is not None:
-            state = "on" if rea_enabled() else "off"
-            lines += [("class:sidebar.heading", "REA"), ("", "\n"),
-                      ("class:sidebar.muted", f"{state} · {'running' if st.rea and st.rea.alive() else 'idle'}"),
-                      ("", "\n"), ("", "\n")]
-        return lines
-
-    def sidebar_footer():
-        return [("class:sidebar.muted", fit_left(tilde(os.getcwd()), SIDEBAR_WIDTH - 4)), ("", "\n"),
-                ("class:accent", "● "), ("class:sidebar.text", "nanocode"), ("class:sidebar.muted", f" v{__version__}")]
-
-    sidebar = ConditionalContainer(
-        VSplit([Window(width=2, style="class:sidebar"),
-                HSplit([Window(height=1, style="class:sidebar"),
-                        Window(FormattedTextControl(sidebar_text), style="class:sidebar", wrap_lines=True),
-                        Window(FormattedTextControl(sidebar_footer), height=2, style="class:sidebar"),
-                        Window(height=1, style="class:sidebar")]),
-                Window(width=2, style="class:sidebar")], width=SIDEBAR_WIDTH),
-        filter=Condition(sidebar_visible))
 
     # --- home screen: logo and prompt in the middle ---
     def logo_fragments():
@@ -3871,14 +3813,11 @@ def build_app():
                        align=WindowAlign.RIGHT)]),
     ])
 
-    session = VSplit([
-        HSplit([
-            VSplit([Window(width=2), st.output_window, Window(width=2)]),
-            Window(height=1),
-            VSplit([Window(width=2), HSplit([prompt_panel, footer]), Window(width=2)]),
-            Window(height=1),  # a little room under the prompt
-        ]),
-        sidebar,
+    session = HSplit([
+        VSplit([Window(width=2), st.output_window, Window(width=2)]),
+        Window(height=1),
+        VSplit([Window(width=2), HSplit([prompt_panel, footer]), Window(width=2)]),
+        Window(height=1),  # a little room under the prompt
     ])
 
     # --- dialogs: command palette, models, sessions, providers ---
@@ -3970,7 +3909,6 @@ def build_app():
             ("Switch session", "ctrl+x l", sessions_dialog),
             ("Switch model", "ctrl+x m", models_dialog),
             ("Switch provider", "", providers_dialog),
-            ("Toggle sidebar", "ctrl+x b", toggle_sidebar),
             ("Compact session", "ctrl+x c", run_command("/compact")),
             ("Undo last file change", "ctrl+x u", run_command("/undo")),
         ]
@@ -3980,10 +3918,6 @@ def build_app():
                     for name, info in list_skills().items()]
         actions.append(("Exit", "ctrl+x q", lambda: st.app.exit()))
         open_dialog("Commands", actions)
-
-    def toggle_sidebar():
-        st.sidebar_on = not st.sidebar_on
-        invalidate()
 
     # --- keys ---
     kb = KeyBindings()
@@ -4119,7 +4053,7 @@ def build_app():
     def _(event):
         palette()
 
-    leader = {"n": run_command("/c"), "l": sessions_dialog, "m": models_dialog, "b": toggle_sidebar,
+    leader = {"n": run_command("/c"), "l": sessions_dialog, "m": models_dialog,
               "c": run_command("/compact"), "u": run_command("/undo"), "h": run_command("/help"),
               "q": lambda: st.app.exit()}
     for key, action in leader.items():
@@ -4166,11 +4100,6 @@ def build_app():
         "text": f"fg:{T['text']}", "muted": f"fg:{T['muted']}", "faint": f"fg:{T['faint']}",
         "accent": f"fg:{T['accent']}", "warning": f"fg:{T['warning']}",
         "success": f"fg:{T['success']}", "error": f"fg:{T['error']}",
-        "sidebar": f"bg:{T['panel']}",
-        "sidebar.title": f"bg:{T['panel']} fg:{T['text']} bold",
-        "sidebar.heading": f"bg:{T['panel']} fg:{T['text']} bold",
-        "sidebar.text": f"bg:{T['panel']} fg:{T['text']}",
-        "sidebar.muted": f"bg:{T['panel']} fg:{T['muted']}",
         "dialog": f"bg:{T['panel2']}",
         "dialog.title": f"bg:{T['panel2']} fg:{T['text']} bold",
         "dialog.muted": f"bg:{T['panel2']} fg:{T['muted']}",

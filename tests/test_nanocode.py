@@ -812,8 +812,6 @@ def test_tui_home_palette_leader_and_interrupt(sandbox, monkeypatch):
             seen["models"] = nc.st.dialog and nc.st.dialog["title"]
             await keys("\x1b", 0.3)                 # esc closes it
             seen["closed"] = nc.st.dialog is None and app.layout.has_focus(nc.st.input_box)
-            await keys("\x18b")                     # ctrl+x b: toggle sidebar
-            seen["sidebar"] = nc.st.sidebar_on
             await keys("hello\r", 0.4)
             seen["home_after_send"] = nc.st.home
             seen["busy"] = not nc.st.task.done()
@@ -826,7 +824,7 @@ def test_tui_home_palette_leader_and_interrupt(sandbox, monkeypatch):
 
     run(scenario())
     assert seen == {"home_at_start": True, "palette": "Commands", "models": "Switch model", "closed": True,
-                    "sidebar": False, "home_after_send": False, "busy": True, "still_busy": True, "stopped": True}
+                    "home_after_send": False, "busy": True, "still_busy": True, "stopped": True}
     assert "interrupted" in plain(nc.st.output)
 
 
