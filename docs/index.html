@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nanocode — a small coding agent for your terminal</title>
+<meta name="description" content="A small, hackable coding agent for your terminal, in one Python file. Runs on your Claude subscription, any OpenRouter model, or local models through Ollama.">
+<meta property="og:title" content="nanocode">
+<meta property="og:description" content="A small coding agent for your terminal, in one Python file.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' x2='1'><stop offset='0' stop-color='%236fb6c6'/><stop offset='1' stop-color='%23bf89ae'/></linearGradient></defs><rect width='32' height='32' rx='7' fill='%23141518'/><rect x='7' y='7' width='4' height='18' fill='url(%23g)'/><text x='14' y='23' font-family='monospace' font-size='16' fill='%23d5d6da'>n</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #141518; --panel: #1e2024; --panel2: #26292e; --border: #34373d;
+    --text: #d5d6da; --muted: #80838c; --faint: #555860;
+    --accent: #7fa7c9; --accent2: #9d8fc4; --cyan: #78b8c4; --pink: #c08aae;
+    --success: #8fb48b; --error: #d07f7f; --think: #f5a742;
+    --grad: linear-gradient(90deg, #6fb6c6, #6aa9cc, #6f9ccb, #7a92c8, #8a8cc4, #9b88bf, #ad87b6, #bf89ae);
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+  a { color: inherit; text-decoration: none; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  code, pre, .mono { font-family: var(--mono); }
+
+  /* nav */
+  nav { position: sticky; top: 0; z-index: 10; background: rgba(20,21,24,.85); backdrop-filter: blur(10px); border-bottom: 1px solid var(--panel2); }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font: 700 18px var(--mono); }
+  .brand .bar { width: 4px; height: 20px; background: var(--grad); border-radius: 2px; }
+  nav .links { display: flex; gap: 26px; font-size: 14px; color: var(--muted); }
+  nav .links a:hover { color: var(--text); }
+
+  /* hero */
+  .hero { padding: 88px 0 56px; text-align: center; }
+  .logo { display: inline-block; max-width: 100%; overflow: hidden; margin: 0 0 28px; font: 700 clamp(11px, 2.6vw, 22px)/1.05 var(--mono); white-space: pre; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .version { display: inline-flex; gap: 8px; align-items: center; padding: 4px 12px; border: 1px solid var(--border); border-radius: 99px; font: 12px var(--mono); color: var(--muted); margin-bottom: 22px; }
+  .version b { color: var(--success); font-weight: 500; }
+  h1 { font-size: clamp(32px, 5.4vw, 56px); line-height: 1.1; margin: 0 0 18px; letter-spacing: -.02em; font-weight: 700; }
+  h1 span { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lead { max-width: 640px; margin: 0 auto 34px; color: var(--muted); font-size: 18px; }
+  .buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border-radius: 10px; font-weight: 600; font-size: 15px; transition: transform .15s, background .15s; }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.primary { background: var(--accent); color: var(--bg); }
+  .btn.primary:hover { background: #93b6d4; }
+  .btn.ghost { border: 1px solid var(--border); color: var(--text); }
+  .btn.ghost:hover { background: var(--panel); }
+
+  /* terminal mockup: the actual nanocode look */
+  .term { margin: 64px auto 0; max-width: min(900px, 100%); background: var(--bg); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; text-align: left; box-shadow: 0 30px 80px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.02); }
+  .term .top { display: flex; gap: 7px; padding: 12px 14px; background: var(--panel); border-bottom: 1px solid var(--panel2); }
+  .term .top i { width: 11px; height: 11px; border-radius: 50%; background: var(--border); }
+  .term .body { padding: 20px 22px 14px; font: 13.5px/1.65 var(--mono); overflow-x: auto; }
+  .row { white-space: pre; }
+  .user { border-left: 2px solid var(--accent); background: var(--panel); padding: 10px 16px; margin: 0 0 14px; white-space: normal; }
+  .m { color: var(--muted); } .f { color: var(--faint); } .ok { color: var(--success); } .bad { color: var(--error); }
+  .ac { color: var(--accent); } .cy { color: var(--cyan); } .pk { color: var(--pink); } .th { color: var(--think); font-weight: 700; }
+  .add { color: var(--success); background: rgba(143,180,139,.08); } .del { color: var(--error); background: rgba(208,127,127,.08); }
+  .done { margin-top: 12px; }
+  .done .sq { color: var(--accent2); }
+  .prompt { margin-top: 18px; border-left: 2px solid var(--accent); background: var(--panel); padding: 12px 16px; }
+  .prompt .ph { color: var(--faint); margin-bottom: 10px; }
+  .prompt .meta b { color: var(--warning, #cfad73); font-weight: 700; }
+  .status { display: flex; justify-content: space-between; padding: 8px 2px 0; color: var(--muted); font-size: 12.5px; }
+  .caret { display: inline-block; width: 8px; height: 15px; background: var(--text); vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* sections */
+  section { padding: 84px 0 0; }
+  .eyebrow { font: 500 13px var(--mono); color: var(--accent); letter-spacing: .06em; text-transform: uppercase; margin: 0 0 10px; }
+  h2 { font-size: clamp(26px, 3.6vw, 38px); margin: 0 0 12px; letter-spacing: -.015em; line-height: 1.2; }
+  .sub { color: var(--muted); margin: 0 0 40px; max-width: 620px; }
+
+  /* providers */
+  .providers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .prov { background: var(--panel); border: 1px solid var(--panel2); border-radius: 12px; padding: 22px; }
+  .prov h3 { margin: 0 0 6px; font-size: 17px; }
+  .prov p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .prov .tag { font: 12px var(--mono); color: var(--cyan); margin-bottom: 10px; display: block; }
+
+  /* features */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--panel2); border-radius: 12px; padding: 22px; transition: border-color .2s, transform .2s; }
+  .card:hover { border-color: var(--border); transform: translateY(-2px); }
+  .card .icon { font: 700 18px var(--mono); width: 36px; height: 36px; display: grid; place-items: center; border-radius: 9px; background: var(--panel2); margin-bottom: 14px; }
+  .card h3 { margin: 0 0 6px; font-size: 16.5px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  /* install */
+  .install { background: var(--panel); border: 1px solid var(--panel2); border-radius: 14px; padding: 28px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tab { background: none; border: 1px solid var(--border); color: var(--muted); padding: 7px 14px; border-radius: 8px; font: 500 13px var(--sans); cursor: pointer; }
+  .tab.on { background: var(--panel2); color: var(--text); border-color: var(--faint); }
+  .cmd { display: flex; align-items: center; gap: 12px; background: var(--bg); border: 1px solid var(--panel2); border-radius: 10px; padding: 14px 14px 14px 18px; }
+  .cmd code { flex: 1; min-width: 0; font-size: 13.5px; color: var(--text); overflow-x: auto; white-space: nowrap; }
+  .cmd code .d { color: var(--faint); user-select: none; }
+  .copy { flex-shrink: 0; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 6px 12px; font: 500 12.5px var(--sans); cursor: pointer; }
+  .copy:hover { background: var(--border); }
+  .then { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }
+  .then div { font: 13px var(--mono); color: var(--muted); padding: 12px 14px; border-radius: 9px; background: var(--bg); border: 1px solid var(--panel2); }
+  .then b { color: var(--text); font-weight: 500; display: block; margin-bottom: 2px; }
+  .note { color: var(--muted); font-size: 14px; margin: 16px 0 0; }
+
+  footer { margin-top: 96px; border-top: 1px solid var(--panel2); padding: 32px 0 44px; color: var(--faint); font-size: 14px; }
+  footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+  .badges span { border: 1px solid var(--panel2); border-radius: 99px; padding: 3px 10px; font: 12px var(--mono); color: var(--muted); }
+  footer a:hover { color: var(--text); }
+
+  @media (max-width: 860px) { .grid, .providers { grid-template-columns: 1fr 1fr; } .then { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px; }
+    nav .links a:not(.gh) { display: none; }
+    .grid, .providers { grid-template-columns: 1fr; }
+    .hero { padding-top: 56px; }
+    .term .body { font-size: 11px; padding: 16px 14px 12px; }
+    .logo { font-size: 8.5px; }
+    .status span:last-child { display: none; }
+    .install { padding: 18px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#"><span class="bar"></span>nanocode</a>
+    <div class="links">
+      <a href="#providers">Providers</a>
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a class="gh" href="https://github.com/car-mrazomor/nanocode-agent">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <pre class="logo" aria-label="nanocode">█▀▀▄ ▄▀▀▄ █▀▀▄ ▄▀▀▄ ▄▀▀▀ ▄▀▀▄ █▀▀▄ █▀▀▀
+█  █ █▀▀█ █  █ █  █ █    █  █ █  █ █▀▀
+▀  ▀ ▀  ▀ ▀  ▀  ▀▀   ▀▀▀  ▀▀  ▀▀▀  ▀▀▀▀</pre>
+    <div><span class="version"><b>●</b> v0.5.1 · one Python file</span></div>
+    <h1>A small coding agent<br>for <span>your terminal.</span></h1>
+    <p class="lead">Reads, edits and runs your code — with your Claude subscription, any OpenRouter model, or local models through Ollama. Hackable, private, and it asks before it touches anything.</p>
+    <div class="buttons">
+      <a class="btn primary" href="#install">Get started</a>
+      <a class="btn ghost" href="https://github.com/car-mrazomor/nanocode-agent">View on GitHub</a>
+    </div>
+
+    <div class="term" aria-hidden="true">
+      <div class="top"><i></i><i></i><i></i></div>
+      <div class="body">
+        <div class="user">the date parser fails on ISO weeks, fix it and run the tests</div>
+        <div class="row"><span class="m">→</span> Read <span class="m">src/dates.py</span></div>
+        <div class="row"><span class="m">✱</span> Grep <span class="m">"isoweek" · 3 matches</span></div>
+        <div class="row"><span class="m">←</span> Edit <span class="m">src/dates.py</span> <span class="ok">+4</span> <span class="bad">-1</span></div>
+        <div class="row"><span class="del">  -     week = int(parts[1])                      </span></div>
+        <div class="row"><span class="add">  +     week = int(parts[1].lstrip("W"))          </span></div>
+        <div class="row"><span class="m">$</span> Bash <span class="m">pytest tests/test_dates.py -q</span></div>
+        <div class="row"><span class="f">    14 passed in 0.31s</span></div>
+        <div class="row" style="margin-top:10px">   Fixed: ISO week strings like <span class="cy">2026-W07</span> kept the <span class="cy">W</span>,</div>
+        <div class="row">   so <span class="cy">int()</span> failed. All 14 date tests pass now.</div>
+        <div class="row done"><span class="sq">▣</span> <span class="m">Cooked for 9s · GLM 5.3 · 4.1k in · 312 out · $0.0021 · 21:04</span></div>
+        <div class="prompt">
+          <div class="ph">Ask anything...<span class="caret"></span></div>
+          <div class="meta"><b>Auto</b> <span class="f">·</span> GLM 5.3  <span class="m">OpenRouter</span> <span class="f">·</span> <span class="th">medium</span></div>
+        </div>
+        <div class="status"><span>~/projects/app  <span class="f">main</span></span><span>12% context  $0.0021  ctrl+p commands</span></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="providers">
+  <div class="wrap">
+    <p class="eyebrow">Bring your own model</p>
+    <h2>Three ways to run it.</h2>
+    <p class="sub">Switch any time with <code>/provider</code> and <code>/model</code>. Same tools, same interface.</p>
+    <div class="providers">
+      <div class="prov"><span class="tag">/provider claude</span><h3>Claude subscription</h3><p>Uses the plan you already pay for, through the Claude Agent SDK. No API key.</p></div>
+      <div class="prov"><span class="tag">/provider openrouter</span><h3>OpenRouter</h3><p>Any model: Claude, GLM, GPT, Gemini, DeepSeek, Kimi — or the auto router. Cost shown per reply.</p></div>
+      <div class="prov"><span class="tag">/provider ollama</span><h3>Ollama</h3><p>Local models on your machine. Free, private and offline. Small models get a lighter tool set.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <p class="eyebrow">Features</p>
+    <h2>Small, but it does the job.</h2>
+    <p class="sub">Everything a coding agent needs, in a full-screen terminal UI that stays out of your way.</p>
+    <div class="grid">
+      <div class="card"><div class="icon ac">←</div><h3>Tools that ask first</h3><p>Read, edit, search and run commands. Edits show a diff and wait for your OK — or switch to Auto. <code>/undo</code> reverts.</p></div>
+      <div class="card"><div class="icon cy">$</div><h3>Background shells</h3><p>Dev servers and watchers keep running in tmux or screen while the agent keeps working and reads their output.</p></div>
+      <div class="card"><div class="icon pk">◆</div><h3>Memory</h3><p>Global and per-project notes the agent always follows. Type <code># note</code> to remember something.</p></div>
+      <div class="card"><div class="icon" style="color:var(--accent2)">◈</div><h3>Skills</h3><p>Drop in any <code>SKILL.md</code> — works with Claude Code skills too. Run one with <code>/name</code>, or let it learn new ones.</p></div>
+      <div class="card"><div class="icon th">∴</div><h3>Thinking levels</h3><p><code>/think off · low · medium · high</code> for every provider. Shown right under the prompt.</p></div>
+      <div class="card"><div class="icon ac">▣</div><h3>Costs in sight</h3><p>Time, tokens and cost after every reply, context use in the status bar, <code>/compact</code> when it fills up.</p></div>
+      <div class="card"><div class="icon cy">%</div><h3>Reverse engineering</h3><p>Optional REA tools for binaries, APKs, Electron apps, web bundles and firmware — installed for you.</p></div>
+      <div class="card"><div class="icon pk">⇅</div><h3>Mouse that works</h3><p>Smooth wheel scrolling, drag to select and copy, your message pinned on top while you read the answer.</p></div>
+      <div class="card"><div class="icon ok">↑</div><h3>Stays up to date</h3><p>Tells you when a new version is out. <code>/update</code> installs it in the background.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <p class="eyebrow">Get started</p>
+    <h2>One line to install.</h2>
+    <p class="sub">Everything goes into <code>~/.nanocode</code>. No admin rights; Python is downloaded privately if you don't have it.</p>
+    <div class="install">
+      <div class="tabs" role="tablist">
+        <button class="tab on" data-cmd="curl -fsSL https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.sh | sh">macOS · Linux · WSL</button>
+        <button class="tab" data-cmd="irm https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.ps1 | iex">Windows</button>
+      </div>
+      <div class="cmd"><code><span class="d">$ </span><span id="cmd">curl -fsSL https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/install.sh | sh</span></code><button class="copy" id="copy">Copy</button></div>
+      <div class="then">
+        <div><b>nanocode</b>start, pick a provider</div>
+        <div><b>nanocode -p "…"</b>one prompt, no UI</div>
+        <div><b>nanocode doctor</b>check the setup</div>
+      </div>
+      <p class="note">Also on Android (Termux). Update with <code>/update</code> or <code>nanocode update</code>; remove with <code>nanocode uninstall</code>.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>nanocode · by <a href="https://github.com/car-mrazomor">car-mrazomor</a> · inspired by <a href="https://github.com/1rgs/nanocode">1rgs/nanocode</a></div>
+    <div class="badges"><span>one file</span><span>macOS · Linux · Windows</span><span>no telemetry</span></div>
+  </div>
+</footer>
+
+<script>
+  const cmd = document.getElementById("cmd"), copy = document.getElementById("copy");
+  document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("on"));
+    tab.classList.add("on");
+    cmd.textContent = tab.dataset.cmd;
+    copy.textContent = "Copy";
+  }));
+  copy.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(cmd.textContent); copy.textContent = "Copied"; }
+    catch (e) { copy.textContent = "Select & copy"; }
+    setTimeout(() => copy.textContent = "Copy", 1800);
+  });
+</script>
+</body>
+</html>
