@@ -3697,7 +3697,8 @@ def build_app():
             return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
 
         # Like OpenCode's variant: a dim dot, then the level in bold orange (dim when thinking is off).
-        return [(mode[1], mode[0]), ("class:panel", "  "), ("class:panel.text", pretty_model(st.model)),
+        return [(mode[1], mode[0]), ("class:panel", " "), ("class:panel.muted", "·"), ("class:panel", " "),
+                ("class:panel.text", pretty_model(st.model)),
                 ("class:panel", "  "), ("class:panel.muted", provider_label()), ("class:panel", " "),
                 ("class:panel.muted", "·", cycle), ("class:panel", " ", cycle),
                 ("class:think.off" if level == "off" else "class:think", level, cycle)]
