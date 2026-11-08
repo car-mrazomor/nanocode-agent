@@ -292,15 +292,37 @@
   let W = 0, H = 0, dpr = 1, cell = 9, P = [], grid = null, cols = 0, rows = 0, ox = 0, oy = 0;
   let mx = -9999, my = -9999, lastMove = 0, busyUntil = 0, born = 0, raf = 0, idle = 0;
   const lerp = (a, b, t) => a + (b - a) * t;
-  const color = x => { const t = Math.min(.999, Math.max(0, x / W)) * (GRAD.length - 1), i = t | 0, f = t - i;
-    return GRAD[i].map((c, k) => Math.round(lerp(c, GRAD[i + 1][k], f))); };
+  // the .grad colors as a loop (back to the first at the end), for colors that slowly travel
+  const LOOP = [...GRAD, GRAD[0]];
+  const tone = u => { u = ((u % 1) + 1) % 1; const t = u * (LOOP.length - 1), i = t | 0, f = t - i;
+    return LOOP[i].map((c, k) => Math.round(lerp(c, LOOP[i + 1][k], f))); };
+  const LUT = Array.from({ length: 256 }, (_, i) => tone(i / 256));
+  const shade = u => LUT[(((u % 1) + 1) % 1) * 256 | 0];
   const pick = s => s[Math.random() * s.length | 0];
+  // every glyph pre-drawn once per color into a sprite sheet: copying sprites is far cheaper than drawing text
+  const CHARS = [...new Set((TIERS.join("") + HEX).split(""))], CI = Object.fromEntries(CHARS.map((c, i) => [c, i]));
+  const SHADES = 48, WHITE = SHADES;
+  let atlas = null, A = 0, S = 0;
+  function buildAtlas() {
+    S = cell * 1.5; A = Math.ceil(S * dpr);
+    atlas = document.createElement("canvas"); atlas.width = A * CHARS.length; atlas.height = A * (SHADES + 1);
+    const a = atlas.getContext("2d");
+    a.font = `600 ${cell * 1.32 * dpr}px "JetBrains Mono", ui-monospace, monospace`;
+    a.textAlign = "center"; a.textBaseline = "middle";
+    for (let row = 0; row <= SHADES; row++) {
+      const [r, g, b] = row === WHITE ? [240, 242, 246] : tone(row / SHADES);
+      a.fillStyle = `rgb(${r},${g},${b})`;
+      CHARS.forEach((c, i) => a.fillText(c, i * A + A / 2, row * A + A / 2));
+    }
+  }
+  const glyph = (ci, row, x, y, alpha) => { ctx.globalAlpha = alpha; ctx.drawImage(atlas, ci * A, row * A, A, A, x - S / 2, y - S / 2, S, S); };
+  const HEXI = HEX.split("").map(c => CI[c]);
 
   function build() {
     dpr = Math.min(devicePixelRatio || 1, 2);
     W = hero.clientWidth; H = hero.clientHeight;
     canvas.width = W * dpr; canvas.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    cell = W < 620 ? 6 : W < 1000 ? 8 : 9;
+    cell = W < 620 ? 4 : 5;                       // small, fine glyphs
     // draw the word offscreen, as wide as fits, then read how much of each cell it covers
     const off = document.createElement("canvas"); off.width = W; off.height = H;
     const o = off.getContext("2d");
@@ -326,15 +348,17 @@
       if (cover < .08) continue;
       const tier = cover > .85 ? 0 : cover > .55 ? 1 : cover > .3 ? 2 : 3;
       grid[r * cols + c] = P.length;
-      P.push({ x, y, tier, g: pick(TIERS[tier]), rgb: color(x), ph: Math.random() * 6.28, sp: .4 + Math.random() * .8,
+      P.push({ x, y, tier, g: CI[pick(TIERS[tier])], u: x / W * .8, ph: Math.random() * 6.28, sp: .4 + Math.random() * .8,
                sx: (Math.random() * 2 - 1) * 120, sy: (Math.random() * 2 - 1) * 90, delay: (x / W) * 700 + Math.random() * 350,
                until: 0, flash: 0, cool: 0, swap: 800 + Math.random() * 3000 });
     }
+    buildAtlas();
     born = performance.now();
   }
 
   // scramble the glyphs around a point (pointer, tap, or an automatic ripple)
   function stir(px, py, radius, now) {
+    px -= gx; py -= gy;
     const c0 = Math.max(0, Math.floor((px - radius - ox) / cell)), c1 = Math.min(cols - 1, Math.ceil((px + radius - ox) / cell));
     const r0 = Math.max(0, Math.floor((py - radius - oy) / cell)), r1 = Math.min(rows - 1, Math.ceil((py + radius - oy) / cell));
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
@@ -348,32 +372,45 @@
     }
   }
 
+  let gx = 0, gy = 0;                          // where the whole word has floated to
+  function backdrop(t) {
+    // soft glows in the gradient colors, drifting and changing color very slowly
+    for (let i = 0; i < 3; i++) {
+      const cx = W * (.5 + .38 * Math.cos(t * .035 + i * 2.1)), cy = H * (.42 + .3 * Math.sin(t * .028 + i * 1.7));
+      const [r, g, b] = shade(i / 3 + t * .006), rad = Math.max(W, H) * .62;
+      const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+      glow.addColorStop(0, `rgba(${r},${g},${b},.085)`); glow.addColorStop(1, `rgba(${r},${g},${b},0)`);
+      ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+    }
+  }
+
   function draw(now) {
     ctx.clearRect(0, 0, W, H);
-    ctx.font = `600 ${cell * 1.32}px "JetBrains Mono", ui-monospace, monospace`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    const t = now / 1000, age = now - born;
+    const t = (still ? 0 : now) / 1000, age = now - born;
+    backdrop(t);
+    gx = Math.cos(t * .22) * cell * 3; gy = Math.sin(t * .22) * cell * 2;   // a slow, wide circle
+    const drift = t * .012;                                                  // colors travel slowly along the word
     for (const p of P) {
       let k = Math.min(1, Math.max(0, (age - p.delay) / 750)); if (still) k = 1;
       if (k <= 0) continue;
       const e = 1 - (1 - k) ** 3;
-      const x = p.x + p.sx * (1 - e) + Math.sin(t * p.sp * 2 + p.ph) * .5 * e;
-      const y = p.y + p.sy * (1 - e) + Math.cos(t * p.sp * 1.6 + p.ph) * .5 * e;
-      if (!still && now > p.swap && p.until < now) { p.g = pick(TIERS[p.tier]); p.swap = now + 1400 + Math.random() * 3600; }
-      const [r, g, b] = p.rgb;
-      if (p.until > now) {                       // scrambling: bright hex
-        ctx.fillStyle = `rgba(${r},${g},${b},${.95 * e})`; ctx.fillText(pick(HEX), x, y);
-      } else if (p.flash > now) {                // the flash before it settles
-        ctx.fillStyle = `rgba(240,242,246,${e})`; ctx.fillText(p.g, x, y);
-      } else {
-        const a = [.5, .38, .28, .18][p.tier] * e;
-        ctx.fillStyle = `rgba(${r},${g},${b},${a})`; ctx.fillText(p.g, x, y);
-      }
+      const a0 = t * (.35 + p.sp * .25) + p.ph, orbit = cell * .35 * e;        // each glyph circles slowly
+      const x = p.x + gx + p.sx * (1 - e) + Math.cos(a0) * orbit;
+      const y = p.y + gy + p.sy * (1 - e) + Math.sin(a0) * orbit;
+      if (!still && now > p.swap && p.until < now) { p.g = CI[pick(TIERS[p.tier])]; p.swap = now + 1400 + Math.random() * 3600; }
+      const row = ((((p.u + drift) % 1) + 1) % 1) * SHADES | 0;
+      if (p.until > now) glyph(pick(HEXI), row, x, y, .95 * e);          // scrambling: bright hex
+      else if (p.flash > now) glyph(p.g, WHITE, x, y, e);                // the flash before it settles
+      else glyph(p.g, row, x, y, [.5, .38, .28, .18][p.tier] * e);
     }
+    ctx.globalAlpha = 1;
   }
 
-  // full speed while something moves (intro, pointer, scrambles); a calm 12 fps otherwise
+  // full speed while something moves (intro, pointer, scrambles); a calm ~24 fps for the slow drift otherwise
+  let heroVisible = true;
+  new IntersectionObserver(e => { heroVisible = e[0].isIntersecting; if (heroVisible) wake(); }).observe(hero);
   function loop() {
+    if (!heroVisible || document.hidden) { sleeping = setTimeout(() => { sleeping = 0; loop(); }, 600); return; }   // paused off screen
     const now = performance.now();
     draw(now);
     const active = now - born < 1500 || now < busyUntil || now - lastMove < 150;
@@ -381,7 +418,7 @@
       idle = now; const p = P[Math.random() * P.length | 0]; if (p) stir(p.x, p.y, 70, now);
     }
     if (active) { sleeping = 0; raf = requestAnimationFrame(loop); }
-    else sleeping = setTimeout(() => { sleeping = 0; raf = requestAnimationFrame(loop); }, 80);
+    else sleeping = setTimeout(() => { sleeping = 0; raf = requestAnimationFrame(loop); }, 45);
   }
   let sleeping = 0;
   const wake = () => { if (sleeping) { clearTimeout(sleeping); sleeping = 0; raf = requestAnimationFrame(loop); } };
