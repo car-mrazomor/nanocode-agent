@@ -47,7 +47,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -1009,8 +1009,35 @@ def show_toast(text, seconds=2.5):
     invalidate()
 
 
+_drag_edge = {"direction": 0, "since": 0.0, "task": None}
+
+
+def drag_edge(direction):
+    """While selecting, resting the pointer on the chat's top or bottom row (or below it) scrolls the chat,
+    but only after a short pause and at a steady pace, so selecting text in the first or last visible line
+    doesn't make the chat run away."""
+    if direction != _drag_edge["direction"]:
+        _drag_edge.update(direction=direction, since=time.monotonic())
+    task = _drag_edge["task"]
+    if direction and (task is None or task.done()):
+        try:
+            _drag_edge["task"] = asyncio.get_running_loop().create_task(_edge_scroll())
+        except RuntimeError:
+            pass
+
+
+async def _edge_scroll():
+    while st.selection and st.selection.get("dragging") and _drag_edge["direction"]:
+        direction = _drag_edge["direction"]
+        if time.monotonic() - _drag_edge["since"] > .35 and scroll_transcript(direction):
+            st.selection["head"] = point_to_char(0, 0) if direction > 0 else point_to_char(10 ** 6, 10 ** 6)
+        await asyncio.sleep(.08)
+    _drag_edge["direction"] = 0
+
+
 def finish_selection():
     """Mouse released: copies what was selected (copy on select)."""
+    _drag_edge["direction"] = 0
     sel = st.selection
     if not sel:
         return
@@ -1052,10 +1079,7 @@ def transcript_mouse(event_type, button, x, y):
         if button == MouseButton.NONE or not sel or not sel["dragging"]:
             return False
         sel["head"] = point
-        if y <= 0:
-            scroll_transcript(1)
-        elif y >= st.view["height"] - 1:
-            scroll_transcript(-1)
+        drag_edge(1 if y <= 0 else -1 if y >= st.view["height"] - 1 else 0)
         invalidate()
         return True
     if event_type == MouseEventType.MOUSE_UP:
@@ -3204,7 +3228,10 @@ async def ensure_mcp():
 
 async def close_mcp():
     for client in list(st.mcp.values()):
-        await client.close()
+        try:
+            await client.close()
+        except RuntimeError:          # started under an event loop that's gone (Windows): nothing left to wait for
+            pass
     st.mcp.clear()
     st.mcp_loaded = None
     MCP_TOOLS.clear()
@@ -5079,8 +5106,9 @@ def build_app():
             if kind == MouseEventType.MOUSE_UP:
                 finish_selection()
             elif kind == MouseEventType.MOUSE_MOVE and event.button != MouseButton.NONE:
-                scroll_transcript(-1)
-                st.selection["head"] = point_to_char(10 ** 6, 10 ** 6)
+                st.selection["head"] = point_to_char(10 ** 6, 10 ** 6)   # below the chat: to the end of the last row
+                drag_edge(-1)
+                invalidate()
             return None
         if kind == MouseEventType.MOUSE_DOWN and st.selection:
             st.selection = None
@@ -5403,10 +5431,41 @@ def build_app():
         buff = event.current_buffer
         buff.cursor_position += buff.document.find_next_word_ending(count=1) or len(buff.document.text_after_cursor)
 
+    # Text selected with the mouse in the prompt behaves like in a normal text box: typing replaces it,
+    # Backspace/Delete remove it, arrows and Esc just drop it. (prompt_toolkit's default is emacs' selection
+    # mode, where typed keys are ignored until the selection is cleared.)
+    prompt_selection = Condition(lambda: st.input_box is not None and st.input_box.buffer.selection_state is not None
+                                 and st.app is not None and st.app.layout.has_focus(st.input_box))
+
+    @kb.add("<any>", filter=prompt_selection & no_dialog)
+    def _(event):
+        data = event.data
+        buff = event.current_buffer
+        if not data or not data.isprintable():
+            buff.exit_selection()
+            return
+        buff.cut_selection()
+        buff.insert_text(data)
+
+    @kb.add("backspace", filter=prompt_selection & no_dialog)
+    @kb.add("delete", filter=prompt_selection & no_dialog)
+    def _(event):
+        event.current_buffer.cut_selection()
+
+    for arrow in ("left", "right", "up", "down", "home", "end"):
+        @kb.add(arrow, filter=prompt_selection & no_dialog, eager=True)
+        def _(event, arrow=arrow):
+            buff = event.current_buffer
+            start, end = buff.document.selection_range()
+            buff.exit_selection()
+            buff.cursor_position = start if arrow in ("left", "up", "home") else end
+
     @kb.add("escape", filter=no_dialog)
     def _(event):
         buff = event.current_buffer
-        if buff.complete_state:
+        if buff.selection_state:
+            buff.exit_selection()
+        elif buff.complete_state:
             buff.cancel_completion()
         elif st.selection:
             st.selection = None

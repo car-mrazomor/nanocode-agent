@@ -1274,10 +1274,13 @@ def test_mcp_servers_tools_toggles_and_import(sandbox, monkeypatch):
     (home / ".claude.json").write_text(json.dumps({"mcpServers": {
         "files": {"command": "npx", "args": ["-y", "server-files"]}, "remote": {"type": "http", "url": "https://x"}}}))
     nc.st.config = {}
+
+    async def no_start():                 # checking the import only: don't start the imported (real) server
+        return False
+    monkeypatch.setattr(nc, "ensure_mcp", no_start)
     run(nc.cmd_mcp("import"))
     assert nc.st.config["mcp_servers"] == {"files": {"command": "npx", "args": ["-y", "server-files"]}}
     assert "skipped remote" in plain(nc.st.output)
-    run(nc.close_mcp())
 
 
 DDG_PAGE = """<html><body><div class="result"><h2 class="result__title"><a class="result__a"
@@ -1581,3 +1584,58 @@ def test_read_only_tools_are_marked_for_parallel_runs(sandbox):
     assert not marked["write"] and not marked["edit"] and not marked["bash"]
     nc.st.config["agent_edits"] = True               # sub-agents that may edit: one at a time
     assert not {t.name: t.annotations for t in nc.sdk_tools()}["agent"]
+
+
+def test_selecting_in_the_prompt_and_at_the_chat_edge(sandbox, monkeypatch):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    monkeypatch.setattr(nc, "copy_to_clipboard", lambda text: "native")
+    seen = {}
+
+    async def scenario():
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = nc.build_app()
+            nc.st.home = False
+            nc.reset_view("\n".join(f"line {i} " + "word " * 8 for i in range(300)))
+            box = nc.st.input_box
+            task = asyncio.ensure_future(app.run_async())
+            await asyncio.sleep(0.2)
+
+            async def keys(text, wait=0.15):
+                inp.send_text(text)
+                await asyncio.sleep(wait)
+
+            await keys("hello brave new world")
+            pos = app.renderer._last_screen.visible_windows_to_write_positions[box.window]
+            x, y = pos.xpos + 1, pos.ypos + 1
+            await keys(f"\x1b[<0;{x + 6};{y}M\x1b[<32;{x + 9};{y}M\x1b[<32;{x + 11};{y}M\x1b[<0;{x + 11};{y}m")
+            seen["selected"] = box.buffer.selection_state is not None
+            await keys("X")                                   # typing replaces the selection
+            seen["typed"] = box.text
+            await keys(f"\x1b[<0;{x};{y}M\x1b[<32;{x + 5};{y}M\x1b[<0;{x + 5};{y}m\x7f")   # Backspace removes it
+            seen["deleted"] = box.text
+            await keys(f"\x1b[<0;{x};{y}M\x1b[<32;{x + 3};{y}M\x1b[<0;{x + 3};{y}m\x1b[D")  # ← just drops it
+            seen["arrow"] = (box.text, box.buffer.selection_state)
+
+            chat = app.renderer._last_screen.visible_windows_to_write_positions[nc.st.output_window]
+            top = nc.st.scroll_top
+            row = chat.ypos + 1
+            await keys(f"\x1b[<0;{chat.xpos + 3};{row}M", 0.05)
+            for dx in range(3, 30, 2):                       # selecting along the first row: no scrolling
+                inp.send_text(f"\x1b[<32;{chat.xpos + dx};{row}M")
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)
+            seen["no_jump"] = nc.st.scroll_top == top
+            await asyncio.sleep(0.9)                         # resting at the edge scrolls, slowly
+            seen["slow"] = nc.st.scroll_top
+            await keys(f"\x1b[<0;{chat.xpos + 29};{row}m")
+            app.exit()
+            await task
+
+    run(scenario())
+    assert seen["selected"] and seen["typed"] == "hello X new world"
+    assert seen["deleted"] == " X new world"
+    assert seen["arrow"] == (" X new world", None)
+    assert seen["no_jump"]
+    assert seen["slow"] is not None and 1 <= 300 - nc.st.view["height"] - seen["slow"][0] <= 12
