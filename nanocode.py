@@ -47,7 +47,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -3470,6 +3470,21 @@ def build_system_prompt():
 
 # --- Claude subscription (Claude Agent SDK) ---
 
+READ_ONLY_TOOLS = {"read", "glob", "grep", "web_search", "web_fetch", "skill", "todo", "rea_search", "rea_schema",
+                   "mcp_search", "mcp_schema", "email_list", "email_search", "email_read", "email_folders"}
+
+
+def tool_is_read_only(t):
+    """Read-only tools can run at the same time (Claude Code only runs tools in parallel when they say so)."""
+    if t["name"] == "agent":
+        return not st.config.get("agent_edits")       # sub-agents can't change anything by default
+    if t.get("mcp"):
+        server, name = t["mcp"]
+        client = st.mcp.get(server)
+        return not mcp_is_risky(((client.tools if client else None) or {}).get(name, {}))
+    return t["name"] in READ_ONLY_TOOLS
+
+
 def sdk_tools():
     def make_handler(name):
         async def handler(args):
@@ -3477,8 +3492,11 @@ def sdk_tools():
             return {"content": [{"type": "text", "text": text}], "is_error": is_error}
         return handler
 
+    annotations = getattr(sdk, "ToolAnnotations", None)
     return [sdk.SdkMcpTool(name=t["name"], description=t["description"], input_schema=t["schema"],
-                           handler=make_handler(t["name"])) for t in active_tools()]
+                           handler=make_handler(t["name"]),
+                           annotations=annotations(readOnlyHint=True) if annotations and tool_is_read_only(t) else None)
+            for t in active_tools()]
 
 
 async def make_client(resume=None):

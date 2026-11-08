@@ -1571,3 +1571,13 @@ def test_email_setup_command(sandbox, monkeypatch):
     cfg = nc.load_config()["email"]
     assert cfg["imap_host"] == "imap.gmail.com" and cfg["smtp_port"] == 465 and cfg["user"] == "me@gmail.com"
     assert oct(nc.config_file().stat().st_mode)[-3:] == "600" or os.name == "nt"
+
+
+@pytest.mark.skipif(nc.sdk is None, reason="claude-agent-sdk isn't installed")
+def test_read_only_tools_are_marked_for_parallel_runs(sandbox):
+    hint = lambda a: bool(a and (getattr(a, "readOnlyHint", None) or getattr(a, "read_only_hint", None)))  # noqa: E731
+    marked = {t.name: hint(t.annotations) for t in nc.sdk_tools()}
+    assert marked["agent"] and marked["read"] and marked["grep"] and marked["web_search"]
+    assert not marked["write"] and not marked["edit"] and not marked["bash"]
+    nc.st.config["agent_edits"] = True               # sub-agents that may edit: one at a time
+    assert not {t.name: t.annotations for t in nc.sdk_tools()}["agent"]
