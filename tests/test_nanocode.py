@@ -1042,3 +1042,69 @@ def test_wheel_acceleration(monkeypatch):
         nc.wheel_scroll(1)
     assert moved[:2] == [3, 3] and moved[2] == 1 and moved[-1] == 4
     nc.reset_view()
+
+
+def test_think_levels_reach_every_provider(sandbox, monkeypatch):
+    nc.st.backend, nc.st.model, nc.st.openrouter_key = "api", "z-ai/glm", "k"
+    sent = []
+
+    def openrouter(req):
+        body = json.loads(req.content)
+        sent.append(body.get("reasoning"))
+        if body.get("reasoning") == {"enabled": False}:
+            return httpx.Response(400, json={"error": {"message": "Reasoning is mandatory for this endpoint"}})
+        return sse([{"choices": [{"delta": {"reasoning": "hmm"}}]}, {"choices": [{"delta": {"content": "ok"}}]}])
+
+    current = [openrouter]
+    mock_http(monkeypatch, lambda req: current[0](req))
+    assert nc.think_level() == "medium"                       # on by default
+    run(nc.send("hi"))
+    assert sent == [{"effort": "medium"}] and nc.st.thinking_now is False
+    run(nc.run_input("/think off"))
+    assert nc.load_config().get("think") == "off"
+    run(nc.send("hi"))                                         # rejected, so it's sent without the setting
+    assert sent[1:] == [{"enabled": False}, None] and ("api", "z-ai/glm") in nc.st.no_think
+    run(nc.run_input("/think high"))
+    run(nc.send("hi"))
+    assert sent[-1] == {"effort": "high"}
+    run(nc.run_input("/think nope"))
+    assert "takes off, low, medium, high" in plain(nc.st.output)
+
+    nc.st.backend, nc.st.model = "ollama", "llama3"
+    seen = []
+
+    def ollama(req):
+        body = json.loads(req.content)
+        seen.append(body.get("think", "unset"))
+        if body.get("think") is not None and body.get("think") != "unset":
+            return httpx.Response(400, json={"error": '"llama3" does not support thinking'})
+        return httpx.Response(200, text=json.dumps({"message": {"content": "ok"}, "done": True}) + "\n")
+
+    current[0] = ollama
+    run(nc.send("hi"))
+    assert seen == [True, "unset"]
+    nc.st.model = "gpt-oss:20b"
+    monkeypatch.setattr(nc, "rejects_thinking", lambda status, error: False)
+    current[0] = lambda req: seen.append(json.loads(req.content).get("think")) or httpx.Response(
+        200, text=json.dumps({"message": {"content": "ok"}, "done": True}) + "\n")
+    run(nc.send("hi"))
+    assert seen[-1] == "high"
+
+
+@pytest.mark.skipif(nc.sdk is None, reason="claude-agent-sdk isn't installed")
+def test_think_level_reaches_claude(sandbox, monkeypatch):
+    made = []
+
+    class FakeClient:
+        def __init__(self, options):
+            made.append(options)
+
+        async def connect(self):
+            pass
+
+    monkeypatch.setattr(nc.sdk, "ClaudeSDKClient", FakeClient)
+    run(nc.make_client())
+    nc.st.config["think"] = "off"
+    run(nc.make_client())
+    assert made[0].thinking == {"type": "adaptive"} and made[0].effort == "medium"
+    assert made[1].thinking == {"type": "disabled"} and made[1].effort is None

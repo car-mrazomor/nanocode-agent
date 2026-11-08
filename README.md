@@ -61,6 +61,8 @@ The first start runs a short setup:
 
 Your choices are saved in `~/.nanocode/config.json`. To switch provider while nanocode is running, use `/provider ollama` (or `openrouter`, `claude`). To change keys and defaults, run `nanocode setup`. To check that everything works, run `nanocode doctor`.
 
+Thinking is on by default (`medium`). It's sent the way each provider expects: `reasoning` for OpenRouter, `think` for Ollama, and adaptive thinking with an effort level for Claude. Models that can't think (or can't stop) are sent the request without it.
+
 ## Use
 
 Type what you want done. nanocode reads, searches, edits, runs commands and tests, and shows diffs before it changes anything. After every response, a dim line shows how long it took, the tokens used and what it cost:
@@ -74,6 +76,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | Command | What it does |
 |---|---|
 | `/provider [name]` | List providers, or switch (Claude subscription, OpenRouter, Ollama) |
+| `/think [level]` | How hard the model thinks: `off`, `low`, `medium` (default) or `high`. Shown under the prompt; click it to change |
 | `/model [name]` | List models (with prices, or what's installed in Ollama), or switch. Tab completes |
 | `/resume [n]` | Continue a saved chat. Every chat is saved per project |
 | `/recap` | What happened this session (files changed, commands run, cost) and what's next |

@@ -289,6 +289,8 @@ class State:
         self.selection = None  # {"anchor": (line, char), "head": (line, char), "dragging": bool}
         self.view = {"rows": [], "width": 80, "height": 24}
         self.toast = None  # (text, shown until)
+        self.thinking_now = False  # the model is reasoning right now (shown in the footer)
+        self.no_think = set()  # (backend, model) that rejected the thinking setting; sent without it
         self.pending_permission = None
         self.always_allow = set()
         self.auto_approve = False
@@ -394,7 +396,14 @@ def stream_text(chunk):
 
 
 
+def set_thinking(on):
+    if st.thinking_now != on:
+        st.thinking_now = on
+        invalidate()
+
+
 def stream_end():
+    st.thinking_now = False
     if st.live_md is None:
         return
     if st.headless:
@@ -2080,6 +2089,11 @@ async def make_client(resume=None):
         strict_mcp_config=True,
     )
     fields = {f.name for f in dataclasses.fields(sdk.ClaudeAgentOptions)}
+    level = think_level()
+    if "thinking" in fields:
+        options.thinking = {"type": "disabled"} if level == "off" else {"type": "adaptive"}
+    if "effort" in fields and level != "off":
+        options.effort = level
     if "tools" in fields:
         options.tools = []  # no Claude Code built-ins: only nanocode's tools, which handle permissions themselves
 
@@ -2107,7 +2121,10 @@ async def sdk_query(text):
         if stream_event and isinstance(msg, stream_event):
             ev = msg.event
             kind = ev.get("type")
+            if kind == "content_block_delta" and (ev.get("delta") or {}).get("type") == "thinking_delta":
+                set_thinking(True)
             if kind == "content_block_delta" and (ev.get("delta") or {}).get("type") == "text_delta":
+                set_thinking(False)
                 stream_text(ev["delta"]["text"])
             elif kind == "content_block_stop":
                 stream_end()
@@ -2213,12 +2230,44 @@ def api_error(status, body):
     return f"OpenRouter {status}: {message}"
 
 
+THINK_LEVELS = ("off", "low", "medium", "high")
+
+
+def think_level():
+    """How hard models think before answering: off, low, medium (the default) or high."""
+    level = str(st.config.get("think", "medium")).lower()
+    return level if level in THINK_LEVELS else "medium"
+
+
+class ThinkingUnsupported(Exception):
+    """The model rejected the thinking setting (it can't think, or can't stop thinking)."""
+
+
+def rejects_thinking(status, error):
+    error = error.lower()
+    return status in (400, 422) and any(word in error for word in ("reasoning", "thinking", "think"))
+
+
 async def openrouter_stream(system_prompt, messages, use_tools=True):
+    level = think_level()
+    if ("api", st.model) in st.no_think:
+        return await _openrouter_stream(system_prompt, messages, use_tools, None)
+    reasoning = {"enabled": False} if level == "off" else {"effort": level}
+    try:
+        return await _openrouter_stream(system_prompt, messages, use_tools, reasoning)
+    except ThinkingUnsupported:
+        st.no_think.add(("api", st.model))
+        return await _openrouter_stream(system_prompt, messages, use_tools, None)
+
+
+async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
     text, tool_calls, usage = "", {}, {}
     payload = {"model": st.model, "max_tokens": 16000, "stream": True, "usage": {"include": True},
                "messages": [{"role": "system", "content": system_prompt}] + messages}
     if use_tools:
         payload["tools"] = api_tools()
+    if reasoning:
+        payload["reasoning"] = reasoning
     headers = {"Authorization": f"Bearer {st.openrouter_key}", "X-Title": "nanocode",
                "HTTP-Referer": f"https://github.com/{REPO}"}
     timeout = httpx.Timeout(connect=20, read=300, write=60, pool=20)
@@ -2228,6 +2277,8 @@ async def openrouter_stream(system_prompt, messages, use_tools=True):
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode(errors="replace")
                     message = api_error(resp.status_code, body)
+                    if reasoning and rejects_thinking(resp.status_code, message):
+                        raise ThinkingUnsupported(message)
                     if resp.status_code in (408, 429, 500, 502, 503, 504):
                         retry_after = resp.headers.get("retry-after")
                         raise RetryableError(message, float(retry_after) if retry_after and
@@ -2252,7 +2303,10 @@ async def openrouter_stream(system_prompt, messages, use_tools=True):
                         usage = chunk["usage"]
                     for choice in chunk.get("choices") or []:
                         delta = choice.get("delta") or {}
+                        if delta.get("reasoning") or delta.get("reasoning_details"):
+                            set_thinking(True)
                         if delta.get("content"):
+                            set_thinking(False)
                             text += delta["content"]
                             stream_text(delta["content"])
                         for tc in delta.get("tool_calls") or []:
@@ -2319,12 +2373,26 @@ def refresh_ollama_models():
 
 
 async def ollama_stream(system_prompt, messages, use_tools=True):
+    level = think_level()
+    if ("ollama", st.model) in st.no_think:
+        return await _ollama_stream(system_prompt, messages, use_tools, None)
+    think = False if level == "off" else (level if "gpt-oss" in st.model else True)  # gpt-oss takes levels
+    try:
+        return await _ollama_stream(system_prompt, messages, use_tools, think)
+    except ThinkingUnsupported:
+        st.no_think.add(("ollama", st.model))
+        return await _ollama_stream(system_prompt, messages, use_tools, None)
+
+
+async def _ollama_stream(system_prompt, messages, use_tools, think):
     """Native /api/chat, not the OpenAI-compatible one, so num_ctx can be set (the default would cut prompts)."""
     text, tool_calls, usage = "", [], {}
     payload = {"model": st.model, "stream": True, "options": {"num_ctx": st.num_ctx},
                "messages": [{"role": "system", "content": system_prompt}] + to_ollama_messages(messages)}
     if use_tools:
         payload["tools"] = api_tools()
+    if think is not None:
+        payload["think"] = think
     timeout = httpx.Timeout(connect=10, read=900, write=60, pool=10)
     try:
         async with httpx.AsyncClient(timeout=timeout) as http:
@@ -2335,6 +2403,8 @@ async def ollama_stream(system_prompt, messages, use_tools=True):
                         error = str(json.loads(body).get("error", body))
                     except (json.JSONDecodeError, AttributeError):
                         error = body
+                    if think is not None and rejects_thinking(resp.status_code, error):
+                        raise ThinkingUnsupported(error)
                     if "not found" in error:
                         error += f" (download it with: ollama pull {st.model})"
                     elif "does not support tools" in error:
@@ -2350,7 +2420,10 @@ async def ollama_stream(system_prompt, messages, use_tools=True):
                     if chunk.get("error"):
                         raise RuntimeError(f"Ollama: {chunk['error']}")
                     message = chunk.get("message") or {}
+                    if message.get("thinking"):
+                        set_thinking(True)
                     if message.get("content"):
+                        set_thinking(False)
                         text += message["content"]
                         stream_text(message["content"])
                     for call in message.get("tool_calls") or []:
@@ -2601,6 +2674,7 @@ COMMANDS = {
     "/help": "commands and keys",
     "/model": "list models, or switch: /model <name>",
     "/provider": "list providers, or switch: /provider <name>",
+    "/think": "how hard the model thinks: /think off|low|medium|high (on = medium)",
     "/resume": "list saved chats, or /resume <n>",
     "/compact": "summarize the chat to free up context",
     "/undo": "revert the last file change",
@@ -2982,6 +3056,33 @@ def expand_mentions(text):
     return text + ("\n\n" + "\n\n".join(attached) if attached else "")
 
 
+THINK_HELP = {"off": "answers right away: fastest and cheapest", "low": "a little thinking",
+              "medium": "the default: thinks when it helps", "high": "thinks the most: best for hard tasks, slower"}
+
+
+async def cmd_think(arg):
+    arg = arg.lower().strip()
+    arg = {"on": "medium", "true": "medium", "false": "off", "none": "off", "max": "high"}.get(arg, arg)
+    if not arg:
+        lines = [f"{BOLD}Thinking{RESET} {DIM}(/think <level>){RESET}"]
+        for level in THINK_LEVELS:
+            mark = f"{GREEN}●{RESET}" if level == think_level() else " "
+            lines.append(f"  {mark} {CYAN}{level:<7}{RESET} {DIM}{THINK_HELP[level]}{RESET}")
+        out("\n".join(lines) + "\n")
+        return
+    if arg not in THINK_LEVELS:
+        out(f"{RED}⏺ /think takes off, low, medium, high (or on){RESET}\n")
+        return
+    st.config["think"] = arg
+    st.no_think.clear()
+    try:
+        save_config()
+    except OSError as e:
+        log_error(e)
+    await refresh_sdk_prompt()  # Claude takes the setting when it connects
+    out(f"{GREEN}⏺ Thinking: {arg}{RESET} {DIM}{THINK_HELP[arg]}{RESET}\n")
+
+
 async def refresh_sdk_prompt():
     """The SDK fixes the system prompt at connect time; reconnect (same chat) so new memory applies now."""
     if st.backend == "sdk" and st.client:
@@ -3044,6 +3145,8 @@ async def run_input(text):
             show_help()
         elif word == "/provider":
             await cmd_provider(arg)
+        elif word == "/think":
+            await cmd_think(arg)
         elif word == "/model":
             await cmd_model(arg)
         elif word == "/resume":
@@ -3291,6 +3394,12 @@ def build_app():
                     if name.startswith(typed.lower()):
                         yield Completion(name, start_position=-len(typed), display_meta=f"{label} · {desc}")
                 return
+            if text.startswith("/think "):
+                typed = text[len("/think "):]
+                for level in THINK_LEVELS:
+                    if level.startswith(typed.lower()):
+                        yield Completion(level, start_position=-len(typed), display_meta=THINK_HELP[level])
+                return
             if text.startswith("/model "):
                 typed = text[len("/model "):]
                 for name, desc in model_choices().items():
@@ -3378,8 +3487,19 @@ def build_app():
 
     def meta_row():
         mode = ("Auto", "class:mode.auto") if st.auto_approve else ("Ask", "class:mode")
+        level = think_level()
+        following = THINK_LEVELS[(THINK_LEVELS.index(level) + 1) % len(THINK_LEVELS)]
+
+        def cycle(event):
+            if event.event_type == MouseEventType.MOUSE_UP:
+                start_input(f"/think {following}")
+                return None
+            return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
+
+        think = ("class:panel.muted", "thinking off", cycle) if level == "off" else \
+            ("class:think", f"thinking {level}", cycle)
         return [(mode[1], mode[0]), ("class:panel", "  "), ("class:panel.text", pretty_model(st.model)),
-                ("class:panel", "  "), ("class:panel.muted", provider_label())]
+                ("class:panel", "  "), ("class:panel.muted", provider_label()), ("class:panel", "  "), think]
 
     def bar_style():
         if st.pending_permission is not None:
@@ -3405,6 +3525,7 @@ def build_app():
             frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 10) % 10]
             armed = st.interrupt_armed and time.time() - st.interrupt_armed < 2
             return [("class:accent", f" {frame} "), ("class:muted", f"{fmt_duration(time.time() - st.task_started)}  "),
+                    ("class:thinking", "thinking  ") if st.thinking_now else ("", ""),
                     ("class:warning" if armed else "class:muted", "esc again to interrupt" if armed else "esc interrupt")]
         branch = git_branch()
         right = sum(len(text) for _, text in footer_right())
@@ -3799,6 +3920,7 @@ def build_app():
         "placeholder": f"fg:{T['faint']}",
         "mode": f"bg:{T['panel']} fg:{T['accent']} bold",
         "mode.auto": f"bg:{T['panel']} fg:{T['warning']} bold",
+        "think": f"bg:{T['panel']} fg:{T['accent2']}", "thinking": f"fg:{T['accent2']}",
         "bar": f"bg:{T['bg']} fg:{T['accent']}",
         "bar.busy": f"bg:{T['bg']} fg:{T['accent2']}",
         "bar.warning": f"bg:{T['bg']} fg:{T['warning']}",
