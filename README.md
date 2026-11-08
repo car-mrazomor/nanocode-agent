@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/car-mrazomor/nanocode-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/car-mrazomor/nanocode-agent/actions/workflows/ci.yml)
 
-A small, hackable coding agent for your terminal, in one Python file. It runs on:
+A small, hackable coding agent for your terminal, in one Python file. **Website: [car-mrazomor.github.io/nanocode-agent](https://car-mrazomor.github.io/nanocode-agent/)**
+
+It runs on:
 
 - **your Claude subscription**, through the Claude Agent SDK
 - **any OpenRouter model**: Claude, GLM, GPT, Gemini, DeepSeek, Kimi, or OpenRouter's auto router
