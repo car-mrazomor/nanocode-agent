@@ -45,7 +45,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -148,6 +148,70 @@ def home_dir():
 
 def config_file():
     return home_dir() / "config.json"
+
+
+# --- Update check: the VERSION file on GitHub, at most once a day, in the background ---
+
+UPDATE_CHECK_EVERY = 24 * 3600
+
+
+def parse_version(text):
+    parts = re.findall(r"\d+", str(text))[:3]
+    return tuple(int(p) for p in parts) + (0,) * (3 - len(parts)) if parts else (0, 0, 0)
+
+
+def is_newer(latest):
+    return bool(latest) and parse_version(latest) > parse_version(__version__)
+
+
+def update_check_enabled():
+    return not os.environ.get("NANOCODE_NO_UPDATE_CHECK") and st.config.get("update_check", True) is not False
+
+
+def update_cache():
+    try:
+        return json.loads((home_dir() / "update.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def fetch_latest_version(timeout=4):
+    """The newest version on GitHub, or None when offline."""
+    try:
+        resp = httpx.get(f"{RAW_BASE}/VERSION", timeout=timeout, follow_redirects=True)
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+    latest = resp.text.strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", latest):
+        return None
+    try:
+        home_dir().mkdir(parents=True, exist_ok=True)
+        (home_dir() / "update.json").write_text(json.dumps({"checked": time.time(), "latest": latest}))
+    except OSError:
+        pass
+    return latest
+
+
+async def check_for_update(force=False):
+    """Sets st.update_available when GitHub has a newer version. Uses the cached answer for a day."""
+    if not force and not update_check_enabled():
+        return None
+    cache = update_cache()
+    latest = cache.get("latest")
+    if force or time.time() - cache.get("checked", 0) > UPDATE_CHECK_EVERY:
+        latest = await asyncio.to_thread(fetch_latest_version) or latest
+    st.update_available = latest if is_newer(latest) else None
+    invalidate()
+    return latest
+
+
+def version_report(latest):
+    if latest is None:
+        return f"nanocode {__version__} (couldn't check for updates: offline?)"
+    if is_newer(latest):
+        return f"nanocode {__version__} · {latest} is available: run `nanocode update`"
+    return f"nanocode {__version__} (latest)"
 
 
 def global_memory_file():
@@ -290,6 +354,7 @@ class State:
         self.view = {"rows": [], "width": 80, "height": 24}
         self.toast = None  # (text, shown until)
         self.thinking_now = False  # the model is reasoning right now (shown in the footer)
+        self.update_available = None  # newer version on GitHub, if any
         self.no_think = set()  # (backend, model) that rejected the thinking setting; sent without it
         self.pending_permission = None
         self.always_allow = set()
@@ -2716,6 +2781,7 @@ COMMANDS = {
     "/help": "commands and keys",
     "/model": "list models, or switch: /model <name>",
     "/provider": "list providers, or switch: /provider <name>",
+    "/version": "this version, and whether there's a newer one",
     "/think": "how hard the model thinks: /think off|low|medium|high (on = medium)",
     "/resume": "list saved chats, or /resume <n>",
     "/compact": "summarize the chat to free up context",
@@ -3189,6 +3255,11 @@ async def run_input(text):
             await cmd_provider(arg)
         elif word == "/think":
             await cmd_think(arg)
+        elif word == "/version":
+            latest = await check_for_update(force=True)
+            note = f"{YELLOW}" if is_newer(latest) else f"{GREEN}"
+            out(f"{note}⏺ {version_report(latest)}{RESET}" + (f"\n  {DIM}quit nanocode (ctrl+x q), run it, then start "
+                                                              f"nanocode again{RESET}" if is_newer(latest) else "") + "\n")
         elif word == "/model":
             await cmd_model(arg)
         elif word == "/resume":
@@ -3579,6 +3650,8 @@ def build_app():
         parts = []
         if st.toast and time.monotonic() < st.toast[1]:
             parts.append(("class:success", f"{st.toast[0]}  "))
+        if st.update_available:
+            parts.append(("class:warning", f"↑ {st.update_available}: nanocode update  "))
         if st.scroll_top is not None:
             parts.append(("class:muted", "scrolled back · pgdn  "))
         if st.backend != "sdk" and st.ctx_budget and st.messages:
@@ -3656,6 +3729,9 @@ def build_app():
         hello = f"Welcome back, {name}" if name else "Welcome to nanocode"
         hint = [("class:muted", f"{hello} · "), ("class:text", "ctrl+p"), ("class:muted", " commands · "),
                 ("class:text", "/"), ("class:muted", " commands · "), ("class:text", "@"), ("class:muted", " files")]
+        if st.update_available:
+            hint += [("", "\n\n"), ("class:warning", f"nanocode {st.update_available} is available · update with "),
+                     ("class:text", "nanocode update")]
         if needs_setup:
             hint += [("", "\n\n"), ("class:warning", "Shift+Enter and Cmd keys need a one-time setup in this "
                                                      "terminal: "), ("class:text", "/terminal-setup")]
@@ -3670,7 +3746,7 @@ def build_app():
         Window(height=2),
         VSplit([Window(), HSplit([prompt_panel], width=Dimension(max=75, preferred=75)), Window()]),
         Window(height=1),
-        Window(FormattedTextControl(home_hint), height=Dimension(min=1, max=3), align=WindowAlign.CENTER),
+        Window(FormattedTextControl(home_hint), height=Dimension(min=1, max=5), align=WindowAlign.CENTER),
         Window(),
         VSplit([Window(FormattedTextControl(home_footer), height=1),
                 Window(FormattedTextControl(lambda: [("class:muted", f"v{__version__} ")]), height=1,
@@ -4210,6 +4286,13 @@ def doctor():
     st.config = load_config()
     print(f"  {ok} Python {platform.python_version()} on {platform.system()} {platform.machine()}")
     print(f"  {ok} home: {tilde(home_dir())}")
+    latest = fetch_latest_version()
+    if latest is None:
+        print(f"  {warn} couldn't check for updates (offline?)")
+    elif is_newer(latest):
+        print(f"  {warn} nanocode {latest} is available (you have {__version__}): nanocode update")
+    else:
+        print(f"  {ok} nanocode {__version__} is the latest")
     from importlib import metadata
     for name in ("httpx", "rich", "prompt_toolkit"):
         try:
@@ -4325,6 +4408,7 @@ async def run_interactive(resume_last=False):
             log_error(e)
             out(f"{RED}⏺ {e}{RESET}\n")
 
+    asyncio.ensure_future(check_for_update())
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(lambda _loop, ctx: log_error(ctx.get("exception") or RuntimeError(ctx.get("message"))))
     st.task_started = time.time()
@@ -4399,7 +4483,10 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.version or args.command == "version":
-        print(f"nanocode {__version__}")
+        if args.version:
+            print(f"nanocode {__version__}")  # -v stays instant and offline
+        else:
+            print(version_report(fetch_latest_version()))
         return 0
     if args.command == "update":
         return run_installer()

@@ -1138,3 +1138,31 @@ def test_small_model_mistakes_are_handled(sandbox, tmp_path, monkeypatch):
         {"message": {"content": "\n</tool_response>"}, "done": True}]) + "\n"))
     run(nc.send("bat and ball"))
     assert "</tool_response>" not in nc.st.output and nc.st.messages[-1]["content"] == "The ball is 5 cents."
+
+
+def test_version_file_matches_the_code():
+    assert (Path(nc.__file__).parent / "VERSION").read_text().strip() == nc.__version__
+
+
+def test_update_check(sandbox, monkeypatch, capsys):
+    calls = []
+
+    def github(req):
+        calls.append(str(req.url))
+        return httpx.Response(200, text="99.0.0\n")
+
+    real = httpx.Client
+    monkeypatch.setattr(nc.httpx, "get", lambda url, **kw: real(transport=httpx.MockTransport(github)).get(url))
+    assert nc.parse_version("0.10.0") > nc.parse_version("0.9.9") and not nc.is_newer(nc.__version__)
+    assert run(nc.check_for_update()) == "99.0.0" and nc.st.update_available == "99.0.0"
+    run(nc.check_for_update())                                # cached for a day: no second request
+    assert len(calls) == 1 and calls[0].endswith("/master/VERSION")
+    assert nc.main(["version"]) == 0 and "99.0.0 is available: run `nanocode update`" in capsys.readouterr().out
+    run(nc.run_input("/version"))
+    assert "99.0.0 is available" in plain(nc.st.output)
+    monkeypatch.setenv("NANOCODE_NO_UPDATE_CHECK", "1")
+    nc.st.update_available = None
+    assert run(nc.check_for_update()) is None and nc.st.update_available is None
+
+    monkeypatch.setattr(nc.httpx, "get", lambda url, **kw: (_ for _ in ()).throw(httpx.ConnectError("offline")))
+    assert nc.main(["version"]) == 0 and "couldn't check for updates" in capsys.readouterr().out

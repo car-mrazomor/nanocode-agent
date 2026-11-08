@@ -39,9 +39,12 @@ Everything goes into `~/.nanocode`: the app, a private Python environment, your 
 
 ```sh
 nanocode update              # latest nanocode (and REA)
+nanocode version             # your version, and whether there's a newer one
 nanocode uninstall           # remove the app, keep config, memory and skills
 nanocode uninstall --purge   # remove everything
 ```
+
+**Updates:** nanocode checks GitHub for a newer version once a day, in the background. When there is one, the start screen and the bar under the prompt say so, with the command to run (`nanocode update`). `/version` checks right away. To turn the check off, set `"update_check": false` in `~/.nanocode/config.json` (or `NANOCODE_NO_UPDATE_CHECK=1`).
 
 ## Start
 
