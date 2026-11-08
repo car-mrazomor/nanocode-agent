@@ -1621,13 +1621,15 @@ def test_selecting_in_the_prompt_and_at_the_chat_edge(sandbox, monkeypatch):
             chat = app.renderer._last_screen.visible_windows_to_write_positions[nc.st.output_window]
             top = nc.st.scroll_top
             row = chat.ypos + 1
+            monkeypatch.setattr(nc, "EDGE_PAUSE", 30)        # moving along the edge: no scrolling (whatever the speed)
             await keys(f"\x1b[<0;{chat.xpos + 3};{row}M", 0.05)
             for dx in range(3, 30, 2):                       # selecting along the first row: no scrolling
                 inp.send_text(f"\x1b[<32;{chat.xpos + dx};{row}M")
                 await asyncio.sleep(0.01)
             await asyncio.sleep(0.1)
             seen["no_jump"] = nc.st.scroll_top == top
-            await asyncio.sleep(0.9)                         # resting at the edge scrolls, slowly
+            monkeypatch.setattr(nc, "EDGE_PAUSE", 0)         # once it has rested there: scrolls, slowly
+            await asyncio.sleep(0.6)
             seen["slow"] = nc.st.scroll_top
             await keys(f"\x1b[<0;{chat.xpos + 29};{row}m")
             app.exit()
@@ -1638,4 +1640,4 @@ def test_selecting_in_the_prompt_and_at_the_chat_edge(sandbox, monkeypatch):
     assert seen["deleted"] == " X new world"
     assert seen["arrow"] == (" X new world", None)
     assert seen["no_jump"]
-    assert seen["slow"] is not None and 1 <= 300 - nc.st.view["height"] - seen["slow"][0] <= 12
+    assert seen["slow"] is not None and 1 <= 300 - nc.st.view["height"] - seen["slow"][0] <= 9   # ~12 rows a second

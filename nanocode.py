@@ -1010,6 +1010,7 @@ def show_toast(text, seconds=2.5):
 
 
 _drag_edge = {"direction": 0, "since": 0.0, "task": None}
+EDGE_PAUSE = .35  # seconds the pointer rests at the edge before the chat starts scrolling
 
 
 def drag_edge(direction):
@@ -1029,7 +1030,7 @@ def drag_edge(direction):
 async def _edge_scroll():
     while st.selection and st.selection.get("dragging") and _drag_edge["direction"]:
         direction = _drag_edge["direction"]
-        if time.monotonic() - _drag_edge["since"] > .35 and scroll_transcript(direction):
+        if time.monotonic() - _drag_edge["since"] > EDGE_PAUSE and scroll_transcript(direction):
             st.selection["head"] = point_to_char(0, 0) if direction > 0 else point_to_char(10 ** 6, 10 ** 6)
         await asyncio.sleep(.08)
     _drag_edge["direction"] = 0
