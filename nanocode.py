@@ -47,7 +47,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.6.3"
+__version__ = "0.6.4"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
