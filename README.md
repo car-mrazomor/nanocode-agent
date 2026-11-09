@@ -19,6 +19,8 @@ It runs on:
 
 With tools to read, edit and run code, plan and hand work to sub-agents, search the web through your own browser, use any MCP server, compare models side by side, and handle your email.
 
+<p align="center"><img src="assets/demo.gif" alt="nanocode finding and fixing a failing test" width="900"></p>
+
 > Inspired by [1rgs/nanocode](https://github.com/1rgs/nanocode), a minimal Claude Code alternative in ~250 lines. This project started from it and grew into a full agent.
 
 ```
