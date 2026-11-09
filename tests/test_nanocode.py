@@ -419,6 +419,16 @@ def test_apply_config_env_overrides(sandbox, monkeypatch):
     assert "unknown provider" in nc.apply_config("nope")
 
 
+def test_provider_flag_shows_in_the_panel(sandbox, monkeypatch):
+    # `--provider openrouter` with Ollama saved in the config: the panel and /model follow the flag
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-x")
+    nc.st.config = {"provider": "ollama", "models": {"ollama": "qwen3"}}
+    assert nc.apply_config("openrouter") is None
+    assert nc.provider_label() == "OpenRouter"
+    run(nc.cmd_model("z-ai/glm-5.3"))
+    assert nc.st.config["models"] == {"ollama": "qwen3", "openrouter": "z-ai/glm-5.3"}
+
+
 def test_migrate_legacy(sandbox, tmp_path, monkeypatch):
     legacy = tmp_path / "userhome" / ".config" / "nanocode"
     (legacy).mkdir(parents=True)

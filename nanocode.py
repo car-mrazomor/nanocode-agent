@@ -47,7 +47,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -465,6 +465,7 @@ class State:
         self.last_error = None
         self.routed_model = None
         self.openrouter_key = None
+        self.provider = "claude"   # in use now; --provider can differ from the config
         self.ollama_url = OLLAMA_DEFAULT_URL
         self.num_ctx = default_num_ctx()
         self.ollama_models = []
@@ -4208,7 +4209,7 @@ def provider_status(name):
 
 
 async def cmd_provider(arg):
-    current = st.config.get("provider", "claude")
+    current = st.provider
     if not arg:
         lines = [f"{BOLD}Providers{RESET} {DIM}(/provider <name>){RESET}"]
         for name, (_, label, desc) in PROVIDERS.items():
@@ -4260,7 +4261,7 @@ async def cmd_model(arg):
         st.model = arg
         if st.backend == "sdk" and st.client:
             await st.client.set_model(arg)
-        st.config.setdefault("models", {})[st.config.get("provider", "")] = arg
+        st.config.setdefault("models", {})[st.provider] = arg
         save_config()
         out(f"{DIM}⏺ model: {arg} (saved as default){RESET}\n")
         return
@@ -5352,7 +5353,7 @@ def build_app():
     def providers_dialog():
         items = []
         for name, (_, label, desc) in PROVIDERS.items():
-            current = "● " if name == st.config.get("provider") else ""
+            current = "● " if name == st.provider else ""
             items.append((label, current + (provider_status(name) or desc)[:30], run_command(f"/provider {name}")))
         open_dialog("Switch provider", items)
 
@@ -5698,7 +5699,7 @@ def save_config():
 
 
 def provider_label():
-    return PROVIDERS.get(st.config.get("provider", "claude"), PROVIDERS["claude"])[1]
+    return PROVIDERS.get(st.provider, PROVIDERS["claude"])[1]
 
 
 def ask(prompt, default=""):
@@ -5800,7 +5801,7 @@ def apply_config(provider=None):
     provider = provider or st.config.get("provider", "claude")
     if provider not in PROVIDERS:
         return f"unknown provider '{provider}' (choose: {', '.join(PROVIDERS)})"
-    st.backend = PROVIDERS[provider][0]
+    st.provider, st.backend = provider, PROVIDERS[provider][0]
     st.model = os.environ.get("MODEL") or st.config.get("models", {}).get(provider) or DEFAULT_MODELS.get(provider)
     st.auto_approve = st.config.get("permissions") == "auto"
     if st.backend == "sdk" and sdk is None:
