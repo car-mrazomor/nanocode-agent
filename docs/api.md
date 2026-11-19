@@ -77,6 +77,33 @@ curl .../v1/runs/run_…                                                        
 
 Events: `run.started`, `delta` (reply text), `tool.started`, `tool.completed`, `usage`, then `run.completed`, `run.failed` or `run.cancelled`.
 
+## Images
+
+Send images as base64 in the last user message, the same way as with OpenAI:
+
+```python
+client.chat.completions.create(model="nanocode", messages=[{"role": "user", "content": [
+    {"type": "text", "text": "What's wrong in this screenshot?"},
+    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+]}])
+```
+
+From a file with curl (`-d @-` because base64 is too long for the command line):
+
+```sh
+jq -n --rawfile img <(base64 -i shot.png | tr -d '\n') '{model: "nanocode", messages: [{role: "user", content: [
+  {type: "text", text: "What is wrong here?"},
+  {type: "image_url", image_url: {url: ("data:image/png;base64," + $img)}}]}]}' |
+curl http://127.0.0.1:8765/v1/chat/completions -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" -d @-
+```
+
+- `/v1/responses` and `/v1/runs` take `{"type": "input_image", "image_url": "data:..."}` too.
+- PNG, JPEG, WebP and GIF, up to 20 MB each. The type is read from the bytes, so `image/png` on a JPEG is fine; plain base64 without the `data:` prefix works too.
+- Image URLs (`https://...`) aren't downloaded: send base64.
+- The model has to see images: a vision model on OpenRouter, a vision model in Ollama (`qwen2.5vl`, `llava`, `gemma3`), or Claude.
+- Images are saved in `.nanocode/images/` and the session keeps their names, so a continued chat still has them.
+
 ## Sessions
 
 Every API conversation is a normal saved nanocode chat in `.nanocode/sessions/`, so you can open it later in the app with `/resume`. A `session_id` you choose (runs, or the `X-Nanocode-Session-Id` header) names it, and later requests with the same id continue it.
@@ -114,6 +141,6 @@ Flags win over environment variables, which win over the config.
 
 ## Not supported (yet)
 
-- Images and file uploads (text only; images return `400 unsupported_content_type`)
+- File uploads, and image URLs (send images as base64)
 - Choosing the model per request: the server uses the model you set in nanocode
 - Running several turns at the same time

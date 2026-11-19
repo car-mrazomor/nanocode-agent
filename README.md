@@ -218,7 +218,7 @@ It uses IMAP and SMTP (no extra packages). Gmail and iCloud need an app password
 nanocode serve      # OpenAI-compatible API on http://127.0.0.1:8765/v1
 ```
 
-Call nanocode from anything that speaks OpenAI: curl, the `openai` SDK, Open WebUI, your scripts. It has `/v1/chat/completions`, `/v1/responses` (with stored conversations) and background runs with live events, and every call can use all of nanocode's tools. A key is always required. See [docs/api.md](docs/api.md).
+Call nanocode from anything that speaks OpenAI: curl, the `openai` SDK, Open WebUI, your scripts. It has `/v1/chat/completions`, `/v1/responses` (with stored conversations) and background runs with live events. You can send images (base64), and every call can use all of nanocode's tools. A key is always required. See [docs/api.md](docs/api.md).
 
 ## Background shells
 

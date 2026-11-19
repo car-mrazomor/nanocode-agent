@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import sys
 from pathlib import Path
@@ -203,12 +204,91 @@ def test_settings_make_and_keep_a_key(sandbox, monkeypatch):
     assert server.api_settings(port=9000) == ("127.0.0.1", 9000, "from-env-key")
 
 
-def test_text_content_only(sandbox):
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 24
+
+
+def b64(data):
+    return base64.b64encode(data).decode()
+
+
+def test_message_content(sandbox):
     assert server.message_text([{"type": "text", "text": "a"}, {"type": "input_text", "text": "b"}]) == "a\nb"
     with pytest.raises(server.ApiError):
-        server.message_text([{"type": "image_url", "image_url": {"url": "x"}}])
-    prompt, history, instructions = server.api_prompt(
+        server.message_text([{"type": "input_audio", "input_audio": {}}])
+    prompt, history, instructions, images = server.api_prompt(
         [{"role": "system", "content": "sys"}, {"role": "user", "content": "q1"},
          {"role": "assistant", "content": "a1"}, {"role": "user", "content": "q2"}])
-    assert (prompt, history, instructions) == ("q2", [("user", "q1"), ("assistant", "a1")], "sys")
+    assert (prompt, history, instructions, images) == ("q2", [("user", "q1"), ("assistant", "a1")], "sys", [])
     assert "Our conversation so far" in server.api_with_history("q2", history)
+
+
+def test_image_parts(sandbox):
+    # chat completions, Responses and Anthropic shapes; the type comes from the bytes, not the label
+    text, images = server.content_parts([
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64(JPEG)}"}},
+        {"type": "input_image", "image_url": f"data:image/png;base64,{b64(PNG)}"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(PNG)}}])
+    assert text == "look" and images == [("image/jpeg", JPEG), ("image/png", PNG), ("image/png", PNG)]
+    assert server.content_parts([{"type": "image_url", "image_url": {"url": b64(PNG)}}])[1] == [("image/png", PNG)]
+    assert server.message_text(["hi", {"type": "image_url", "image_url": {"url": "x"}}]) == "hi\n[image]"
+    for url in ("https://example.com/a.png", "data:image/png;base64,not base64!", f"data:image/png,{b64(PNG)}",
+                f"data:image/png;base64,{b64(b'just text')}"):
+        with pytest.raises(server.ApiError):
+            server.content_parts([{"type": "image_url", "image_url": {"url": url}}])
+
+
+def test_chat_completion_with_an_image(sandbox, monkeypatch):
+    requests = fake_openrouter(monkeypatch, [text_reply("A red square."), text_reply("Still red.")])
+
+    async def test(port, api):
+        status, _, body = await request(port, "POST", "/v1/chat/completions", {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64(PNG)}"}}]}]},
+            headers={"X-Nanocode-Session-Id": "pics"})
+        assert status == 200 and json.loads(body)["choices"][0]["message"]["content"] == "A red square."
+        sent = requests[0]["messages"][-1]["content"]
+        assert sent[0] == {"type": "text", "text": "what is this?"}
+        assert sent[1]["image_url"]["url"] == f"data:image/png;base64,{b64(PNG)}"
+        saved = json.loads((nc.sessions_dir() / "pics.json").read_text())
+        name = saved["messages"][0]["images"][0]
+        assert b64(PNG) not in json.dumps(saved) and (nc.project_dir() / "images" / name).read_bytes() == PNG
+        # next turn in the same session: only text is sent, and the image is still in the history
+        await request(port, "POST", "/v1/chat/completions", {"messages": [{"role": "user", "content": "and now?"}]},
+                      headers={"X-Nanocode-Session-Id": "pics"})
+        assert requests[1]["messages"][1]["content"][1]["image_url"]["url"].endswith(b64(PNG))
+
+    with_server(test)
+
+
+def test_images_for_ollama(sandbox):
+    name = nc.save_image(PNG, "image/png")
+    msgs = nc.to_ollama_messages([{"role": "user", "content": "see", "images": [name]}])
+    assert msgs == [{"role": "user", "content": "see", "images": [b64(PNG)]}]
+
+
+def test_images_for_claude_subscription(sandbox, monkeypatch):
+    name = nc.save_image(JPEG, "image/jpeg")
+    sent = []
+
+    class Client:
+        async def query(self, prompt):
+            sent.extend([m async for m in prompt])
+
+        async def receive_response(self):
+            return
+            yield
+
+    monkeypatch.setattr(nc.st, "client", Client())
+    monkeypatch.setattr(nc, "sdk", type("sdk", (), {"StreamEvent": None, "types": None}))
+    asyncio.run(nc.sdk_query("what's this?", [name]))
+    content = sent[0]["message"]["content"]
+    assert content[0] == {"type": "text", "text": "what's this?"}
+    assert content[1]["source"] == {"type": "base64", "media_type": "image/jpeg", "data": b64(JPEG)}
+
+
+def test_saved_images_are_not_committed(sandbox):
+    nc.save_image(PNG, "image/png")
+    ignored = (nc.project_dir() / ".gitignore").read_text().splitlines()
+    assert "images/" in ignored and "api.json" in ignored

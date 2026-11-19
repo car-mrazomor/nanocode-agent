@@ -62,3 +62,4 @@ Example:
 | `.nanocode/shells/` | Background shell output |
 | `.nanocode/skills/` | Project skills (can be committed) |
 | `.nanocode/api.json` | Stored API responses (`previous_response_id`) |
+| `.nanocode/images/` | Images sent through the API, used by the chats that have them |

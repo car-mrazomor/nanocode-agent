@@ -9,6 +9,8 @@ The running nanocode module is passed in (`serve(nanocode_module, ...)`), so thi
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import json
 import os
@@ -20,7 +22,8 @@ import time
 nc = None  # the nanocode module, set by serve()
 
 API_DEFAULT_PORT = 8765
-API_MAX_BODY = 10 * 1024 * 1024
+API_MAX_BODY = 40 * 1024 * 1024  # room for a few base64 images
+API_MAX_IMAGE = 20 * 1024 * 1024
 API_MAX_STORED = 100  # responses kept for previous_response_id
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 HTTP_REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
@@ -36,7 +39,8 @@ class ApiError(Exception):
 class ApiRun:
     """One agent turn requested over the API: its events, so clients can stream, poll or attach later."""
 
-    def __init__(self, prompt, session_id=None):
+    def __init__(self, prompt, session_id=None, images=None):
+        self.images = images or []  # [(mime, bytes)] sent with the prompt
         self.id = "run_" + os.urandom(8).hex()
         self.prompt, self.session_id = prompt, session_id
         self.status = "queued"  # queued, running, completed, failed, cancelled
@@ -140,8 +144,8 @@ class ApiServer:
 
     # --- running turns ---
 
-    def start(self, prompt, session_id=None, instructions=None):
-        run = ApiRun(prompt, session_id)
+    def start(self, prompt, session_id=None, instructions=None, images=None):
+        run = ApiRun(prompt, session_id, images)
         self.runs[run.id] = run
         while len(self.runs) > 200:  # forget the oldest finished runs
             old = next((r for r in self.runs.values() if r.done), None)
@@ -164,7 +168,9 @@ class ApiServer:
                 try:
                     nc.st.last_error = None
                     nc.out(f"{nc.DIM}API {run.id} · session {run.session_id}{nc.RESET}")
-                    await nc.send(nc.expand_mentions(text), display=run.prompt)
+                    images = [nc.save_image(data, mime) for mime, data in run.images]
+                    display = run.prompt + (f"\n[{len(images)} image{'s' * (len(images) > 1)}]" if images else "")
+                    await nc.send(nc.expand_mentions(text), display=display, images=images)
                 finally:
                     nc.EVENTS.reset(token)
                     nc.stream_end()
@@ -250,9 +256,9 @@ class ApiServer:
                 return await write_json(writer, 200, {"id": parts[2], "object": "response", "deleted": True})
         if method == "POST" and path == "/v1/runs":
             data = parse_json(body)
-            prompt, history, instructions = api_prompt(data.get("input"), data.get("instructions"))
+            prompt, history, instructions, images = api_prompt(data.get("input"), data.get("instructions"))
             run = self.start(api_with_history(prompt, history),
-                             api_session_id(data.get("session_id") or data.get("conversation")), instructions)
+                             api_session_id(data.get("session_id") or data.get("conversation")), instructions, images)
             return await write_json(writer, 202, {"run_id": run.id, "status": "started"})
         if parts[:2] == ["v1", "runs"] and len(parts) >= 3:
             run = self.runs.get(parts[2])
@@ -281,10 +287,10 @@ class ApiServer:
         if not turns or turns[-1].get("role") != "user":
             raise ApiError(400, "the last message must be from the user")
         session_id = api_session_id(headers.get("x-nanocode-session-id"))
-        prompt = message_text(turns[-1].get("content"))
+        prompt, images = content_parts(turns[-1].get("content"))
         if session_id is None:  # stateless, like OpenAI: the history comes with every request
             prompt = api_with_history(prompt, [(m["role"], message_text(m.get("content"))) for m in turns[:-1]])
-        run = self.start(prompt, session_id, system or None)
+        run = self.start(prompt, session_id, system or None, images)
         cid, created = "chatcmpl-" + run.id[4:], int(time.time())
 
         def chunk(delta, finish=None, **extra):
@@ -323,7 +329,7 @@ class ApiServer:
     # --- POST /v1/responses ---
 
     async def create_response(self, data, writer):
-        prompt, history, instructions = api_prompt(data.get("input"), data.get("instructions"))
+        prompt, history, instructions, images = api_prompt(data.get("input"), data.get("instructions"))
         previous, conversation = data.get("previous_response_id"), data.get("conversation")
         if isinstance(conversation, dict):
             conversation = conversation.get("id")
@@ -339,7 +345,7 @@ class ApiServer:
             session_id = stored["session_id"]
         elif history:
             prompt = api_with_history(prompt, history)
-        run = self.start(prompt, session_id, instructions)
+        run = self.start(prompt, session_id, instructions, images)
         rid = "resp_" + run.id[4:]
 
         def response(status):
@@ -426,36 +432,94 @@ def api_session_id(value):
     return str(value)
 
 
-def message_text(content):
-    """Plain text of an OpenAI message content: a string, or a list of text parts."""
+IMAGE_PARTS = ("image_url", "input_image", "image")
+IMAGE_MAGIC = [(b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"), (b"GIF87a", "image/gif"),
+               (b"GIF89a", "image/gif")]
+
+
+def content_parts(content):
+    """(text, images) of an OpenAI message content: a string, or a list of text and image parts.
+    Images are [(mime type, bytes)]."""
     if content is None:
-        return ""
+        return "", []
     if isinstance(content, str):
-        return content
+        return content, []
+    if not isinstance(content, list):
+        raise ApiError(400, "message content must be a string or a list of text and image parts")
+    texts, images = [], []
+    for part in content:
+        if isinstance(part, str):
+            texts.append(part)
+        elif isinstance(part, dict) and part.get("type") in ("text", "input_text", "output_text"):
+            texts.append(part.get("text") or "")
+        elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS:
+            images.append(decode_image(part))
+        elif isinstance(part, dict):
+            raise ApiError(400, f"'{part.get('type')}' content isn't supported: send text and images",
+                           "unsupported_content_type")
+    return "\n".join(texts), images
+
+
+def message_text(content):
+    """Text of a message from earlier in the chat; its images become "[image]"."""
     if isinstance(content, list):
-        texts = []
-        for part in content:
-            if isinstance(part, str):
-                texts.append(part)
-            elif isinstance(part, dict) and part.get("type") in ("text", "input_text", "output_text"):
-                texts.append(part.get("text") or "")
-            elif isinstance(part, dict):
-                raise ApiError(400, f"'{part.get('type')}' content isn't supported yet: nc.send text", "unsupported_content_type")
-        return "\n".join(texts)
-    raise ApiError(400, "message content must be a string or a list of text parts")
+        content = [{"type": "text", "text": "[image]"} if isinstance(p, dict) and p.get("type") in IMAGE_PARTS else p
+                   for p in content]
+    return content_parts(content)[0]
+
+
+def decode_image(part):
+    """(mime, bytes) from an image part: {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+    the Responses API's {"type": "input_image", "image_url": "data:..."}, or Anthropic's base64 "source"."""
+    source = part.get("source")
+    if isinstance(source, dict):
+        url = source.get("data") or source.get("url") or ""
+    else:
+        url = part.get("image_url") or part.get("url") or ""
+        if isinstance(url, dict):
+            url = url.get("url") or ""
+    if not isinstance(url, str) or not url:
+        raise ApiError(400, "an image part needs its data: {\"url\": \"data:image/png;base64,...\"}")
+    if url.startswith(("http://", "https://")):
+        raise ApiError(400, "send images as base64 (data:image/png;base64,...); image URLs aren't downloaded",
+                       "unsupported_content_type")
+    if url.startswith("data:"):
+        header, _, url = url.partition(",")
+        if ";base64" not in header:
+            raise ApiError(400, "image data URLs must be base64: data:image/png;base64,...")
+    try:
+        data = base64.b64decode("".join(url.split()), validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError(400, "the image isn't valid base64")
+    if len(data) > API_MAX_IMAGE:
+        raise ApiError(413, f"an image can be at most {API_MAX_IMAGE // 1024 // 1024} MB")
+    mime = image_type(data)
+    if mime is None:
+        raise ApiError(400, "images must be PNG, JPEG, WebP or GIF", "unsupported_content_type")
+    return mime, data
+
+
+def image_type(data):
+    """The real type, from the bytes: clients often say image/png for any image."""
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return next((mime for magic, mime in IMAGE_MAGIC if data.startswith(magic)), None)
 
 
 def api_prompt(value, instructions=None):
-    """(prompt, earlier turns, system instructions) from a Responses/Runs `input`: a string or a list of messages."""
+    """(prompt, earlier turns, system instructions, images) from a Responses/Runs `input`: a string or a list
+    of messages; the images are the last user message's."""
     if isinstance(value, str) and value.strip():
-        return value, [], instructions
+        return value, [], instructions, []
     if isinstance(value, list) and value:
         messages = [m for m in value if isinstance(m, dict) and m.get("type", "message") == "message"]
         system = [message_text(m.get("content")) for m in messages if m.get("role") in ("system", "developer")]
-        turns = [(m.get("role"), message_text(m.get("content"))) for m in messages if m.get("role") in ("user", "assistant")]
-        if turns and turns[-1][0] == "user":
+        turns = [m for m in messages if m.get("role") in ("user", "assistant")]
+        if turns and turns[-1].get("role") == "user":
             instructions = "\n\n".join(filter(None, [instructions, *system])) or None
-            return turns[-1][1], turns[:-1], instructions
+            prompt, images = content_parts(turns[-1].get("content"))
+            history = [(m.get("role"), message_text(m.get("content"))) for m in turns[:-1]]
+            return prompt, history, instructions, images
     raise ApiError(400, "'input' must be a non-empty string, or a list of messages ending with one from the user")
 
 
@@ -479,7 +543,7 @@ def api_capabilities():
             "features": {"chat_completions": True, "chat_completions_streaming": True, "responses_api": True,
                          "responses_streaming": True, "previous_response_id": True, "conversations": True,
                          "run_submission": True, "run_status": True, "run_events_sse": True, "run_stop": True,
-                         "skills": True, "tools": True, "images": False, "concurrent_runs": 1},
+                         "skills": True, "tools": True, "images": True, "concurrent_runs": 1},
             "session_header": "X-Nanocode-Session-Id",
             "endpoints": {"chat_completions": "POST /v1/chat/completions", "responses": "POST /v1/responses",
                           "response": "GET|DELETE /v1/responses/{id}", "runs": "POST /v1/runs",

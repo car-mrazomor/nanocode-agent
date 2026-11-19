@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import codecs
 import contextvars
 import dataclasses
@@ -16,6 +17,7 @@ import difflib
 import fnmatch
 import getpass
 import glob
+import hashlib
 from html.parser import HTMLParser
 import io
 import json
@@ -47,7 +49,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -333,6 +335,29 @@ def sessions_dir():
     return project_dir() / "sessions"
 
 
+IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+
+
+def save_image(data, mime):
+    """Keeps an image sent with a message in .nanocode/images, so the session stores a name, not base64."""
+    name = f"{hashlib.sha256(data).hexdigest()[:20]}.{IMAGE_TYPES[mime]}"
+    ensure_project_dir()
+    folder = project_dir() / "images"
+    folder.mkdir(exist_ok=True)
+    if not (folder / name).is_file():
+        (folder / name).write_bytes(data)
+    return name
+
+
+def load_image(name):
+    """(mime type, base64) of a saved image, or None if it's gone."""
+    mime = next((m for m, ext in IMAGE_TYPES.items() if name.endswith("." + ext)), None)
+    try:
+        return mime, base64.b64encode((project_dir() / "images" / Path(name).name).read_bytes()).decode()
+    except OSError:
+        return None
+
+
 def skill_dirs():
     """Earlier wins when two skills share a name."""
     dirs = [project_dir() / "skills", Path.cwd() / ".claude" / "skills",
@@ -346,7 +371,7 @@ def ensure_project_dir():
     """Creates .nanocode/ with its own .gitignore so memory and chats never get pushed, in any repo."""
     project_dir().mkdir(parents=True, exist_ok=True)
     ignore = project_dir() / ".gitignore"
-    wanted = ["sessions/", "memory.md", "undo/", "shells/"]
+    wanted = ["sessions/", "memory.md", "undo/", "shells/", "images/", "api.json"]
     try:
         current = ignore.read_text().splitlines() if ignore.exists() else ["# nanocode: private, not committed (skills/ can be)"]
         missing = [w for w in wanted if w not in current]
@@ -1011,7 +1036,6 @@ def copy_to_clipboard(text):
             return "tmux"
         except (OSError, subprocess.SubprocessError):
             pass
-    import base64
     sequence = f"\x1b]52;c;{base64.b64encode(text.encode()).decode()}\x07"
     if os.environ.get("STY"):
         sequence = f"\x1bP{sequence}\x1b\\"
@@ -2122,7 +2146,7 @@ def clean_result_url(url):
     if parsed.path == "/url" and "q" in query:  # Google redirect
         return query["q"][0]
     if parsed.netloc.endswith("bing.com") and parsed.path.startswith("/ck/") and query.get("u", [""])[0][:2] == "a1":
-        import base64                            # Bing redirect: the target is base64 after "a1"
+        # Bing redirect: the target is base64 after "a1"
         raw = query["u"][0][2:]
         try:
             return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode()
@@ -3594,9 +3618,18 @@ async def make_client(resume=None):
     return client
 
 
-async def sdk_query(text):
+async def sdk_query(text, images=None):
     started = time.time()
-    await st.client.query(text)
+    if images:
+        blocks = [{"type": "text", "text": text}] + [
+            {"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}}
+            for mime, data in filter(None, map(load_image, images))]
+
+        async def message():
+            yield {"type": "user", "message": {"role": "user", "content": blocks}, "parent_tool_use_id": None}
+        await st.client.query(message())
+    else:
+        await st.client.query(text)
     stream_event = getattr(sdk, "StreamEvent", None) or getattr(sdk.types, "StreamEvent", None)
     async for msg in st.client.receive_response():
         if stream_event and isinstance(msg, stream_event):
@@ -3744,7 +3777,7 @@ async def openrouter_stream(system_prompt, messages, use_tools=True):
 async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
     text, tool_calls, usage = "", {}, {}
     payload = {"model": call_model(), "max_tokens": 16000, "stream": True, "usage": {"include": True},
-               "messages": [{"role": "system", "content": system_prompt}] + messages}
+               "messages": [{"role": "system", "content": system_prompt}] + with_images(messages)}
     if use_tools:
         payload["tools"] = api_tools()
     if reasoning:
@@ -3813,6 +3846,19 @@ async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
                      "cost": usage.get("cost") or 0}
 
 
+def with_images(messages):
+    """OpenAI-style history for OpenRouter: a user message's saved images become image_url parts."""
+    result = []
+    for msg in messages:
+        if msg.get("images"):
+            parts = [{"type": "text", "text": msg.get("content") or ""}]
+            for mime, data in filter(None, map(load_image, msg["images"])):
+                parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
+            msg = {"role": msg["role"], "content": parts}
+        result.append(msg)
+    return result
+
+
 def to_ollama_messages(messages):
     """Ollama wants tool arguments as objects and tool_name on results; our history is OpenAI-style."""
     names, result = {}, []
@@ -3830,7 +3876,10 @@ def to_ollama_messages(messages):
         elif msg["role"] == "tool":
             result.append({"role": "tool", "content": msg["content"], "tool_name": names.get(msg["tool_call_id"], "")})
         else:
-            result.append({"role": msg["role"], "content": msg.get("content") or ""})
+            item = {"role": msg["role"], "content": msg.get("content") or ""}
+            if msg.get("images"):
+                item["images"] = [data for _, data in filter(None, map(load_image, msg["images"]))]
+            result.append(item)
     return result
 
 
@@ -3942,11 +3991,11 @@ async def model_call(system_prompt, messages, use_tools=True):
             await asyncio.sleep(wait)
 
 
-async def api_query(text):
+async def api_query(text, images=None):
     """One user turn: call the model, run its tools, repeat until it answers without tools."""
     started = time.time()
     totals = {"input": 0, "output": 0, "cost": 0.0}
-    st.messages.append({"role": "user", "content": text})
+    st.messages.append({"role": "user", "content": text, **({"images": list(images)} if images else {})})
     try:
         for _ in range(100):
             system_prompt = build_system_prompt()
@@ -4731,8 +4780,8 @@ def short_title(text, limit=60):
     return (cut if len(cut) > limit // 2 else line[:limit]).rstrip(" ,.;:") + "…"
 
 
-async def send(text, display=None):
-    """Sends a user message to the model and runs the turn."""
+async def send(text, display=None, images=None):
+    """Sends a user message (with images: names from save_image) to the model and runs the turn."""
     if display is not None and not st.headless:
         out(user_block(display))
     if not st.session.get("title"):
@@ -4742,9 +4791,9 @@ async def send(text, display=None):
         await refresh_sdk_prompt()
     try:
         if st.backend == "sdk":
-            await sdk_query(text)
+            await sdk_query(text, images)
         else:
-            await api_query(text)
+            await api_query(text, images)
     finally:
         save_session()
 
