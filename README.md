@@ -212,6 +212,14 @@ Then in nanocode:
 
 It uses IMAP and SMTP (no extra packages). Gmail and iCloud need an app password. The password is stored in `~/.nanocode/config.json`, readable only by you.
 
+## HTTP API
+
+```sh
+nanocode serve      # OpenAI-compatible API on http://127.0.0.1:8765/v1
+```
+
+Call nanocode from anything that speaks OpenAI: curl, the `openai` SDK, Open WebUI, your scripts. It has `/v1/chat/completions`, `/v1/responses` (with stored conversations) and background runs with live events, and every call can use all of nanocode's tools. A key is always required. See [docs/api.md](docs/api.md).
+
 ## Background shells
 
 Some commands keep running: dev servers, file watchers, long builds, REPLs. nanocode runs these in background shells instead of blocking on them. It can start one, read its latest output, type into it (or press Ctrl+C), and stop it.
@@ -311,6 +319,7 @@ python nanocode.py           # run from the repo without installing
 
 ```
 nanocode.py      the whole agent
+api/             the optional HTTP API (nanocode serve)
 install.sh       installer for macOS / Linux / WSL / Termux
 install.ps1      installer for Windows
 tests/           pytest suite (tools, providers, sessions, config, CLI)

@@ -11,6 +11,7 @@ nanocode is a small, hackable coding agent for the terminal, in one Python file.
 | [Agents and planning](agents.md) | Plans and sub-agents |
 | [Web search](web.md) | `web_search` and `web_fetch` through your browser |
 | [MCP](mcp.md) | Connecting MCP servers |
+| [HTTP API](api.md) | `nanocode serve`: an OpenAI-compatible API to call nanocode from anywhere |
 | [Compare](compare.md) | One prompt, several models, side by side |
 | [Email](email.md) | Inbox triage, drafts and sending over IMAP/SMTP |
 | [Background shells](shells.md) | Dev servers, watchers and REPLs |

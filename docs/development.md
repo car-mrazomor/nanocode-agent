@@ -23,6 +23,7 @@ The suite in `tests/test_nanocode.py` covers the tools, providers, sessions, con
 
 ```
 nanocode.py      the whole agent
+api/             the optional HTTP API (nanocode serve)
 install.sh       installer for macOS / Linux / WSL / Termux
 install.ps1      installer for Windows
 VERSION          the current version, read by the update check

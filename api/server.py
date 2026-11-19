@@ -1,0 +1,605 @@
+"""nanocode's HTTP API: `nanocode serve` makes nanocode an OpenAI-compatible endpoint, like hermes-agent's.
+
+Any OpenAI client (curl, the openai SDK, Open WebUI, LobeChat...) can use nanocode as a "model" with all its
+tools. One turn runs at a time (nanocode has one active chat); other requests wait their turn. Each API
+conversation is a normal saved nanocode session, so you can also /resume it in the app.
+
+The running nanocode module is passed in (`serve(nanocode_module, ...)`), so this shares its state.
+"""
+from __future__ import annotations
+
+import asyncio
+import hmac
+import json
+import os
+import re
+import secrets
+import sys
+import time
+
+nc = None  # the nanocode module, set by serve()
+
+API_DEFAULT_PORT = 8765
+API_MAX_BODY = 10 * 1024 * 1024
+API_MAX_STORED = 100  # responses kept for previous_response_id
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+HTTP_REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
+                405: "Method Not Allowed", 413: "Payload Too Large", 500: "Internal Server Error"}
+
+
+class ApiError(Exception):
+    def __init__(self, status, message, code="invalid_request_error"):
+        super().__init__(message)
+        self.status, self.code = status, code
+
+
+class ApiRun:
+    """One agent turn requested over the API: its events, so clients can stream, poll or attach later."""
+
+    def __init__(self, prompt, session_id=None):
+        self.id = "run_" + os.urandom(8).hex()
+        self.prompt, self.session_id = prompt, session_id
+        self.status = "queued"  # queued, running, completed, failed, cancelled
+        self.events, self.listeners = [], []
+        self.texts, self.tools = [""], []
+        self.usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost": 0.0}
+        self.error, self.task, self.created, self.started = None, None, int(time.time()), False
+
+    @property
+    def text(self):
+        return "\n\n".join(t.strip() for t in self.texts if t.strip())
+
+    @property
+    def done(self):
+        return self.status in ("completed", "failed", "cancelled")
+
+    def emit(self, kind, data):
+        if kind == "delta":
+            self.texts[-1] += data["text"]
+        elif kind == "text_end":
+            self.texts.append("")
+            return
+        elif kind == "tool.started":
+            self.tools.append({**data, "output": None, "is_error": False})
+            self.texts.append("")
+        elif kind == "tool.completed":
+            for t in self.tools:
+                if t["id"] == data["id"]:
+                    t.update(output=data["output"], is_error=data["is_error"])
+        elif kind == "usage":
+            self.usage["input_tokens"] += data["input"]
+            self.usage["output_tokens"] += data["output"]
+            self.usage["total_tokens"] = self.usage["input_tokens"] + self.usage["output_tokens"]
+            self.usage["cost"] += data["cost"]
+        event = {"event": kind, "run_id": self.id, "time": time.time(), **data}
+        self.events.append(event)
+        for queue in self.listeners:
+            queue.put_nowait(event)
+
+    def finish(self, status, error=None):
+        self.status, self.error = status, error
+        self.emit(f"run.{status}", {"session_id": self.session_id, "output": self.text, "usage": self.usage,
+                                    **({"error": error} if error else {})})
+        for queue in self.listeners:
+            queue.put_nowait(None)
+
+    async def follow(self):
+        """Every event so far, then the new ones as they happen, until the run ends."""
+        queue = asyncio.Queue()
+        backlog = list(self.events)
+        if not self.done:
+            self.listeners.append(queue)
+        try:
+            for event in backlog:
+                yield event
+            while not self.done or not queue.empty():
+                event = await queue.get()
+                if event is None:
+                    break
+                if event not in backlog:
+                    yield event
+        finally:
+            if queue in self.listeners:
+                self.listeners.remove(queue)
+
+    def info(self):
+        return {"object": "nanocode.run", "run_id": self.id, "status": self.status, "session_id": self.session_id,
+                "model": nc.st.model, "created": self.created, "output": self.text, "usage": self.usage,
+                "error": self.error}
+
+
+class ApiServer:
+    def __init__(self, key):
+        self.key = key
+        self.lock = asyncio.Lock()
+        self.runs = {}
+        self.responses, self.conversations = self.load()
+
+    # Stored responses (previous_response_id) survive restarts: .nanocode/api.json in the project
+    def store_path(self):
+        return nc.project_dir() / "api.json"
+
+    def load(self):
+        try:
+            data = json.loads(self.store_path().read_text(encoding="utf-8"))
+            return dict(data.get("responses") or {}), dict(data.get("conversations") or {})
+        except (OSError, json.JSONDecodeError):
+            return {}, {}
+
+    def save(self):
+        while len(self.responses) > API_MAX_STORED:
+            self.responses.pop(next(iter(self.responses)))
+        try:
+            nc.ensure_project_dir()
+            tmp = self.store_path().with_suffix(".tmp")
+            tmp.write_text(json.dumps({"responses": self.responses, "conversations": self.conversations}),
+                           encoding="utf-8")
+            tmp.replace(self.store_path())
+        except OSError as e:
+            nc.log_error(e)
+
+    # --- running turns ---
+
+    def start(self, prompt, session_id=None, instructions=None):
+        run = ApiRun(prompt, session_id)
+        self.runs[run.id] = run
+        while len(self.runs) > 200:  # forget the oldest finished runs
+            old = next((r for r in self.runs.values() if r.done), None)
+            if old is None:
+                break
+            self.runs.pop(old.id)
+        run.task = asyncio.ensure_future(self.execute(run, instructions))
+        return run
+
+    async def execute(self, run, instructions):
+        try:
+            async with self.lock:
+                run.status, run.started = "running", True
+                await api_switch_session(run.session_id)
+                run.session_id = nc.st.session["id"]
+                run.emit("run.started", {"session_id": run.session_id, "model": nc.st.model})
+                text = run.prompt if not instructions else \
+                    f"Extra instructions from the app calling nanocode's API:\n{instructions}\n\n---\n\n{run.prompt}"
+                token = nc.EVENTS.set(run.emit)
+                try:
+                    nc.st.last_error = None
+                    nc.out(f"{nc.DIM}API {run.id} · session {run.session_id}{nc.RESET}")
+                    await nc.send(nc.expand_mentions(text), display=run.prompt)
+                finally:
+                    nc.EVENTS.reset(token)
+                    nc.stream_end()
+            run.finish("completed")
+        except asyncio.CancelledError:
+            nc.stream_end()
+            run.finish("cancelled")
+        except Exception as e:
+            nc.log_error(e)
+            run.finish("failed", str(e))
+
+    async def stop(self, run):
+        if run.done:
+            return
+        if run.started and nc.st.backend == "sdk" and nc.st.client:
+            try:
+                await nc.st.client.interrupt()
+                return
+            except Exception as e:
+                nc.log_error(e)
+        run.task.cancel()
+
+    # --- HTTP ---
+
+    async def handle(self, reader, writer):
+        try:
+            method, path, headers, body = await read_http_request(reader)
+            await self.route(method, path, headers, body, writer)
+        except ApiError as e:
+            await write_json(writer, e.status, {"error": {"message": str(e), "type": e.code}})
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        except Exception as e:
+            nc.log_error(e)
+            try:
+                await write_json(writer, 500, {"error": {"message": str(e), "type": "server_error"}})
+            except ConnectionError:
+                pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+
+    def check_auth(self, headers):
+        sent = headers.get("authorization", "")
+        token = sent[7:].strip() if sent.lower().startswith("bearer ") else ""
+        if not token or not hmac.compare_digest(token, self.key):
+            raise ApiError(401, "missing or wrong API key (send: Authorization: Bearer <key>)", "authentication_error")
+
+    async def route(self, method, path, headers, body, writer):
+        path = path.split("?", 1)[0].rstrip("/") or "/"
+        if path in ("/health", "/v1/health"):
+            return await write_json(writer, 200, {"status": "ok", "version": nc.__version__})
+        self.check_auth(headers)
+        parts = path.strip("/").split("/")
+        if method == "GET" and path == "/v1/models":
+            return await write_json(writer, 200, {"object": "list", "data": [
+                {"id": "nanocode", "object": "model", "created": int(time.time()), "owned_by": "nanocode",
+                 "backend_model": nc.st.model, "provider": nc.st.provider}]})
+        if method == "GET" and path == "/v1/capabilities":
+            return await write_json(writer, 200, api_capabilities())
+        if method == "GET" and path == "/v1/skills":
+            return await write_json(writer, 200, [{"name": n, "description": s["description"]}
+                                                  for n, s in nc.list_skills().items()])
+        if method == "GET" and path == "/v1/tools":
+            return await write_json(writer, 200, [{"name": t["name"], "description": t["description"],
+                                                   "read_only": nc.tool_is_read_only(t)} for t in nc.active_tools()])
+        if method == "POST" and path == "/v1/chat/completions":
+            return await self.chat_completions(parse_json(body), headers, writer)
+        if method == "POST" and path == "/v1/responses":
+            return await self.create_response(parse_json(body), writer)
+        if parts[:2] == ["v1", "responses"] and len(parts) == 3:
+            stored = self.responses.get(parts[2])
+            if stored is None:
+                raise ApiError(404, f"no stored response '{parts[2]}'", "not_found")
+            if method == "GET":
+                return await write_json(writer, 200, stored["response"])
+            if method == "DELETE":
+                self.responses.pop(parts[2])
+                self.save()
+                return await write_json(writer, 200, {"id": parts[2], "object": "response", "deleted": True})
+        if method == "POST" and path == "/v1/runs":
+            data = parse_json(body)
+            prompt, history, instructions = api_prompt(data.get("input"), data.get("instructions"))
+            run = self.start(api_with_history(prompt, history),
+                             api_session_id(data.get("session_id") or data.get("conversation")), instructions)
+            return await write_json(writer, 202, {"run_id": run.id, "status": "started"})
+        if parts[:2] == ["v1", "runs"] and len(parts) >= 3:
+            run = self.runs.get(parts[2])
+            if run is None:
+                raise ApiError(404, f"no run '{parts[2]}'", "not_found")
+            if method == "GET" and len(parts) == 3:
+                return await write_json(writer, 200, run.info())
+            if method == "GET" and parts[3:] == ["events"]:
+                await start_sse(writer)
+                async for event in run.follow():
+                    await write_sse(writer, event, event["event"])
+                return
+            if method == "POST" and parts[3:] == ["stop"]:
+                await self.stop(run)
+                return await write_json(writer, 200, {"run_id": run.id, "status": "stopping"})
+        raise ApiError(404, f"{method} {path} isn't an endpoint (GET /v1/capabilities lists them)", "not_found")
+
+    # --- POST /v1/chat/completions ---
+
+    async def chat_completions(self, data, headers, writer):
+        messages = data.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise ApiError(400, "'messages' must be a non-empty list")
+        system = "\n\n".join(message_text(m.get("content")) for m in messages if m.get("role") in ("system", "developer"))
+        turns = [m for m in messages if m.get("role") in ("user", "assistant")]
+        if not turns or turns[-1].get("role") != "user":
+            raise ApiError(400, "the last message must be from the user")
+        session_id = api_session_id(headers.get("x-nanocode-session-id"))
+        prompt = message_text(turns[-1].get("content"))
+        if session_id is None:  # stateless, like OpenAI: the history comes with every request
+            prompt = api_with_history(prompt, [(m["role"], message_text(m.get("content"))) for m in turns[:-1]])
+        run = self.start(prompt, session_id, system or None)
+        cid, created = "chatcmpl-" + run.id[4:], int(time.time())
+
+        def chunk(delta, finish=None, **extra):
+            return {"id": cid, "object": "chat.completion.chunk", "created": created, "model": "nanocode",
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **extra}
+
+        if data.get("stream"):
+            await start_sse(writer, {"X-Nanocode-Run-Id": run.id})
+            await write_sse(writer, chunk({"role": "assistant", "content": ""}))
+            async for event in run.follow():
+                if event["event"] == "run.started":
+                    await write_sse(writer, {"run_id": run.id, "session_id": event["session_id"]}, "nanocode.session")
+                elif event["event"] == "delta":
+                    await write_sse(writer, chunk({"content": event["text"]}))
+                elif event["event"] == "text_end" or event["event"] == "tool.started":
+                    if event["event"] == "tool.started":
+                        await write_sse(writer, {"tool": event["name"], "arguments": event["arguments"],
+                                                 "call_id": event["id"]}, "nanocode.tool.progress")
+                        await write_sse(writer, chunk({"content": "\n\n"}))
+            if run.status == "failed":
+                await write_sse(writer, {"error": {"message": run.error, "type": "server_error"}})
+            else:
+                await write_sse(writer, chunk({}, "stop", usage=openai_usage(run.usage)))
+            await write_sse(writer, "[DONE]")
+            return
+        await asyncio.shield(run.task)
+        if run.status == "failed":
+            raise ApiError(500, run.error or "the turn failed", "server_error")
+        await write_json(writer, 200, {
+            "id": cid, "object": "chat.completion", "created": created, "model": "nanocode",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": run.text},
+                         "finish_reason": "stop" if run.status == "completed" else "cancelled"}],
+            "usage": openai_usage(run.usage), "session_id": run.session_id},
+            {"X-Nanocode-Session-Id": run.session_id or ""})
+
+    # --- POST /v1/responses ---
+
+    async def create_response(self, data, writer):
+        prompt, history, instructions = api_prompt(data.get("input"), data.get("instructions"))
+        previous, conversation = data.get("previous_response_id"), data.get("conversation")
+        if isinstance(conversation, dict):
+            conversation = conversation.get("id")
+        if conversation is not None and not SESSION_ID_RE.match(str(conversation)):
+            raise ApiError(400, "'conversation' must be 1-64 letters, digits, '.', '_' or '-'")
+        if previous is None and conversation:
+            previous = self.conversations.get(conversation)
+        session_id = None
+        if previous:
+            stored = self.responses.get(previous)
+            if stored is None:
+                raise ApiError(404, f"no stored response '{previous}' to continue from", "not_found")
+            session_id = stored["session_id"]
+        elif history:
+            prompt = api_with_history(prompt, history)
+        run = self.start(prompt, session_id, instructions)
+        rid = "resp_" + run.id[4:]
+
+        def response(status):
+            output = []
+            for t in run.tools:
+                output.append({"type": "function_call", "id": "fc_" + t["id"][5:], "call_id": t["id"], "name": t["name"],
+                               "arguments": json.dumps(t["arguments"]), "status": "completed"})
+                if t["output"] is not None:
+                    output.append({"type": "function_call_output", "call_id": t["id"], "output": t["output"],
+                                   "status": "completed"})
+            if run.text or status == "completed":
+                output.append({"type": "message", "id": "msg_" + run.id[4:], "role": "assistant", "status": status,
+                               "content": [{"type": "output_text", "text": run.text, "annotations": []}]})
+            usage = {"input_tokens": run.usage["input_tokens"], "output_tokens": run.usage["output_tokens"],
+                     "total_tokens": run.usage["total_tokens"]}
+            return {"id": rid, "object": "response", "created_at": run.created, "status": status, "model": "nanocode",
+                    "output": output, "output_text": run.text, "usage": usage, "previous_response_id": previous,
+                    "conversation": conversation, "session_id": run.session_id,
+                    **({"error": {"message": run.error}} if run.error else {})}
+
+        def remember(final):
+            if data.get("store", True) and final["status"] == "completed":
+                self.responses[rid] = {"session_id": run.session_id, "response": final}
+                if conversation:
+                    self.conversations[conversation] = rid
+                self.save()
+
+        if data.get("stream"):
+            await start_sse(writer)
+            await write_sse(writer, {"type": "response.created", "response": response("in_progress")}, "response.created")
+            async for event in run.follow():
+                kind = event["event"]
+                if kind == "delta":
+                    await write_sse(writer, {"type": "response.output_text.delta", "item_id": "msg_" + run.id[4:],
+                                             "delta": event["text"]}, "response.output_text.delta")
+                elif kind == "tool.started":
+                    await write_sse(writer, {"type": "response.output_item.added", "item": {
+                        "type": "function_call", "call_id": event["id"], "name": event["name"],
+                        "arguments": json.dumps(event["arguments"]), "status": "in_progress"}},
+                        "response.output_item.added")
+                elif kind == "tool.completed":
+                    await write_sse(writer, {"type": "response.output_item.done", "item": {
+                        "type": "function_call_output", "call_id": event["id"], "output": event["output"],
+                        "status": "completed"}}, "response.output_item.done")
+            status = "completed" if run.status == "completed" else "failed" if run.status == "failed" else "cancelled"
+            final = response(status)
+            remember(final)
+            await write_sse(writer, {"type": f"response.{status}", "response": final}, f"response.{status}")
+            return
+        await asyncio.shield(run.task)
+        status = "completed" if run.status == "completed" else "failed" if run.status == "failed" else "cancelled"
+        final = response(status)
+        remember(final)
+        await write_json(writer, 500 if status == "failed" else 200, final)
+
+
+async def api_switch_session(session_id):
+    """Makes the API conversation's nanocode session the current chat: a saved one, or a new one."""
+    if session_id and session_id == nc.st.session.get("id"):
+        return
+    nc.leave_current_chat()
+    match = None
+    if session_id and nc.sessions_dir().is_dir():
+        path = nc.sessions_dir() / f"{session_id}.json"
+        try:
+            match = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        except (OSError, json.JSONDecodeError):
+            match = None
+        if match and match.get("backend") != nc.st.backend:
+            raise ApiError(400, f"session '{session_id}' was made with another provider ({match.get('backend')})")
+    if match:
+        await nc.open_session(match)
+    else:
+        await nc.new_chat(announce=False)
+        if session_id:
+            nc.st.session["id"] = session_id  # the client named it: later requests continue it
+
+
+def api_session_id(value):
+    if value in (None, ""):
+        return None
+    if not SESSION_ID_RE.match(str(value)):
+        raise ApiError(400, "a session id must be 1-64 letters, digits, '.', '_' or '-'")
+    return str(value)
+
+
+def message_text(content):
+    """Plain text of an OpenAI message content: a string, or a list of text parts."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for part in content:
+            if isinstance(part, str):
+                texts.append(part)
+            elif isinstance(part, dict) and part.get("type") in ("text", "input_text", "output_text"):
+                texts.append(part.get("text") or "")
+            elif isinstance(part, dict):
+                raise ApiError(400, f"'{part.get('type')}' content isn't supported yet: nc.send text", "unsupported_content_type")
+        return "\n".join(texts)
+    raise ApiError(400, "message content must be a string or a list of text parts")
+
+
+def api_prompt(value, instructions=None):
+    """(prompt, earlier turns, system instructions) from a Responses/Runs `input`: a string or a list of messages."""
+    if isinstance(value, str) and value.strip():
+        return value, [], instructions
+    if isinstance(value, list) and value:
+        messages = [m for m in value if isinstance(m, dict) and m.get("type", "message") == "message"]
+        system = [message_text(m.get("content")) for m in messages if m.get("role") in ("system", "developer")]
+        turns = [(m.get("role"), message_text(m.get("content"))) for m in messages if m.get("role") in ("user", "assistant")]
+        if turns and turns[-1][0] == "user":
+            instructions = "\n\n".join(filter(None, [instructions, *system])) or None
+            return turns[-1][1], turns[:-1], instructions
+    raise ApiError(400, "'input' must be a non-empty string, or a list of messages ending with one from the user")
+
+
+def api_with_history(prompt, history):
+    if not history:
+        return prompt
+    lines = [f"{'User' if role == 'user' else 'You (assistant)'}: {text}" for role, text in history if text]
+    return "Our conversation so far:\n\n" + "\n\n".join(lines) + "\n\n---\n\nMy new message:\n" + prompt
+
+
+def openai_usage(usage):
+    return {"prompt_tokens": usage["input_tokens"], "completion_tokens": usage["output_tokens"],
+            "total_tokens": usage["total_tokens"]}
+
+
+def api_capabilities():
+    return {"object": "nanocode.api.capabilities", "platform": "nanocode", "version": nc.__version__, "model": "nanocode",
+            "backend_model": nc.st.model, "provider": nc.st.provider,
+            "auth": {"type": "bearer", "required": True},
+            "permissions": "auto" if nc.st.auto_approve else "read-only",
+            "features": {"chat_completions": True, "chat_completions_streaming": True, "responses_api": True,
+                         "responses_streaming": True, "previous_response_id": True, "conversations": True,
+                         "run_submission": True, "run_status": True, "run_events_sse": True, "run_stop": True,
+                         "skills": True, "tools": True, "images": False, "concurrent_runs": 1},
+            "session_header": "X-Nanocode-Session-Id",
+            "endpoints": {"chat_completions": "POST /v1/chat/completions", "responses": "POST /v1/responses",
+                          "response": "GET|DELETE /v1/responses/{id}", "runs": "POST /v1/runs",
+                          "run": "GET /v1/runs/{id}", "run_events": "GET /v1/runs/{id}/events",
+                          "run_stop": "POST /v1/runs/{id}/stop", "models": "GET /v1/models",
+                          "skills": "GET /v1/skills", "tools": "GET /v1/tools", "health": "GET /health"}}
+
+
+def parse_json(body):
+    try:
+        data = json.loads(body or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise ApiError(400, "the body must be JSON")
+    if not isinstance(data, dict):
+        raise ApiError(400, "the body must be a JSON object")
+    return data
+
+
+async def read_http_request(reader):
+    line = await reader.readline()
+    if not line:
+        raise ConnectionError("closed")
+    try:
+        method, path, _ = line.decode("latin-1").split(" ", 2)
+    except ValueError:
+        raise ApiError(400, "bad request line")
+    headers = {}
+    while True:
+        line = await reader.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+        name, _, value = line.decode("latin-1").partition(":")
+        headers[name.strip().lower()] = value.strip()
+    length = int(headers.get("content-length") or 0)
+    if length > API_MAX_BODY:
+        raise ApiError(413, "request body too large")
+    body = await reader.readexactly(length) if length else b""
+    return method.upper(), path, headers, body
+
+
+def http_head(status, content_type, extra=None, length=None):
+    lines = [f"HTTP/1.1 {status} {HTTP_REASONS.get(status, 'OK')}", f"Content-Type: {content_type}",
+             "Connection: close", "X-Content-Type-Options: nosniff", "Referrer-Policy: no-referrer"]
+    if length is not None:
+        lines.append(f"Content-Length: {length}")
+    lines += [f"{k}: {v}" for k, v in (extra or {}).items()]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode()
+
+
+async def write_json(writer, status, obj, extra=None):
+    body = json.dumps(obj).encode()
+    writer.write(http_head(status, "application/json", extra, len(body)) + body)
+    await writer.drain()
+
+
+async def start_sse(writer, extra=None):
+    writer.write(http_head(200, "text/event-stream", {"Cache-Control": "no-cache", **(extra or {})}))
+    await writer.drain()
+
+
+async def write_sse(writer, data, event=None):
+    payload = data if isinstance(data, str) else json.dumps(data)
+    writer.write(((f"event: {event}\n" if event else "") + f"data: {payload}\n\n").encode())
+    await writer.drain()
+
+
+def api_settings(host=None, port=None):
+    """(host, port, key): flags, then NANOCODE_API_* env vars, then "api" in the config. Makes a key if there's none."""
+    cfg = nc.st.config.get("api") or {}
+    host = host or os.environ.get("NANOCODE_API_HOST") or cfg.get("host") or "127.0.0.1"
+    port = int(port or os.environ.get("NANOCODE_API_PORT") or cfg.get("port") or API_DEFAULT_PORT)
+    key = os.environ.get("NANOCODE_API_KEY") or cfg.get("key")
+    if not key:
+        key = secrets.token_hex(24)
+        nc.st.config["api"] = {**cfg, "key": key}
+        nc.save_config()
+    return host, port, key
+
+
+def say(text):
+    """A line for the person running the server (no colors when it goes to a log file)."""
+    nc.headless_write(sys.stderr, text + "\n")
+
+
+async def serve(module, host=None, port=None):
+    global nc
+    nc = module
+    host, port, key = api_settings(host, port)
+    if len(key) < 8:
+        say(f"{nc.RED}⏺ the API key must be at least 8 characters{nc.RESET}")
+        return 1
+    nc.st.headless = nc.st.serving = True
+    nc.st.auto_approve = (nc.st.config.get("api") or {}).get("permissions", "auto") != "read-only"
+    nc.new_session()
+    if nc.st.backend == "sdk":
+        nc.st.client = await nc.make_client()
+    api = ApiServer(key)
+    try:
+        server = await asyncio.start_server(api.handle, host, port)
+    except OSError as e:
+        say(f"{nc.RED}⏺ can't listen on {host}:{port}: {e}{nc.RESET}")
+        return 1
+    shown = key if (os.environ.get("NANOCODE_API_KEY") is None and sys.stderr.isatty()) else key[:4] + "…"
+    say(f"{nc.GREEN}⏺ nanocode API{nc.RESET} on http://{host}:{port}/v1  {nc.DIM}·  {nc.pretty_model(nc.st.model)} · "
+          f"{nc.provider_label()} · {os.getcwd()}{nc.RESET}\n"
+          f"  {nc.DIM}key:{nc.RESET} {shown}  {nc.DIM}(Authorization: Bearer <key>; in ~/.nanocode/config.json under \"api\"){nc.RESET}\n"
+          f"  {nc.DIM}edits and commands: {'allowed' if nc.st.auto_approve else 'denied (read-only)'}; "
+          f"dangerous commands and sending email are always denied · Ctrl+C stops{nc.RESET}")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        say(f"  {nc.YELLOW}listening beyond this machine: anyone with the key can run commands here{nc.RESET}")
+    try:
+        async with server:
+            await server.serve_forever()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await nc.stop_all_shells()
+        if nc.st.rea:
+            await nc.st.rea.close()
+        await nc.close_mcp()
+        if nc.st.client:
+            await nc.st.client.disconnect()
+    return 0

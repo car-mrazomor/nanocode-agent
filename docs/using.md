@@ -98,4 +98,4 @@ nanocode --provider ollama -m qwen3 -p "summarize README.md"  # one-off provider
 | `--provider` | `claude`, `openrouter` or `ollama` for this run |
 | `-v, --version` | Print the version |
 
-Subcommands: `setup`, `config`, `doctor`, `email`, `update`, `version`, `uninstall [--purge]`.
+Subcommands: `setup`, `config`, `doctor`, `email`, `serve` ([HTTP API](api.md)), `update`, `version`, `uninstall [--purge]`.

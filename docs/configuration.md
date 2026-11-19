@@ -27,6 +27,7 @@ Settings live in `~/.nanocode/config.json` (readable only by you). Most are set 
 | `email` | object | | Email account, set by `nanocode email` |
 | `keyboard_protocol` | `auto`, `on`, `off` | `auto` | Enhanced keyboard protocol (kitty, Ghostty, WezTerm, foot) |
 | `update_check` | `true`, `false` | `true` | Daily check for a new version |
+| `api` | `{"key", "host", "port", "permissions"}` | made on first `nanocode serve` | The HTTP API ([more](api.md)) |
 
 Example:
 
@@ -49,6 +50,7 @@ Example:
 | `NANOCODE_NO_UPDATE_CHECK=1` | Turn off the update check |
 | `OPENROUTER_API_KEY` | OpenRouter key, if not in the config |
 | `OLLAMA_HOST` | Ollama server, if not in the config |
+| `NANOCODE_API_KEY`, `NANOCODE_API_HOST`, `NANOCODE_API_PORT` | The HTTP API's key, address and port ([more](api.md)) |
 
 ## Project files
 
@@ -59,3 +61,4 @@ Example:
 | `.nanocode/undo/` | Backups for `/undo` |
 | `.nanocode/shells/` | Background shell output |
 | `.nanocode/skills/` | Project skills (can be committed) |
+| `.nanocode/api.json` | Stored API responses (`previous_response_id`) |

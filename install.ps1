@@ -87,10 +87,16 @@ New-Item -ItemType Directory -Force -Path $App, $Bin | Out-Null
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { "" }
 if ($ScriptDir -and (Test-Path (Join-Path $ScriptDir "nanocode.py"))) {
     Copy-Item (Join-Path $ScriptDir "nanocode.py") (Join-Path $App "nanocode.py") -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $App "api") | Out-Null
+    Copy-Item (Join-Path $ScriptDir "api\*.py") (Join-Path $App "api") -Force -ErrorAction SilentlyContinue
     Copy-Item (Join-Path $ScriptDir "install.ps1") (Join-Path $App "install.ps1") -Force
     Step "Copied nanocode from $ScriptDir"
 } else {
     Invoke-WebRequest -UseBasicParsing "$RepoRaw/nanocode.py" -OutFile (Join-Path $App "nanocode.py")
+    New-Item -ItemType Directory -Force -Path (Join-Path $App "api") | Out-Null
+    foreach ($f in "__init__.py", "server.py") {
+        try { Invoke-WebRequest -UseBasicParsing "$RepoRaw/api/$f" -OutFile (Join-Path $App "api\$f") } catch {}
+    }
     Invoke-WebRequest -UseBasicParsing "$RepoRaw/install.ps1" -OutFile (Join-Path $App "install.ps1")
     Step "Downloaded nanocode"
 }

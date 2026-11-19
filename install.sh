@@ -179,11 +179,14 @@ mkdir -p "$APP" "$BIN"
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/nanocode.py" ]; then
   cp "$SCRIPT_DIR/nanocode.py" "$APP/nanocode.py.new"
+  mkdir -p "$APP/api" && cp "$SCRIPT_DIR"/api/*.py "$APP/api/" 2>/dev/null || true
   cp "$SCRIPT_DIR/install.sh" "$APP/install.sh"
   [ -f "$SCRIPT_DIR/install.ps1" ] && cp "$SCRIPT_DIR/install.ps1" "$APP/install.ps1"
   step "Copied nanocode from $SCRIPT_DIR"
 else
   fetch "$REPO_RAW/nanocode.py" "$APP/nanocode.py.new"
+  mkdir -p "$APP/api"
+  for f in __init__.py server.py; do fetch "$REPO_RAW/api/$f" "$APP/api/$f" || true; done
   fetch "$REPO_RAW/install.sh" "$APP/install.sh" || true
   step "Downloaded nanocode"
 fi

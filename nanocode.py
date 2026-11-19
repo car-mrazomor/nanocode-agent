@@ -47,7 +47,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.6.5"
+__version__ = "0.7.1"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -460,6 +460,7 @@ class State:
         self.permission_lock = None  # one permission question at a time (sub-agents run in parallel)
         self.auto_approve = False
         self.headless = False
+        self.serving = False  # `nanocode serve`: headless, and replies go to API clients instead of stdout
         self.undo = []
         self.turn_errors = 0
         self.last_error = None
@@ -568,14 +569,27 @@ def call_model():
     return CALL_MODEL.get() or st.model
 
 
+# Set while an API request runs (nanocode serve): gets the reply text, tool calls and usage as they happen.
+EVENTS = contextvars.ContextVar("events", default=None)
+
+
+def emit(kind, **data):
+    sink = EVENTS.get()
+    if sink is not None:
+        sink(kind, data)
+
+
 def stream_text(chunk):
     if QUIET.get():
         return
     if st.live_md is None:
         st.live_md = ""
-        if st.headless and st.output_started:
+        if st.headless and st.output_started and not st.serving:
             headless_write(sys.stdout, "\n")
     st.live_md += chunk
+    emit("delta", text=chunk)
+    if st.serving:
+        return
     if st.headless:
         headless_write(sys.stdout, chunk)
         st.output_started = True
@@ -599,8 +613,10 @@ def stream_end():
     if st.live_md is None:
         return
     if st.headless:
-        headless_write(sys.stdout, "\n")
+        if not st.serving:
+            headless_write(sys.stdout, "\n")
         st.live_md = None
+        emit("text_end")
         return
     final = ""
     if st.live_md.strip():
@@ -1154,6 +1170,7 @@ def show_usage(tokens_in, tokens_out, cost, seconds):
     st.usage["input"] += tokens_in
     st.usage["output"] += tokens_out
     st.usage["cost"] += cost or 0
+    emit("usage", input=tokens_in, output=tokens_out, cost=cost or 0, seconds=seconds)
     verb = random.choice(DONE_VERBS)
     parts = [f"{verb} for {fmt_duration(seconds)}", pretty_model(st.model), f"{fmt_tokens(tokens_in)} in",
              f"{fmt_tokens(tokens_out)} out", fmt_cost(cost), time.strftime('%H:%M')]
@@ -1288,6 +1305,10 @@ async def run_tool(name, args):
     entry = TOOLS.get(name) or MCP_TOOLS.get(name)
     if not isinstance(args, dict):
         args = {}
+    top = AGENT_LABEL.get() is None
+    call_id = "call_" + os.urandom(6).hex()
+    if top:
+        emit("tool.started", id=call_id, name=name, arguments=args)
     show_tool_call(name, args)
     if entry is None:
         text, is_error = f"error: unknown tool '{name}'. Available: {', '.join(TOOLS)}", True
@@ -1312,6 +1333,8 @@ async def run_tool(name, args):
     st.activity.append((name, str(args.get(key, "")) if key else "", is_error))
     text = cap(text)
     show_tool_result(text, is_error)
+    if top:
+        emit("tool.completed", id=call_id, name=name, output=text, is_error=is_error)
     return text, is_error
 
 
@@ -6030,8 +6053,9 @@ def read_piped_stdin():
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         prog="nanocode", description="A small coding agent for the terminal.",
-        epilog="commands: setup (provider, key, model) · config · doctor · update · uninstall [--purge]")
-    parser.add_argument("command", nargs="?", choices=["setup", "config", "doctor", "update", "uninstall", "version", "email"],
+        epilog="commands: setup (provider, key, model) · config · doctor · serve (HTTP API) · update · uninstall [--purge]")
+    parser.add_argument("command", nargs="?",
+                        choices=["setup", "config", "doctor", "update", "uninstall", "version", "email", "serve"],
                         help=argparse.SUPPRESS)
     parser.add_argument("-p", "--print", dest="prompt", metavar="PROMPT",
                         help="run one prompt without the UI and print the answer ('-' reads stdin)")
@@ -6040,6 +6064,8 @@ def parse_args(argv):
     parser.add_argument("-m", "--model", help="model for this run")
     parser.add_argument("--provider", choices=list(PROVIDERS), help="provider for this run")
     parser.add_argument("--purge", action="store_true", help="with uninstall: also delete config, memory and skills")
+    parser.add_argument("--host", help="with serve: address to listen on (default 127.0.0.1)")
+    parser.add_argument("--port", type=int, help="with serve: port (default 8765)")
     parser.add_argument("-v", "--version", action="store_true", help="print the version")
     return parser.parse_args(argv)
 
@@ -6099,6 +6125,16 @@ def main(argv=None):
         return 1
     if args.yes:
         st.auto_approve = True
+    if args.command == "serve":
+        try:
+            from api import server
+        except ImportError:
+            print(f"{RED}⏺ the api/ folder is missing next to nanocode.py: run `nanocode update`{RESET}", file=sys.stderr)
+            return 1
+        try:
+            return asyncio.run(server.serve(sys.modules[__name__], args.host, args.port))
+        except KeyboardInterrupt:
+            return 0
     try:
         if prompt is not None:
             return asyncio.run(run_headless(prompt, args.resume))
