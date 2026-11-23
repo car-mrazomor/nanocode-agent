@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -46,9 +47,12 @@ def test_dropped_files_become_mentions(sandbox, tmp_path):
     spaced.write_bytes(PNG)
     other = tmp_path / "notes.txt"
     other.write_text("x")
-    # macOS terminals escape spaces, others quote, some send file:// URLs
-    assert nc.dropped_paths(str(spaced).replace(" ", "\\ ")) == [spaced]
-    assert nc.dropped_paths(f"'{spaced}' {other}\n") == [spaced, other]
+    # macOS terminals escape spaces, others quote (Windows Terminal: "..."), some send file:// URLs
+    if os.name != "nt":
+        assert nc.dropped_paths(str(spaced).replace(" ", "\\ ")) == [spaced]
+        assert nc.dropped_paths(f"'{spaced}' {other}\n") == [spaced, other]
+    assert nc.dropped_paths(f'"{spaced}" "{other}"') == [spaced, other]
+    assert nc.dropped_paths(str(spaced)) == [spaced]
     assert nc.dropped_paths(spaced.as_uri()) == [spaced]
     assert nc.dropped_paths("hello world") is None
     assert nc.dropped_paths("app.py") is None                       # not absolute: ordinary text

@@ -49,7 +49,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -4718,14 +4718,16 @@ def dropped_paths(data):
         if not line:
             continue
         if line.startswith("file://"):
-            tokens += [unquote(urlparse(url).path) for url in line.split()]
+            urls = [unquote(urlparse(url).path) for url in line.split()]
+            tokens += [u[1:] if re.match(r"^/[A-Za-z]:", u) else u for u in urls]  # /C:/... on Windows
+            continue
+        if os.path.isabs(line) and os.path.exists(line):  # one path, pasted as is
+            tokens.append(line)
             continue
         try:
-            tokens += shlex.split(line, posix=os.name != "nt")
+            tokens += [t.strip("\"'") for t in shlex.split(line, posix=False)] if os.name == "nt" else shlex.split(line)
         except ValueError:
             return None
-    if os.name == "nt":
-        tokens = [t.strip('"') for t in tokens]
     paths = [Path(os.path.expanduser(t)) for t in tokens]
     if not paths or len(paths) > 50:
         return None
