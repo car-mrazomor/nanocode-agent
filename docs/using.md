@@ -46,6 +46,23 @@ nanocode opens on a start screen with the logo and the prompt in the middle. Whe
 - **Pinned message.** While you scroll through a long answer, your message stays pinned at the top. Click it to jump back.
 - **Command palette.** `ctrl+p` lists every command and action, searchable.
 
+## Tab title and notifications
+
+The terminal tab is named after the chat (`nanocode · <folder>` before the first message), with a mark for what's happening:
+
+| Title | Meaning |
+|---|---|
+| `✻ Fix the login bug` | Working |
+| `△ Fix the login bug` | Waiting for your OK (a permission question) |
+| `✓ Fix the login bug` | Finished while you were in another tab; goes away when you come back |
+
+When the tab isn't in front and a reply finishes (or a permission question comes up), nanocode rings the terminal bell, so most terminals mark the tab or bounce the Dock icon, and shows a desktop notification in iTerm2, kitty, Ghostty, WezTerm and foot. If your terminal doesn't report whether the tab is in front, only replies that took 15 seconds or more notify you.
+
+- `"notify": "off"` turns notifications off; `"always"` notifies even when the tab is in front.
+- `"terminal_title": false` leaves the tab title alone.
+- VS Code and Cursor show the process name by default: set `"terminal.integrated.tabs.title": "${sequence}"` to see the chat title.
+- In tmux, the bell marks the window; for the title set `set -g set-titles on`, and for desktop notifications `set -g allow-passthrough on`.
+
 ## Drag and drop
 
 Drag files from Finder or Explorer onto the terminal: they're added to your message as `@path` mentions. When you send it, text files are attached, and images (PNG, JPEG, WebP, GIF) are sent as images, so you can drop in a screenshot and ask about it. The model has to see images: Claude, a vision model on OpenRouter, or one in Ollama (`qwen2.5vl`, `llava`, `gemma3`). Images are kept in `.nanocode/images/` so a resumed chat still has them.

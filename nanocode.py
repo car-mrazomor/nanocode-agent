@@ -49,7 +49,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.7.4"
+__version__ = "0.7.5"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -510,6 +510,10 @@ class State:
         self.ui = {}  # UI callbacks set by build_app (open_dialog)
         self.no_think = set()  # (backend, model) that rejected the thinking setting; sent without it
         self.pending_permission = None
+        self.focused = None  # is the terminal tab in front? None until the terminal reports focus
+        self.unseen = False  # a turn finished while you were away: the tab title shows ✓ until you're back
+        self.shown_title = None
+        self.translate_keys = True
         self.always_allow = set()
         self.todos = []  # the agent's current plan (todo tool)
         self.permission_lock = None  # one permission question at a time (sub-agents run in parallel)
@@ -1272,6 +1276,8 @@ async def ask_permission(tool_name, preview, dangerous):
     out(f"\n{warn}   {fg('warning')}△ Permission{RESET} {fg('text')}{tool_name}{RESET} "
         f"{fg('muted')}{preview[:120]}{RESET}\n     {fg('faint')}{options}{RESET}")
     st.pending_permission = asyncio.get_running_loop().create_future()
+    notify(f"Needs your OK: {tool_name} {preview[:80]}")
+    invalidate()
     try:
         answer = await st.pending_permission
     finally:
@@ -5091,8 +5097,96 @@ def start_input(text):
     st.home = False
     st.scroll_top = st.selection = None
     st.task_started = time.time()
+    st.unseen = False
     st.task = asyncio.ensure_future(run_input(text))
+    st.task.add_done_callback(turn_finished)
     return True
+
+
+# --- Tab title and "it's done" notifications ---
+# The terminal tab shows the chat's title, with a mark: ✻ working, △ waiting for your OK, ✓ finished while you
+# were in another tab. When the tab isn't in front, a finished turn or a permission question rings the bell
+# (most terminals then mark the tab) and shows a desktop notification where the terminal supports one.
+
+FOCUS_ON, FOCUS_OFF = "\x1b[?1004h", "\x1b[?1004l"
+TITLE_PUSH = "\x1b[22;0t"                 # save the terminal's own title...
+TITLE_RESET = "\x1b]0;\x07\x1b[23;0t"      # ...and give it back on exit
+NOTIFY_AFTER = 15  # seconds: when the terminal doesn't report focus, only longer turns notify
+
+
+def titles_enabled():
+    return st.config.get("terminal_title", True) is not False and not st.headless
+
+
+def terminal_title():
+    name = CONTROL_RE.sub("", st.session.get("title") or "") or f"nanocode · {Path.cwd().name}"
+    name = name if len(name) <= 48 else name[:47] + "…"
+    if st.pending_permission is not None:
+        return "△ " + name
+    if st.task and not st.task.done() and not st.home:
+        return "✻ " + name
+    return ("✓ " if st.unseen else "") + name
+
+
+def update_title():
+    if st.app is None or not st.app.is_running or not titles_enabled():
+        return
+    title = terminal_title()
+    if title != st.shown_title:
+        st.shown_title = title
+        st.app.output.write_raw(f"\x1b]0;{title}\x07")  # sent with the frame being drawn
+
+
+def focus_changed(focused):
+    st.focused = focused
+    if focused:
+        st.unseen = False
+    invalidate()
+
+
+def seen_by_user():
+    """A key or a click: you're here, so the ✓ goes away."""
+    if st.unseen:
+        st.unseen = False
+        invalidate()
+
+
+def away():
+    """Whether you're probably not looking: the tab isn't in front, or (when the terminal doesn't say) the
+    turn took a while."""
+    if st.focused is not None:
+        return not st.focused
+    return time.time() - (st.task_started or time.time()) >= NOTIFY_AFTER
+
+
+def notify(message):
+    setting = st.config.get("notify", "auto")
+    if setting == "off" or st.app is None or not st.app.is_running or (setting != "always" and not away()):
+        return
+    text = CONTROL_RE.sub("", message).replace(";", ",")[:200]
+    terminal = detect_terminal()
+    if terminal == "kitty":
+        popup = f"\x1b]99;i=nanocode:d=0;nanocode\x1b\\\x1b]99;i=nanocode:d=1:p=body;{text}\x1b\\"
+    elif terminal in ("iterm2", "ghostty", "wezterm"):
+        popup = f"\x1b]9;{text}\x07"
+    elif os.environ.get("TERM", "").startswith(("foot", "rxvt")):
+        popup = f"\x1b]777;notify;nanocode;{text}\x07"
+    else:
+        popup = ""
+    if popup and os.environ.get("TMUX"):  # tmux passes it on with allow-passthrough on
+        popup = "\x1bPtmux;" + popup.replace("\x1b", "\x1b\x1b") + "\x1b\\"
+    st.app.output.write_raw("\a" + popup)
+    st.app.output.flush()
+
+
+def turn_finished(task):
+    if task.cancelled():
+        return
+    if away():
+        st.unseen = True
+        name = st.session.get("title") or "nanocode"
+        notify(f"Failed: {name}" if st.last_error else f"Done: {name}")
+    invalidate()
 
 
 # Precise key reporting (like Claude Code): the kitty keyboard protocol (level 5) plus xterm's modifyOtherKeys.
@@ -5155,14 +5249,26 @@ def translate_keys(data):
     return MODIFIED_ARROW.sub(arrow, MODIFY_OTHER_KEYS.sub(modify_other, CSI_U.sub(csi_u, data)))
 
 
-def install_key_translation():
+FOCUS_IN, FOCUS_OUT = "\x1b[I", "\x1b[O"
+
+
+def install_key_translation(keys=True):
+    """Filters what the terminal sends: focus reports (the tab came to the front or went away) and, with the
+    keyboard protocol on, the precise key reports translated into plain keys."""
     from prompt_toolkit.input.vt100_parser import Vt100Parser
+    st.translate_keys = keys
     if getattr(Vt100Parser.feed, "_nanocode", False):
         return
     original = Vt100Parser.feed
 
     def feed(self, data):
-        return original(self, translate_keys(data))
+        if FOCUS_IN in data or FOCUS_OUT in data:
+            last = max(data.rfind(FOCUS_IN), data.rfind(FOCUS_OUT))
+            focus_changed(data.startswith(FOCUS_IN, last))
+            data = data.replace(FOCUS_IN, "").replace(FOCUS_OUT, "")
+        if data:
+            seen_by_user()
+        return original(self, translate_keys(data) if getattr(st, "translate_keys", True) else data)
 
     feed._nanocode = True
     Vt100Parser.feed = feed
@@ -5838,6 +5944,7 @@ def build_app():
                 app.invalidate()
 
     app.pre_run_callables.append(lambda: app.create_background_task(ticker()))
+    app.before_render += lambda _app: update_title()
     app.ttimeoutlen = 0.05
     app.timeoutlen = 0.1
     st.app = app
@@ -6193,15 +6300,14 @@ async def run_interactive(resume_last=False):
     new_session()
 
     keys = keyboard_protocol_enabled()
-    if keys:
-        install_key_translation()
+    install_key_translation(keys)
 
     async def startup():
         try:
-            if keys:
-                await asyncio.sleep(0.05)  # after the switch to the full-screen buffer, which has its own key modes
-                app.output.write_raw(KEYS_ON)
-                app.output.flush()
+            await asyncio.sleep(0.05)  # after the switch to the full-screen buffer, which has its own key modes
+            app.output.write_raw((KEYS_ON if keys else "") + FOCUS_ON + (TITLE_PUSH if titles_enabled() else ""))
+            app.output.flush()
+            invalidate()  # draws, and sets the tab title
             if st.backend == "sdk":
                 st.client = await make_client()
             if resume_last:
@@ -6221,9 +6327,8 @@ async def run_interactive(resume_last=False):
     try:
         await app.run_async()
     finally:
-        if keys:
-            sys.stdout.write(KEYS_OFF)
-            sys.stdout.flush()
+        sys.stdout.write((KEYS_OFF if keys else "") + FOCUS_OFF + (TITLE_RESET if st.shown_title else ""))
+        sys.stdout.flush()
         if st.task and not st.task.done():
             st.task.cancel()
         await stop_all_shells()

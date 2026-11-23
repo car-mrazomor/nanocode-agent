@@ -139,6 +139,8 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 
 While you scroll through a long answer, your message stays pinned at the top; click it to jump back to it.
 
+The terminal tab is named after the chat and shows `✻` while working, `△` when it needs your OK and `✓` when it finished while you were away; you also get a bell and a desktop notification then ([more](docs/using.md#tab-title-and-notifications)).
+
 Drag with the mouse to select text in the chat; it's copied when you let go (double-click copies a word). This works like Claude Code's fullscreen mode and OpenCode: the system clipboard is used locally, and OSC 52 over SSH. The wheel scrolls the chat wherever the pointer is. To use your terminal's own selection instead, hold Shift while dragging (Option in iTerm2 and VS Code on macOS, Fn in Terminal.app).
 
 Most terminals send the same thing for Shift+Enter as for Enter, and many don't pass Cmd shortcuts to apps at all. Run **`/terminal-setup`** once to fix that:

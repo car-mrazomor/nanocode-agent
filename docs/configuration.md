@@ -12,6 +12,8 @@ Settings live in `~/.nanocode/config.json` (readable only by you). Most are set 
 | `think` | `off`, `low`, `medium`, `high` | `medium` | Thinking level ([more](getting-started.md#thinking)) |
 | `theme` | `opencode`, `nanocode` | `opencode` | Base colors ([more](using.md#theme)) |
 | `colors` | `{"accent": "#ff79c6", ...}` | | Your own colors on top of the theme (`/theme`) |
+| `terminal_title` | `true`, `false` | `true` | Name the terminal tab after the chat ([more](using.md#tab-title-and-notifications)) |
+| `notify` | `auto`, `always`, `off` | `auto` | Bell and desktop notification when a reply finishes while you're in another tab |
 | `openrouter_api_key` | string | | OpenRouter key (or `OPENROUTER_API_KEY`) |
 | `ollama_url` | URL | `http://localhost:11434` | Ollama server (or `OLLAMA_HOST`) |
 | `ollama_num_ctx` | number | 8k, 16k or 32k from your RAM | Ollama context size |
