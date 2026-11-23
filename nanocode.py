@@ -49,7 +49,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.7.5"
+__version__ = "0.7.6"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -514,6 +514,8 @@ class State:
         self.unseen = False  # a turn finished while you were away: the tab title shows ✓ until you're back
         self.shown_title = None
         self.translate_keys = True
+        self.attachments = {}  # "[Image #1]" -> ("image", saved name), "[Pasted text #1 +40 lines]" -> ("text", text)
+        self.chip_counts = {"image": 0, "text": 0}
         self.always_allow = set()
         self.todos = []  # the agent's current plan (todo tool)
         self.permission_lock = None  # one permission question at a time (sub-agents run in parallel)
@@ -4714,6 +4716,100 @@ def refresh_theme():
         st.app.invalidate()
 
 
+# --- Attachments in the input, like Claude Code: images become [Image #1] chips (dropped, pasted with Ctrl+V,
+#     or Alt+V on Windows), long pastes become [Pasted text #1 +120 lines]. The chip stays in the message, so
+#     you can refer to it ("compare [Image #1] with [Image #2]"); its content is attached when you send. ---
+
+CHIP_RE = re.compile(r"\[(?:Image #\d+|Pasted text #\d+(?: \+\d+ lines)?)\]")
+PASTE_COLLAPSE_CHARS, PASTE_COLLAPSE_LINES = 800, 3
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def add_image_chip(data, mime):
+    st.chip_counts["image"] += 1
+    label = f"[Image #{st.chip_counts['image']}]"
+    st.attachments[label] = ("image", save_image(data, mime))
+    return label
+
+
+def add_text_chip(text):
+    st.chip_counts["text"] += 1
+    label = f"[Pasted text #{st.chip_counts['text']} +{text.count(chr(10)) + 1} lines]"
+    st.attachments[label] = ("text", text)
+    return label
+
+
+def pasted(data):
+    """What a paste puts in the input: dropped images as [Image #N], other dropped files as @mentions,
+    long text as a [Pasted text #N] chip, anything else as it is."""
+    paths = dropped_paths(data)
+    if paths:
+        parts = []
+        for path in paths:
+            mime = IMAGE_SUFFIXES.get(path.suffix.lower())
+            try:
+                if mime and path.is_file() and path.stat().st_size <= MAX_IMAGE_BYTES:
+                    parts.append(add_image_chip(path.read_bytes(), mime))
+                    continue
+            except OSError:
+                pass
+            parts.append(mention(path))
+        return " ".join(parts) + " "
+    if len(data) > PASTE_COLLAPSE_CHARS or data.count("\n") >= PASTE_COLLAPSE_LINES:
+        return add_text_chip(data)
+    return data
+
+
+def expand_chips(text, images):
+    """Puts pasted text back in place of its chip, and adds the images of [Image #N] chips to `images`."""
+    def expand(match):
+        kind, value = st.attachments.get(match.group(0), (None, None))
+        if kind == "text":
+            return value
+        if kind == "image" and value not in images:
+            images.append(value)
+        return match.group(0)
+    return CHIP_RE.sub(expand, text)
+
+
+def clipboard_image():
+    """(mime, bytes) of an image on the clipboard, or None. macOS: a screenshot or a copied image file;
+    Linux: wl-paste or xclip; Windows: PowerShell."""
+    data = None
+    try:
+        if sys.platform == "darwin":
+            r = subprocess.run(["osascript", "-e", "the clipboard as «class PNGf»"], capture_output=True, timeout=5)
+            found = re.search(rb"PNGf([0-9A-Fa-f]+)", r.stdout)
+            if found:
+                data = bytes.fromhex(found.group(1).decode())
+            else:  # a file copied in Finder
+                r = subprocess.run(["osascript", "-e", "POSIX path of (the clipboard as «class furl»)"],
+                                   capture_output=True, text=True, timeout=5)
+                path = Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+                if path and path.suffix.lower() in IMAGE_SUFFIXES and path.is_file():
+                    return IMAGE_SUFFIXES[path.suffix.lower()], path.read_bytes()
+        elif os.name == "nt":
+            script = ("Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
+                      "$i = [System.Windows.Forms.Clipboard]::GetImage(); if ($i) { $m = New-Object System.IO.MemoryStream; "
+                      "$i.Save($m, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($m.ToArray()) }")
+            r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", script], capture_output=True,
+                               text=True, timeout=10)
+            data = base64.b64decode(r.stdout.strip()) if r.stdout.strip() else None
+        else:
+            for cmd in (["wl-paste", "--no-newline", "--type", "image/png"],
+                        ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]):
+                if shutil.which(cmd[0]):
+                    r = subprocess.run(cmd, capture_output=True, timeout=5)
+                    if r.returncode == 0 and r.stdout:
+                        data = r.stdout
+                        break
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not data or not data.startswith(b"\x89PNG") or len(data) > MAX_IMAGE_BYTES:
+        return None
+    return "image/png", data
+
+
 def dropped_paths(data):
     """Files dragged into the terminal: it pastes their paths as text (quoted or with \\-escaped spaces, or as
     file:// URLs). Returns the paths, or None when the pasted text isn't only existing absolute paths."""
@@ -4894,7 +4990,7 @@ async def cmd_compare(arg):
         return
     out(user_block(arg))
     out(f"   {fg('muted')}comparing {len(models)} models: {', '.join(models)}{RESET}")
-    prompt = expand_mentions(arg)
+    prompt = expand_mentions(expand_chips(arg, []))
     results = await asyncio.gather(*(compare_one(m, prompt) for m in models))
     for r in results:
         st.usage["input"] += r["input"]
@@ -5013,13 +5109,13 @@ async def run_input(text):
         elif word.startswith("/") and word[1:] in list_skills():
             out(f"  {DIM}⎿  loaded skill {word[1:]}{RESET}")
             images = []
-            task = expand_mentions(arg, images) if arg else f"Run the {word[1:]} skill."
+            task = expand_mentions(expand_chips(arg, images), images) if arg else f"Run the {word[1:]} skill."
             await send(load_skill(word[1:]) + "\n\n" + task, display=text, images=images)
         elif word.startswith("/") and " " not in word[1:] and len(word) > 1 and "/" not in word[1:]:
             out(f"{RED}⏺ unknown command {word}{RESET} {DIM}(/help lists them){RESET}\n")
         else:
             images = []
-            await send(expand_mentions(text, images), display=text, images=images)
+            await send(expand_mentions(expand_chips(text, images), images), display=text, images=images)
             if st.turn_errors >= 2 and st.config.get("auto_learn"):
                 out(f"  {DIM}⎿  that took a few tries; learning from it (auto_learn){RESET}")
                 await send(LEARN_PROMPT, display="/learn")
@@ -5718,17 +5814,46 @@ def build_app():
             st.task.cancel()
         out(f"   {fg('error')}interrupted{RESET}")
 
+    def insert_chip(buffer, text):
+        before = buffer.document.text_before_cursor
+        buffer.insert_text((" " if before and not before[-1].isspace() else "") + text)
+
     @kb.add(Keys.BracketedPaste, filter=no_dialog)
     def _(event):
-        """Dropping files on the terminal pastes their paths: they become @mentions (images get attached)."""
+        """A paste: dropped files (the terminal pastes their paths), long text, or (when the paste is empty
+        because the clipboard holds a picture) the clipboard image."""
         data = event.data.replace("\r\n", "\n").replace("\r", "\n")
-        paths = dropped_paths(data)
-        if paths:
-            buffer = event.current_buffer
-            before = buffer.document.text_before_cursor
-            lead = " " if before and not before[-1].isspace() else ""
-            data = lead + " ".join(mention(p) for p in paths) + " "
-        event.current_buffer.insert_text(data)
+        if not data.strip():
+            image = clipboard_image()
+            if image:
+                insert_chip(event.current_buffer, add_image_chip(image[1], image[0]) + " ")
+            return
+        text = pasted(data)
+        if text is data:
+            event.current_buffer.insert_text(data)
+        else:
+            insert_chip(event.current_buffer, text)
+
+    @kb.add("c-v", filter=no_dialog)
+    @kb.add("escape", "v", filter=no_dialog)
+    def _(event):
+        """Ctrl+V (Alt+V on Windows, where the terminal takes Ctrl+V): paste the clipboard image."""
+        image = clipboard_image()
+        if image:
+            insert_chip(event.current_buffer, add_image_chip(image[1], image[0]) + " ")
+        else:
+            show_toast("no image on the clipboard")
+
+    chip_end = re.compile(CHIP_RE.pattern + "$")
+    chip_before_cursor = Condition(lambda: st.input_box is not None and bool(
+        chip_end.search(st.input_box.buffer.document.text_before_cursor[-60:])))
+
+    @kb.add("backspace", filter=chip_before_cursor & no_dialog)
+    def _(event):
+        """Backspace right after a chip removes the whole chip."""
+        buffer = event.current_buffer
+        found = chip_end.search(buffer.document.text_before_cursor[-60:])
+        buffer.delete_before_cursor(len(found.group(0)))
 
     @kb.add("c-c", filter=no_dialog)
     def _(event):

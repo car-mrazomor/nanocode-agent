@@ -63,9 +63,18 @@ When the tab isn't in front and a reply finishes (or a permission question comes
 - VS Code and Cursor show the process name by default: set `"terminal.integrated.tabs.title": "${sequence}"` to see the chat title.
 - In tmux, the bell marks the window; for the title set `set -g set-titles on`, and for desktop notifications `set -g allow-passthrough on`.
 
-## Drag and drop
+## Images, files and pastes
 
-Drag files from Finder or Explorer onto the terminal: they're added to your message as `@path` mentions. When you send it, text files are attached, and images (PNG, JPEG, WebP, GIF) are sent as images, so you can drop in a screenshot and ask about it. The model has to see images: Claude, a vision model on OpenRouter, or one in Ollama (`qwen2.5vl`, `llava`, `gemma3`). Images are kept in `.nanocode/images/` so a resumed chat still has them.
+Like Claude Code, attachments show up in the input as chips:
+
+- **Images**: drag them onto the terminal, or paste a screenshot with **Ctrl+V** (**Alt+V** on Windows). Each becomes `[Image #1]`, `[Image #2]`, ... and is sent with the message. The chip stays in your text, so you can write "what's different between [Image #1] and [Image #2]?".
+- **Other files**: dropped files become `@path` mentions, and their content is attached when you send.
+- **Long pastes**: more than 800 characters or 3 lines collapse to `[Pasted text #1 +120 lines]`, and the full text is sent.
+- **Backspace** right after a chip removes the whole chip.
+
+On macOS, Ctrl+V takes a screenshot (Cmd+Ctrl+Shift+4) or an image file copied in Finder. On Linux it needs `wl-paste` (Wayland) or `xclip`. PNG, JPEG, WebP and GIF, up to 20 MB.
+
+The model has to see images: Claude, a vision model on OpenRouter, or one in Ollama (`qwen2.5vl`, `llava`, `gemma3`). Images are kept in `.nanocode/images/` so a resumed chat still has them.
 
 ## Theme
 
@@ -96,6 +105,7 @@ Colors: `bg`, `panel` (your messages and the input), `panel2` (menus, dialogs), 
 | ↑ / ↓ | History |
 | PageUp / PageDown, mouse wheel | Scroll the chat |
 | Tab | Complete |
+| Ctrl+V (Alt+V on Windows) | Paste an image from the clipboard as `[Image #N]` |
 
 ## Mouse
 

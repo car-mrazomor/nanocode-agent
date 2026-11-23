@@ -111,7 +111,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/cost`, `/config`, `/help` | Usage, settings, help |
 | `/c`, `/q` | New chat, quit |
 | `# note` | Save a note to project memory |
-| `@path` | Attach a file to your message (images are sent as images). Or drag files onto the terminal |
+| `@path` | Attach a file to your message. Or drag files onto the terminal: images become `[Image #1]` chips, like Claude Code; Ctrl+V pastes a screenshot |
 | `/<skill> [task]` | Run a skill, e.g. `/review app.py` |
 
 **The interface:** nanocode opens on a start screen, with the logo and the prompt in the middle. Once you send something, it switches to the chat view, which uses the full width of the terminal:
