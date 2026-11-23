@@ -7,8 +7,12 @@
 <meta name="description" content="A small, hackable coding agent for your terminal, in one Python file. Runs on your Claude subscription, any OpenRouter model, or local models through Ollama.">
 <meta property="og:title" content="nanocode — small hackable coding agent for the terminal">
 <meta property="og:description" content="The coding agent that fits in one file.">
-<meta name="theme-color" content="#101113">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%236fb6c6'/><stop offset='1' stop-color='%23bf89ae'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='%23141518'/><rect x='8' y='7' width='3.5' height='18' rx='1.75' fill='url(%23g)'/><path d='M16 11l6 5-6 5' fill='none' stroke='%23d5d6da' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<meta property="og:image" content="https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/assets/social-preview.png">
+<meta property="og:url" content="https://car-mrazomor.github.io/nanocode-agent/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/assets/social-preview.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%236fb6c6'/><stop offset='1' stop-color='%23bf89ae'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='%23141414'/><rect x='8' y='7' width='3.5' height='18' rx='1.75' fill='url(%23g)'/><path d='M16 11l6 5-6 5' fill='none' stroke='%23eeeeee' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <link rel="preconnect" href="https://api.fontshare.com">
 <link href="https://api.fontshare.com/v2/css?f[]=switzer@400,500,600,700&f[]=sentient@400i&display=swap" rel="stylesheet">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,11 +20,12 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
-    --page: #101113; --surface: #16171a; --panel: #1b1d21; --panel2: #24272c;
-    --line: #23252a; --line2: #2e3137;
-    --text: #e6e7ea; --muted: #8e919a; --faint: #5c5f67;
+    /* nanocode's default theme: OpenCode's dark background, panels and text, with nanocode's blue and violet */
+    --page: #0a0a0a; --surface: #101010; --panel: #141414; --panel2: #1e1e1e;
+    --line: #1c1c1c; --line2: #2a2a2a;
+    --text: #eeeeee; --muted: #808080; --faint: #606060;
     --accent: #8fb3d4; --accent2: #9d8fc4; --cyan: #78b8c4; --pink: #c08aae;
-    --success: #8fb48b; --error: #d07f7f; --think: #f5a742; --warn: #cfad73;
+    --success: #7fd88f; --error: #e06c75; --think: #f5a742; --warn: #e5c07b;
     --grad: linear-gradient(90deg, #6fb6c6, #6f9ccb, #8a8cc4, #ad87b6, #bf89ae);
     --display: "Switzer", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     --serif: "Sentient", Georgia, "Times New Roman", serif;
@@ -38,7 +43,7 @@
   .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 
   /* top bar */
-  .top { position: sticky; top: 0; z-index: 50; background: rgba(16,17,19,.82); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+  .top { position: sticky; top: 0; z-index: 50; background: rgba(10,10,10,.82); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
   .top .in { max-width: 1240px; margin: 0 auto; padding: 0 28px; height: 60px; display: flex; align-items: center; justify-content: space-between; }
   .brand { display: flex; align-items: center; gap: 10px; font: 600 17px var(--display); letter-spacing: -.01em; }
   .brand svg { width: 26px; height: 26px; }
@@ -63,7 +68,7 @@
   @media (max-height: 430px) { .description { display: none; } }
   .action { display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 20px; border-radius: 8px; font: 600 13.5px var(--mono); border: 1px solid var(--line2); transition: background .2s, border-color .2s, transform .2s; }
   .action:hover { transform: translateY(-1px); background: var(--panel); border-color: var(--faint); }
-  .action.primary { background: var(--accent); color: #0f1012; border-color: var(--accent); }
+  .action.primary { background: var(--accent); color: #0a0a0a; border-color: var(--accent); }
   .action.primary:hover { background: #a6c4df; border-color: #a6c4df; }
 
   /* the rail: content column with hairline sides, like OpenClaw */
@@ -92,17 +97,18 @@
   .after code { border: 1px solid var(--line2); background: var(--surface); padding: 1px 6px; border-radius: 4px; color: var(--text); font-size: .82em; }
 
   /* the session */
-  .term { border: 1px solid var(--line2); background: #121316; box-shadow: 0 40px 100px -40px rgba(0,0,0,.8); min-width: 0; }
+  .term { border: 1px solid var(--line2); background: #0c0c0c; box-shadow: 0 40px 100px -40px rgba(0,0,0,.8); min-width: 0; }
   .term .bar { display: flex; align-items: center; gap: 7px; padding: 11px 14px; border-bottom: 1px solid var(--line2); }
   .term .bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--panel2); }
-  .term .bar b { margin: 0 auto; padding-right: 36px; font: 500 12px var(--mono); color: var(--faint); }
+  .term .bar b { margin: 0 auto; padding-right: 36px; font: 500 12px var(--mono); color: var(--muted); }
   .tb { padding: 22px 24px 14px; font: 13.5px/1.7 var(--mono); min-height: 460px; display: flex; flex-direction: column; min-width: 0; }
   .lines { flex: 1; min-width: 0; }
   .ln { white-space: pre; overflow: hidden; text-overflow: ellipsis; opacity: 0; transform: translateY(4px); transition: opacity .35s, transform .35s; }
   .ln.on { opacity: 1; transform: none; }
   .user { white-space: normal; border-left: 2px solid var(--accent); background: var(--panel); padding: 10px 16px; margin-bottom: 14px; }
   .m { color: var(--muted); } .f { color: var(--faint); } .ok { color: var(--success); } .bad { color: var(--error); } .cy { color: var(--cyan); } .vi { color: var(--accent2); }
-  .add { color: var(--success); background: rgba(143,180,139,.08); } .del { color: var(--error); background: rgba(208,127,127,.08); }
+  .add { color: var(--success); background: rgba(127,216,143,.08); } .del { color: var(--error); background: rgba(224,108,117,.08); }
+  .chip { color: var(--accent2); }
   .gap { margin-top: 10px; }
   .prompt { margin-top: 16px; border-left: 2px solid var(--accent); background: var(--panel); padding: 12px 16px; }
   .prompt .ph { min-height: 1.7em; margin-bottom: 8px; }
@@ -121,6 +127,10 @@
   .feature p { margin: 0; color: var(--muted); font-size: .88rem; line-height: 1.7; }
   .feature code { color: var(--text); }
   .feature .tag { display: block; font: 12px var(--mono); color: var(--cyan); margin-bottom: 14px; }
+
+  .demo { display: block; width: 100%; height: auto; border-top: 1px solid var(--line2); }
+  .note { margin: 14px 0 0; color: var(--muted); font-size: .9rem; }
+  .note a { color: var(--accent); }
 
   .closing { text-align: center; padding: 84px 40px; }
   .closing h2 { font-size: clamp(1.8rem, 3.6vw, 2.6rem); line-height: 1.12; letter-spacing: -.03em; margin: 0 0 6px; }
@@ -159,9 +169,9 @@
   <defs>
     <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6fb6c6"/><stop offset=".5" stop-color="#8a8cc4"/><stop offset="1" stop-color="#bf89ae"/></linearGradient>
     <symbol id="logo" viewBox="0 0 48 48">
-      <rect x="1" y="1" width="46" height="46" rx="12" fill="#1b1d21" stroke="#34373d"/>
+      <rect x="1" y="1" width="46" height="46" rx="12" fill="#141414" stroke="#2a2a2a"/>
       <rect x="12" y="11" width="5" height="26" rx="2.5" fill="url(#lg)"/>
-      <path d="M24 17l9 7-9 7" fill="none" stroke="#e6e7ea" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M24 17l9 7-9 7" fill="none" stroke="#eeeeee" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
     </symbol>
     <symbol id="github" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.23.83 1.23.83.72 1.23 1.88.87 2.34.67.07-.52.28-.87.5-1.07-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></symbol>
   </defs>
@@ -174,7 +184,8 @@
       <a href="#quickstart">Install</a>
       <a href="#features">Features</a>
       <a href="#models">Models</a>
-      <a href="https://github.com/car-mrazomor/nanocode-agent#readme">Docs</a>
+      <a href="#api">API</a>
+      <a href="https://github.com/car-mrazomor/nanocode-agent/tree/master/docs">Docs</a>
       <a class="gh" href="https://github.com/car-mrazomor/nanocode-agent"><svg><use href="#github"/></svg>GitHub</a>
     </div>
   </div>
@@ -184,12 +195,12 @@
   <canvas id="glow" aria-hidden="true"></canvas>
   <div class="hero-content">
     <svg class="mark" aria-hidden="true"><use href="#logo"/></svg>
-    <p class="eyebrow">Open source · One Python file · Fully hackable</p>
+    <p class="eyebrow">Open source (MIT) · One Python file · Fully hackable</p>
     <h1>The coding agent that <br>fits in <em>one file.</em></h1>
-    <p class="description">Reads, edits and runs your code from the terminal — on your Claude subscription, any OpenRouter model, or local models with Ollama. <br><span class="more">Hackable and fully editable: read it, change anything, make it yours.</span></p>
+    <p class="description">Reads, edits and runs your code from the terminal — on your Claude subscription, any OpenRouter model, or local models with Ollama. <br><span class="more">Use it in the terminal or call it over an OpenAI-compatible API. Read it, change anything, make it yours.</span></p>
     <div class="actions">
       <a class="action primary" href="#quickstart">Get started</a>
-      <a class="action" href="https://github.com/car-mrazomor/nanocode-agent#readme">Read the docs</a>
+      <a class="action" href="https://github.com/car-mrazomor/nanocode-agent/tree/master/docs">Read the docs</a>
       <a class="action" href="https://github.com/car-mrazomor/nanocode-agent">View on GitHub</a>
     </div>
   </div>
@@ -211,16 +222,16 @@
         <div class="line"><span><b class="p">$ </b>nanocode</span></div>
       </div>
     </div>
-    <p class="after">Also on Android (Termux). Update with <code>/update</code>, check with <code>nanocode doctor</code>, remove with <code>nanocode uninstall</code>.</p>
+    <p class="after">Also on Android (Termux). Update with <code>/update</code>, check with <code>nanocode doctor</code>, serve the API with <code>nanocode serve</code>, remove with <code>nanocode uninstall</code>.</p>
   </section>
 
   <section class="block reveal">
     <div class="head"><div><p class="label">See it work</p><h2>Read, edit, run — and it tells you what it did.</h2></div></div>
     <div class="term" aria-hidden="true">
-      <div class="bar"><i></i><i></i><i></i><b>~/projects/app — nanocode</b></div>
+      <div class="bar"><i></i><i></i><i></i><b id="tabtitle">nanocode</b></div>
       <div class="tb">
         <div class="lines" id="lines">
-          <div class="ln user">the date parser fails on ISO weeks, fix it and run the tests</div>
+          <div class="ln user">fix the ISO week parser and run the tests</div>
           <div class="ln"><span class="m">→</span> Read <span class="m">src/dates.py</span></div>
           <div class="ln"><span class="m">✱</span> Grep <span class="m">"isoweek" · 3 matches</span></div>
           <div class="ln"><span class="m">←</span> Edit <span class="m">src/dates.py</span> <span class="ok">+1</span> <span class="bad">-1</span></div>
@@ -233,12 +244,21 @@
           <div class="ln gap"><span class="vi">▣</span> <span class="m">Cooked for 9s · GLM 5.3 · 4.1k in · 312 out · $0.0021</span></div>
         </div>
         <div class="prompt">
-          <div class="ph"><span id="typed"></span><span class="caret"></span></div>
+          <div class="ph"><span id="typed"></span><span class="chip" id="chip"></span><span class="caret"></span></div>
           <div class="meta"><span class="mode">Auto</span> <span class="f">·</span> GLM 5.3  <span class="m">OpenRouter</span> <span class="f">·</span> <span class="th">medium</span></div>
         </div>
         <div class="status"><span id="state"><span class="spin" id="spin">⠋</span> <span class="m">working</span></span><span>12% context  $0.0021  ctrl+p commands</span></div>
       </div>
     </div>
+  </section>
+
+  <section class="block reveal">
+    <div class="head"><div><p class="label">Recorded, not mocked</p><h2>A real session on the Claude subscription.</h2></div></div>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><b>nanocode</b></div>
+      <img class="demo" src="https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/assets/demo.gif" alt="nanocode runs the tests, finds why one fails, fixes it and runs them again" loading="lazy" width="1200" height="700">
+    </div>
+    <p class="note">The tests fail, it finds why, fixes it and runs them again: 21 seconds.</p>
   </section>
 
   <section class="block reveal" id="features">
@@ -247,15 +267,18 @@
       <div class="feature"><span class="ic grad">{ }</span><h3>Hackable, fully editable</h3><p>The whole agent is one Python file. Read it in an afternoon, change any prompt, tool or key, and it's yours.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent)">⧉</span><h3>Chat &amp; agents</h3><p>Multi-turn chat plus an agent that plans with a checklist, calls tools, and hands side tasks to sub-agents running in parallel.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent)">←</span><h3>Asks before it acts</h3><p>Reads, edits and runs commands, with background shells for dev servers. Edits show a diff and wait for your OK. <code>/undo</code> reverts.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--accent2)">▣</span><h3>Images &amp; files</h3><p>Drag files and screenshots onto the terminal, or paste with <code>Ctrl+V</code>. Images become <code>[Image #1]</code> chips and long pastes collapse, like Claude Code.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--cyan)">⇄</span><h3>HTTP API</h3><p><code>nanocode serve</code> makes it an OpenAI-compatible API: chat completions, responses, background runs and images. Call it from any app.</p></div>
       <div class="feature"><span class="ic" style="color:var(--cyan)">◎</span><h3>Web search</h3><p>Searches and reads pages through your own browser, for any model and any provider. DuckDuckGo, Bing, Google or OpenRouter.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent2)">◇</span><h3>MCP</h3><p>Any MCP server you connect, on every provider. <code>/mcp import</code> brings yours from Claude Code; toggle per tool.</p></div>
       <div class="feature"><span class="ic" style="color:var(--pink)">▥</span><h3>Compare</h3><p>Send one prompt to several models at once and compare the answers side by side, with time and cost for each.</p></div>
       <div class="feature"><span class="ic" style="color:var(--think)">✉</span><h3>Email assistant</h3><p>Summaries, style-matched draft replies, tagging and spam triage over IMAP/SMTP. Nothing is sent without your OK.</p></div>
       <div class="feature"><span class="ic" style="color:var(--pink)">◆</span><h3>Memory &amp; skills</h3><p>Notes it always follows (<code># note</code>) and skills it loads when a task matches — Claude Code skills work too.</p></div>
-      <div class="feature"><span class="ic" style="color:var(--think)">∴</span><h3>Thinking levels</h3><p><code>/think</code> off, low, medium or high, for every provider. Shown right under the prompt.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--success)">✓</span><h3>Knows when you're away</h3><p>The tab shows the chat's title: <code>✻</code> working, <code>△</code> needs your OK, <code>✓</code> done. A bell and a desktop notification when you're in another tab.</p></div>
+      <div class="feature"><span class="ic grad">◐</span><h3>Your colors</h3><p>OpenCode's dark theme with nanocode's blue and violet by default. <code>/theme accent #ff79c6</code> changes any color, and it stays.</p></div>
       <div class="feature"><span class="ic" style="color:var(--cyan)">%</span><h3>Reverse engineering</h3><p>Optional REA tools for binaries, APKs, Electron apps, web bundles and firmware — installed for you.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent2)">⇅</span><h3>A mouse that works</h3><p>Smooth scrolling, drag to select and copy, and your message pinned on top while you read the answer.</p></div>
-      <div class="feature"><span class="ic" style="color:var(--success)">↑</span><h3>Costs and updates</h3><p>Time, tokens and cost after every reply, <code>/compact</code> when context fills up, and <code>/update</code> for new versions.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--think)">∴</span><h3>Thinking, costs, updates</h3><p><code>/think</code> off to high on every provider. Time, tokens and cost after every reply, <code>/compact</code> when context fills, <code>/update</code> for new versions.</p></div>
     </div>
   </section>
 
@@ -268,6 +291,20 @@
     </div>
   </section>
 
+  <section class="block reveal" id="api">
+    <div class="head"><div><p class="label">HTTP API</p><h2>Call it from your own apps.</h2></div><a href="https://github.com/car-mrazomor/nanocode-agent/tree/master/docs/api.md">API docs →</a></div>
+    <div class="qs">
+      <div class="code">
+        <div class="c"># An OpenAI-compatible endpoint on http://127.0.0.1:8765/v1, with all of nanocode's tools</div>
+        <div class="line"><span><b class="p">$ </b>nanocode serve</span></div>
+        <div class="c" style="margin-top:8px"># Any OpenAI client works: curl, the openai SDK, Open WebUI</div>
+        <div class="line"><span><b class="p">$ </b>curl http://127.0.0.1:8765/v1/chat/completions -H "Authorization: Bearer $KEY" \</span></div>
+        <div class="line"><span style="white-space:pre">    -d '{"messages": [{"role": "user", "content": "What does this project do?"}]}'</span></div>
+      </div>
+    </div>
+    <p class="note">Chats are saved per project: send <code>X-Nanocode-Session-Id</code> to continue one, and base64 images to show it a screenshot.</p>
+  </section>
+
   <section class="closing reveal">
     <h2>Small enough to <em>read.</em><br><span class="grad">Good enough to ship with.</span></h2>
     <div class="actions">
@@ -278,7 +315,7 @@
 </main>
 
 <footer>
-  <div>nanocode v0.6.0 · by <a href="https://github.com/car-mrazomor">car-mrazomor</a></div>
+  <div>nanocode <span id="version">v0.7.7</span> · by <a href="https://github.com/car-mrazomor">car-mrazomor</a> · <a href="https://github.com/car-mrazomor/nanocode-agent/blob/master/LICENSE">MIT license</a></div>
   <div>inspired by <a href="https://github.com/1rgs/nanocode">1rgs/nanocode</a> · no telemetry</div>
 </footer>
 
@@ -298,7 +335,7 @@
   function paint(t) {
     const blobs = [0, 1, 2].map(i => ({ x: gw * (.5 + .38 * Math.cos(t * .035 + i * 2.1)), y: gh * (.45 + .3 * Math.sin(t * .028 + i * 1.7)),
       c: tone(i / 3 + t * .006), k: 1 / (2 * (Math.max(gw, gh) * .3) ** 2) }));
-    const d = gimg.data, base = [16, 17, 19], strength = .12;
+    const d = gimg.data, base = [10, 10, 10], strength = .12;
     for (let y = 0, o = 0; y < gh; y++) for (let x = 0; x < gw; x++, o += 4) {
       let r = base[0], g = base[1], b = base[2];
       for (const bl of blobs) {
@@ -325,15 +362,23 @@
   const spin = document.getElementById("spin"), state = document.getElementById("state");
   const frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; let f = 0;
   const spinner = setInterval(() => { spin.textContent = frames[f++ % frames.length]; }, 90);
-  const finish = () => { clearInterval(spinner); state.innerHTML = '<span class="m">~/projects/app</span>  <span class="f">main</span>'; };
-  const next = "add a test for week 53";
-  const type = i => { if (i <= next.length) { typed.textContent = next.slice(0, i); setTimeout(() => type(i + 1), 55 + Math.random() * 60); } };
+  // the tab title follows the chat, like in nanocode: the title cut to 30 characters, ✻ while it works
+  const tabTitle = document.getElementById("tabtitle"), chat = "fix the ISO week parser and...";
+  const finish = () => { clearInterval(spinner); state.innerHTML = '<span class="m">~/projects/app</span>  <span class="f">main</span>'; tabTitle.textContent = chat; };
+  const next = "it still fails on CI, see ", chip = document.getElementById("chip");
+  const type = i => { if (i <= next.length) { typed.textContent = next.slice(0, i); setTimeout(() => type(i + 1), 55 + Math.random() * 60); }
+    else setTimeout(() => { chip.textContent = "[Image #1] "; }, 500); };
   const play = () => {
-    if (still) { lines.forEach(l => l.classList.add("on")); finish(); typed.textContent = next; return; }
+    if (still) { lines.forEach(l => l.classList.add("on")); finish(); typed.textContent = next; chip.textContent = "[Image #1] "; return; }
+    tabTitle.textContent = "✻ " + chat;
     lines.forEach((l, i) => setTimeout(() => { l.classList.add("on"); if (i === lines.length - 1) { finish(); type(0); } }, 400 + i * 380));
   };
   const start = new IntersectionObserver(e => { if (e[0].isIntersecting) { play(); start.disconnect(); } }, { threshold: 0.3 });
   start.observe(document.querySelector(".term"));
+
+  // the latest version, so the footer never goes stale
+  fetch("https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/VERSION").then(r => r.ok ? r.text() : "")
+    .then(v => { v = v.trim(); if (/^\d+\.\d+\.\d+$/.test(v)) document.getElementById("version").textContent = "v" + v; }).catch(() => {});
 
   // install tabs and copy
   const cmds = {

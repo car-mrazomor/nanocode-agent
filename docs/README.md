@@ -6,7 +6,7 @@ nanocode is a small, hackable coding agent for the terminal, in one Python file.
 |---|---|
 | [Install and update](install.md) | Installers, where files go, updates, uninstalling |
 | [Getting started](getting-started.md) | First setup, providers, models, thinking |
-| [Using nanocode](using.md) | Commands, the interface, keys, mouse, scripting |
+| [Using nanocode](using.md) | Commands, the interface, keys, mouse, images and pastes, tab title and notifications, theme, scripting |
 | [Tools](tools.md) | Every tool the model can use |
 | [Agents and planning](agents.md) | Plans and sub-agents |
 | [Web search](web.md) | `web_search` and `web_fetch` through your browser |
