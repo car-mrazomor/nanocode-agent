@@ -94,6 +94,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/provider [name]` | List providers, or switch (Claude subscription, OpenRouter, Ollama) |
 | `/think [level]` | How hard the model thinks: `off`, `low`, `medium` (default) or `high`. Shown under the prompt after the model, like OpenCode (`· medium`); click it to change |
 | `/model [name]` | List models (with prices, or what's installed in Ollama), or switch. Tab completes |
+| `/theme` | Colors: `/theme opencode` (default) or `nanocode`, `/theme accent #ff79c6` for one color, `/theme reset` |
 | `/resume [n]` | Continue a saved chat. Every chat is saved per project |
 | `/recap` | What happened this session (files changed, commands run, cost) and what's next |
 | `/compact` | Summarize a long chat to free up context |
@@ -110,7 +111,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/cost`, `/config`, `/help` | Usage, settings, help |
 | `/c`, `/q` | New chat, quit |
 | `# note` | Save a note to project memory |
-| `@path` | Attach a file to your message |
+| `@path` | Attach a file to your message (images are sent as images). Or drag files onto the terminal |
 | `/<skill> [task]` | Run a skill, e.g. `/review app.py` |
 
 **The interface:** nanocode opens on a start screen, with the logo and the prompt in the middle. Once you send something, it switches to the chat view, which uses the full width of the terminal:

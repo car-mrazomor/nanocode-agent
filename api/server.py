@@ -170,7 +170,7 @@ class ApiServer:
                     nc.out(f"{nc.DIM}API {run.id} · session {run.session_id}{nc.RESET}")
                     images = [nc.save_image(data, mime) for mime, data in run.images]
                     display = run.prompt + (f"\n[{len(images)} image{'s' * (len(images) > 1)}]" if images else "")
-                    await nc.send(nc.expand_mentions(text), display=display, images=images)
+                    await nc.send(nc.expand_mentions(text, images), display=display, images=images)
                 finally:
                     nc.EVENTS.reset(token)
                     nc.stream_end()

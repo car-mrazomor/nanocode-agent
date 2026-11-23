@@ -49,7 +49,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -58,13 +58,43 @@ BLUE, CYAN, GREEN, YELLOW, RED = "\033[34m", "\033[36m", "\033[32m", "\033[33m",
 USER_BG = "\033[48;5;237m"
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
-# Grayish theme with accents from the logo gradient (cyan → blue → violet → pink), toned down.
-THEME = {
-    "bg": "#141518", "panel": "#1e2024", "panel2": "#26292e", "border": "#34373d",
-    "text": "#d5d6da", "muted": "#80838c", "faint": "#555860",
-    "accent": "#7fa7c9", "accent2": "#9d8fc4", "pink": "#c08aae", "cyan": "#78b8c4",
-    "success": "#8fb48b", "error": "#d07f7f", "warning": "#cfad73", "think": "#f5a742",
+# Themes. "opencode" (the default) is OpenCode's dark theme with nanocode's blue and violet accents;
+# "nanocode" is the older, grayer one. Any color can be changed: "colors" in the config, or /theme.
+THEMES = {
+    "opencode": {
+        "bg": "#0a0a0a", "panel": "#141414", "panel2": "#1e1e1e", "border": "#484848",
+        "text": "#eeeeee", "muted": "#808080", "faint": "#606060",
+        "accent": "#7fa7c9", "accent2": "#9d8fc4", "pink": "#c08aae", "cyan": "#78b8c4",
+        "success": "#7fd88f", "error": "#e06c75", "warning": "#e5c07b", "think": "#f5a742",
+    },
+    "nanocode": {
+        "bg": "#141518", "panel": "#1e2024", "panel2": "#26292e", "border": "#34373d",
+        "text": "#d5d6da", "muted": "#80838c", "faint": "#555860",
+        "accent": "#7fa7c9", "accent2": "#9d8fc4", "pink": "#c08aae", "cyan": "#78b8c4",
+        "success": "#8fb48b", "error": "#d07f7f", "warning": "#cfad73", "think": "#f5a742",
+    },
 }
+THEME_COLORS = {
+    "bg": "background", "panel": "your messages and the input box", "panel2": "menus and dialogs",
+    "border": "borders", "text": "text", "muted": "dim text", "faint": "the faintest text (hints)",
+    "accent": "main accent (blue): the bar by your messages, selection", "accent2": "second accent (violet): busy",
+    "pink": "gradient pink", "cyan": "code", "success": "success", "error": "errors", "warning": "warnings",
+    "think": "thinking",
+}
+THEME = dict(THEMES["opencode"])
+HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def apply_theme(config):
+    """Sets THEME from the config: "theme" picks the base, "colors" overrides single colors."""
+    name = config.get("theme") if config.get("theme") in THEMES else "opencode"
+    colors = dict(THEMES[name])
+    custom = config.get("colors")
+    if isinstance(custom, dict):
+        colors.update({k: v for k, v in custom.items() if k in colors and isinstance(v, str) and HEX_RE.match(v)})
+    THEME.clear()
+    THEME.update(colors)
+    _parsed.clear()
 
 
 def _rgb(color):
@@ -826,7 +856,7 @@ def transcript_rows(width, height):
     return rows
 
 
-USER_PREFIX = f"{fg('accent')}┃{RESET}{bg('panel')}"  # how user_block starts every row
+USER_PREFIX = "\033[38;2;127;167;201m┃\033[0m\033[48;2;30;32;36m"  # how user_block started rows (old saved chats)
 _blocks_cache = {"text": None, "blocks": []}
 
 
@@ -874,6 +904,10 @@ def sticky_prompt(lines, top_line, width, height):
     return first + st.lines_dropped, rows
 
 
+def selected_style():
+    return f"bg:{THEME['accent']} fg:{THEME['bg']}"
+
+
 def slice_fragments(fragments, start, end, mark=None):
     """The fragments covering characters start..end, with mark (a, b) shown as selected."""
     out_fragments, offset = [], 0
@@ -885,16 +919,13 @@ def slice_fragments(fragments, start, end, mark=None):
                 m0, m1 = max(mark[0], a) - a, min(mark[1], b) - a
                 for part, selected in ((piece[:m0], False), (piece[m0:m1], True), (piece[m1:], False)):
                     if part:
-                        out_fragments.append((f"{style} {SELECTED_STYLE}" if selected else style, part))
+                        out_fragments.append((f"{style} {selected_style()}" if selected else style, part))
             else:
                 out_fragments.append((style, piece))
         offset += len(text)
         if offset >= end:
             break
     return out_fragments
-
-
-SELECTED_STYLE = f"bg:{THEME['accent']} fg:{THEME['bg']}"
 
 
 def scroll_transcript(rows):
@@ -4219,6 +4250,7 @@ COMMANDS = {
     "/email": "summarize and triage your inbox, or /email <task> (set up: nanocode email)",
     "/compare": "send one prompt to several models and compare the answers side by side",
     "/think": "how hard the model thinks: /think off|low|medium|high (on = medium)",
+    "/theme": "colors: /theme opencode|nanocode, /theme accent #ff79c6, /theme reset",
     "/resume": "list saved chats, or /resume <n>",
     "/compact": "summarize the chat to free up context",
     "/undo": "revert the last file change",
@@ -4585,12 +4617,38 @@ def show_config():
     return "\n".join(lines)
 
 
-def expand_mentions(text):
+IMAGE_SUFFIXES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+                  ".gif": "image/gif"}
+MENTION_RE = re.compile(r'@"([^"]+)"|@([^\s"]+)')
+
+
+def mention(path):
+    """How a file is written in a message: @path, relative when it's in this folder; quoted if it has spaces."""
+    path = Path(path)
+    try:
+        shown = str(path.relative_to(Path.cwd())) if path.is_absolute() else str(path)
+    except ValueError:
+        shown = str(path)
+    return f'@"{shown}"' if any(ch.isspace() for ch in shown) or '"' in shown else f"@{shown}"
+
+
+def expand_mentions(text, images=None):
+    """Attaches the files mentioned with @path. With an `images` list, mentioned images are saved and their
+    names added to it (the message is sent with them); otherwise images are skipped like other binary files."""
     attached = []
-    for raw in dict.fromkeys(re.findall(r"@([^\s]+)", text)):
-        raw = raw.rstrip(".,;:!?)")
+    for quoted, plain in dict.fromkeys(MENTION_RE.findall(text)):
+        raw = quoted or plain.rstrip(".,;:!?)")
         path = resolve(raw)
-        if path.is_file() and not is_binary(path):
+        if images is not None and path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            try:
+                if path.stat().st_size > 20 * 1024 * 1024:
+                    out(f"  {fg('warning')}⎿  {raw} is over 20 MB; not attached{RESET}")
+                    continue
+                images.append(save_image(path.read_bytes(), IMAGE_SUFFIXES[path.suffix.lower()]))
+            except OSError:
+                continue
+            out(f"  {DIM}⎿  attached image {raw}{RESET}")
+        elif path.is_file() and not is_binary(path):
             try:
                 content = read_text(path)
             except OSError:
@@ -4598,6 +4656,85 @@ def expand_mentions(text):
             attached.append(f'<file path="{raw}">\n{cap(content, 100_000)}\n</file>')
             out(f"  {DIM}⎿  attached {raw}{RESET}")
     return text + ("\n\n" + "\n\n".join(attached) if attached else "")
+
+
+def cmd_theme(arg):
+    """/theme lists the colors; /theme <name> picks a base theme; /theme <color> <#hex|default> changes one."""
+    parts = arg.lower().split()
+    custom = st.config.get("colors") if isinstance(st.config.get("colors"), dict) else {}
+    if not parts:
+        base = st.config.get("theme") if st.config.get("theme") in THEMES else "opencode"
+        lines = [f"{BOLD}Theme{RESET} {base} {DIM}(themes: {', '.join(THEMES)}){RESET}"]
+        for key, desc in THEME_COLORS.items():
+            mark = f" {fg('accent2')}custom{RESET}" if key in custom else ""
+            lines.append(f"  {bg(THEME[key])}    {RESET} {key:<8} {DIM}{THEME[key]}  {desc}{RESET}{mark}")
+        lines.append(f"{DIM}  /theme <color> #rrggbb · /theme <color> default · /theme reset{RESET}")
+        out("\n".join(lines) + "\n")
+        return
+    if parts[0] in THEMES and len(parts) == 1:
+        st.config["theme"] = parts[0]
+        message = f"theme: {parts[0]}" + (" (your custom colors are kept; /theme reset clears them)" if custom else "")
+    elif parts == ["reset"]:
+        st.config.pop("colors", None)
+        st.config.pop("theme", None)
+        message = "theme: opencode, default colors"
+    elif parts[0] in THEME_COLORS and len(parts) == 2 and (HEX_RE.match(parts[1]) or parts[1] == "default"):
+        custom = dict(custom)
+        if parts[1] == "default":
+            custom.pop(parts[0], None)
+        else:
+            custom[parts[0]] = parts[1]
+        if custom:
+            st.config["colors"] = custom
+        else:
+            st.config.pop("colors", None)
+        message = f"{parts[0]}: {parts[1]}"
+    else:
+        out(f"{RED}⏺ /theme takes a theme ({', '.join(THEMES)}), reset, or a color and #rrggbb "
+            f"(colors: {', '.join(THEME_COLORS)}){RESET}\n")
+        return
+    try:
+        save_config()
+    except OSError as e:
+        log_error(e)
+    refresh_theme()
+    out(f"{GREEN}⏺ {message}{RESET} {DIM}(new text uses it; earlier lines keep their colors){RESET}\n")
+
+
+def refresh_theme():
+    apply_theme(st.config)
+    if st.app:
+        st.app.style = tui_style()
+        st.app.invalidate()
+
+
+def dropped_paths(data):
+    """Files dragged into the terminal: it pastes their paths as text (quoted or with \\-escaped spaces, or as
+    file:// URLs). Returns the paths, or None when the pasted text isn't only existing absolute paths."""
+    from urllib.parse import unquote, urlparse
+    tokens = []
+    for line in data.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("file://"):
+            tokens += [unquote(urlparse(url).path) for url in line.split()]
+            continue
+        try:
+            tokens += shlex.split(line, posix=os.name != "nt")
+        except ValueError:
+            return None
+    if os.name == "nt":
+        tokens = [t.strip('"') for t in tokens]
+    paths = [Path(os.path.expanduser(t)) for t in tokens]
+    if not paths or len(paths) > 50:
+        return None
+    try:
+        if not all(p.is_absolute() and p.exists() for p in paths):
+            return None
+    except OSError:
+        return None
+    return paths
 
 
 THINK_HELP = {"off": "answers right away: fastest and cheapest", "low": "a little thinking",
@@ -4813,6 +4950,8 @@ async def run_input(text):
             show_help()
         elif word == "/provider":
             await cmd_provider(arg)
+        elif word == "/theme":
+            cmd_theme(arg)
         elif word == "/think":
             await cmd_think(arg)
         elif word == "/update":
@@ -4865,12 +5004,14 @@ async def run_input(text):
             await new_chat()
         elif word.startswith("/") and word[1:] in list_skills():
             out(f"  {DIM}⎿  loaded skill {word[1:]}{RESET}")
-            task = expand_mentions(arg) if arg else f"Run the {word[1:]} skill."
-            await send(load_skill(word[1:]) + "\n\n" + task, display=text)
+            images = []
+            task = expand_mentions(arg, images) if arg else f"Run the {word[1:]} skill."
+            await send(load_skill(word[1:]) + "\n\n" + task, display=text, images=images)
         elif word.startswith("/") and " " not in word[1:] and len(word) > 1 and "/" not in word[1:]:
             out(f"{RED}⏺ unknown command {word}{RESET} {DIM}(/help lists them){RESET}\n")
         else:
-            await send(expand_mentions(text), display=text)
+            images = []
+            await send(expand_mentions(text, images), display=text, images=images)
             if st.turn_errors >= 2 and st.config.get("auto_learn"):
                 out(f"  {DIM}⎿  that took a few tries; learning from it (auto_learn){RESET}")
                 await send(LEARN_PROMPT, display="/learn")
@@ -5045,10 +5186,8 @@ def build_app():
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.layout.menus import CompletionsMenu
     from prompt_toolkit.layout.processors import Processor, Transformation
-    from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import TextArea
 
-    T = THEME
     install_mouse_mode()
 
     class NanoCompleter(Completer):
@@ -5066,6 +5205,15 @@ def build_app():
                 for name, (_, label, desc) in PROVIDERS.items():
                     if name.startswith(typed.lower()):
                         yield Completion(name, start_position=-len(typed), display_meta=f"{label} · {desc}")
+                return
+            if text.startswith("/theme "):
+                typed = text[len("/theme "):]
+                if " " not in typed:
+                    for name in [*THEMES, "reset", *THEME_COLORS]:
+                        if name.startswith(typed.lower()):
+                            meta = "base theme" if name in THEMES else "default colors" if name == "reset" \
+                                else f"{THEME[name]} · {THEME_COLORS[name]}"
+                            yield Completion(name, start_position=-len(typed), display_meta=meta)
                 return
             if text.startswith("/think "):
                 typed = text[len("/think "):]
@@ -5462,6 +5610,18 @@ def build_app():
             st.task.cancel()
         out(f"   {fg('error')}interrupted{RESET}")
 
+    @kb.add(Keys.BracketedPaste, filter=no_dialog)
+    def _(event):
+        """Dropping files on the terminal pastes their paths: they become @mentions (images get attached)."""
+        data = event.data.replace("\r\n", "\n").replace("\r", "\n")
+        paths = dropped_paths(data)
+        if paths:
+            buffer = event.current_buffer
+            before = buffer.document.text_before_cursor
+            lead = " " if before and not before[-1].isspace() else ""
+            data = lead + " ".join(mention(p) for p in paths) + " "
+        event.current_buffer.insert_text(data)
+
     @kb.add("c-c", filter=no_dialog)
     def _(event):
         if busy():
@@ -5648,37 +5808,7 @@ def build_app():
     def _(event):
         close_dialog()
 
-    style = Style.from_dict({
-        "root": f"bg:{T['bg']} fg:{T['text']}",
-        "transcript": f"bg:{T['bg']}",
-        "panel": f"bg:{T['panel']} fg:{T['text']}",
-        "panel.text": f"bg:{T['panel']} fg:{T['text']}",
-        "panel.muted": f"bg:{T['panel']} fg:{T['muted']}",
-        "panel.edge": f"bg:{T['bg']} fg:{T['panel']}",
-        "placeholder": f"fg:{T['faint']}",
-        "mode": f"bg:{T['panel']} fg:{T['accent']} bold",
-        "mode.auto": f"bg:{T['panel']} fg:{T['warning']} bold",
-        "think": f"bg:{T['panel']} fg:{T['think']} bold", "think.off": f"bg:{T['panel']} fg:{T['muted']}",
-        "thinking": f"fg:{T['think']}",
-        "bar": f"bg:{T['bg']} fg:{T['accent']}",
-        "bar.busy": f"bg:{T['bg']} fg:{T['accent2']}",
-        "bar.warning": f"bg:{T['bg']} fg:{T['warning']}",
-        "text": f"fg:{T['text']}", "muted": f"fg:{T['muted']}", "faint": f"fg:{T['faint']}",
-        "accent": f"fg:{T['accent']}", "warning": f"fg:{T['warning']}",
-        "success": f"fg:{T['success']}", "error": f"fg:{T['error']}",
-        "dialog": f"bg:{T['panel2']}",
-        "dialog.title": f"bg:{T['panel2']} fg:{T['text']} bold",
-        "dialog.muted": f"bg:{T['panel2']} fg:{T['muted']}",
-        "dialog.text": f"bg:{T['panel2']} fg:{T['text']}",
-        "dialog.meta": f"fg:{T['muted']}",
-        "dialog.selected": f"bg:{T['accent']} fg:{T['bg']}",
-        "dialog.input": f"bg:{T['panel2']} fg:{T['text']}",
-        "completion-menu": f"bg:{T['panel2']} fg:{T['text']}",
-        "completion-menu.completion.current": f"bg:{T['accent']} fg:{T['bg']}",
-        "completion-menu.meta.completion": f"bg:{T['panel2']} fg:{T['muted']}",
-        "completion-menu.meta.completion.current": f"bg:{T['accent']} fg:{T['bg']}",
-        "scrollbar.background": f"bg:{T['panel2']}", "scrollbar.button": f"bg:{T['border']}",
-    })
+    style = tui_style()
 
     app = Application(
         layout=Layout(
@@ -5710,6 +5840,43 @@ def build_app():
     app.timeoutlen = 0.1
     st.app = app
     return app
+
+
+def tui_style():
+    """prompt_toolkit styles from the current THEME."""
+    from prompt_toolkit.styles import Style
+    T = THEME
+    return Style.from_dict({
+        "root": f"bg:{T['bg']} fg:{T['text']}",
+        "transcript": f"bg:{T['bg']}",
+        "panel": f"bg:{T['panel']} fg:{T['text']}",
+        "panel.text": f"bg:{T['panel']} fg:{T['text']}",
+        "panel.muted": f"bg:{T['panel']} fg:{T['muted']}",
+        "panel.edge": f"bg:{T['bg']} fg:{T['panel']}",
+        "placeholder": f"fg:{T['faint']}",
+        "mode": f"bg:{T['panel']} fg:{T['accent']} bold",
+        "mode.auto": f"bg:{T['panel']} fg:{T['warning']} bold",
+        "think": f"bg:{T['panel']} fg:{T['think']} bold", "think.off": f"bg:{T['panel']} fg:{T['muted']}",
+        "thinking": f"fg:{T['think']}",
+        "bar": f"bg:{T['bg']} fg:{T['accent']}",
+        "bar.busy": f"bg:{T['bg']} fg:{T['accent2']}",
+        "bar.warning": f"bg:{T['bg']} fg:{T['warning']}",
+        "text": f"fg:{T['text']}", "muted": f"fg:{T['muted']}", "faint": f"fg:{T['faint']}",
+        "accent": f"fg:{T['accent']}", "warning": f"fg:{T['warning']}",
+        "success": f"fg:{T['success']}", "error": f"fg:{T['error']}",
+        "dialog": f"bg:{T['panel2']}",
+        "dialog.title": f"bg:{T['panel2']} fg:{T['text']} bold",
+        "dialog.muted": f"bg:{T['panel2']} fg:{T['muted']}",
+        "dialog.text": f"bg:{T['panel2']} fg:{T['text']}",
+        "dialog.meta": f"fg:{T['muted']}",
+        "dialog.selected": f"bg:{T['accent']} fg:{T['bg']}",
+        "dialog.input": f"bg:{T['panel2']} fg:{T['text']}",
+        "completion-menu": f"bg:{T['panel2']} fg:{T['text']}",
+        "completion-menu.completion.current": f"bg:{T['accent']} fg:{T['bg']}",
+        "completion-menu.meta.completion": f"bg:{T['panel2']} fg:{T['muted']}",
+        "completion-menu.meta.completion.current": f"bg:{T['accent']} fg:{T['bg']}",
+        "scrollbar.background": f"bg:{T['panel2']}", "scrollbar.button": f"bg:{T['border']}",
+    })
 
 
 def color_depth():
@@ -5876,6 +6043,7 @@ def apply_config(provider=None):
     st.provider, st.backend = provider, PROVIDERS[provider][0]
     st.model = os.environ.get("MODEL") or st.config.get("models", {}).get(provider) or DEFAULT_MODELS.get(provider)
     st.auto_approve = st.config.get("permissions") == "auto"
+    apply_theme(st.config)
     if st.backend == "sdk" and sdk is None:
         return "claude-agent-sdk isn't installed. Reinstall nanocode, or pick another provider: nanocode setup"
     if st.backend == "api":

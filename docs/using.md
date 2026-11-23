@@ -15,6 +15,7 @@ The cost is OpenRouter's real price, "free (local)" on Ollama, and on the Claude
 | `/provider [name]` | List providers, or switch |
 | `/model [name]` | List models, or switch |
 | `/think [level]` | `off`, `low`, `medium` (default), `high` |
+| `/theme` | Colors: list them, `/theme opencode\|nanocode`, `/theme <color> #rrggbb`, `/theme reset` |
 | `/resume [n]` | Continue a saved chat (every chat is saved per project) |
 | `/recap` | This session: files changed, commands run, cost, and what's next |
 | `/compact` | Summarize a long chat to free context |
@@ -33,7 +34,7 @@ The cost is OpenRouter's real price, "free (local)" on Ollama, and on the Claude
 | `/c` (`/new`, `/clear`) | New chat |
 | `/q` (`/exit`, `/quit`) | Quit |
 | `# note` | Save a note to project memory |
-| `@path` | Attach a file |
+| `@path` | Attach a file; images are sent as images. `@"my file.png"` for names with spaces |
 | `/<skill> [task]` | Run a skill, e.g. `/review app.py` |
 
 ## The interface
@@ -44,6 +45,23 @@ nanocode opens on a start screen with the logo and the prompt in the middle. Whe
 - **Prompt panel.** At the bottom: mode (Ask or Auto), model, provider and thinking level. Below it the folder and git branch, context used and cost, and while a reply runs, a spinner and `esc interrupt`.
 - **Pinned message.** While you scroll through a long answer, your message stays pinned at the top. Click it to jump back.
 - **Command palette.** `ctrl+p` lists every command and action, searchable.
+
+## Drag and drop
+
+Drag files from Finder or Explorer onto the terminal: they're added to your message as `@path` mentions. When you send it, text files are attached, and images (PNG, JPEG, WebP, GIF) are sent as images, so you can drop in a screenshot and ask about it. The model has to see images: Claude, a vision model on OpenRouter, or one in Ollama (`qwen2.5vl`, `llava`, `gemma3`). Images are kept in `.nanocode/images/` so a resumed chat still has them.
+
+## Theme
+
+The default theme is OpenCode's dark one (its background, panels and text) with nanocode's blue and violet accents. `nanocode` is the older, grayer theme. `/theme` lists every color with a swatch, and you can change any of them:
+
+```
+/theme nanocode              pick a base theme
+/theme accent #ff79c6        change one color (bar by your messages, selection, Ask)
+/theme panel default         back to the theme's color
+/theme reset                 opencode with no custom colors
+```
+
+Colors: `bg`, `panel` (your messages and the input), `panel2` (menus, dialogs), `border`, `text`, `muted`, `faint`, `accent`, `accent2`, `pink`, `cyan`, `success`, `error`, `warning`, `think`. They're saved in the config as `"theme"` and `"colors"`. A change shows right away; lines already in the chat keep their colors.
 
 ## Keys
 

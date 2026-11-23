@@ -996,7 +996,7 @@ def test_transcript_rows_wrap_and_select():
     nc.st.selection = {"anchor": (1, 28), "head": (2, 1), "dragging": False}
     assert nc.selected_text() == "ij\nbo"
     rows = nc.transcript_rows(10, 10)
-    assert any(nc.SELECTED_STYLE in style for style, _ in rows[3])
+    assert any(nc.selected_style() in style for style, _ in rows[3])
     nc.reset_view()
 
 

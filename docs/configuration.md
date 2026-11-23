@@ -10,6 +10,8 @@ Settings live in `~/.nanocode/config.json` (readable only by you). Most are set 
 | `models` | `{"claude": "...", "openrouter": "...", "ollama": "..."}` | `claude-opus-5-5`, `openrouter/auto-code` | Chosen model per provider |
 | `permissions` | `ask`, `auto` | `ask` | Ask before edits and commands, or not |
 | `think` | `off`, `low`, `medium`, `high` | `medium` | Thinking level ([more](getting-started.md#thinking)) |
+| `theme` | `opencode`, `nanocode` | `opencode` | Base colors ([more](using.md#theme)) |
+| `colors` | `{"accent": "#ff79c6", ...}` | | Your own colors on top of the theme (`/theme`) |
 | `openrouter_api_key` | string | | OpenRouter key (or `OPENROUTER_API_KEY`) |
 | `ollama_url` | URL | `http://localhost:11434` | Ollama server (or `OLLAMA_HOST`) |
 | `ollama_num_ctx` | number | 8k, 16k or 32k from your RAM | Ollama context size |
@@ -62,4 +64,4 @@ Example:
 | `.nanocode/shells/` | Background shell output |
 | `.nanocode/skills/` | Project skills (can be committed) |
 | `.nanocode/api.json` | Stored API responses (`previous_response_id`) |
-| `.nanocode/images/` | Images sent through the API, used by the chats that have them |
+| `.nanocode/images/` | Images you attached (or sent through the API), used by the chats that have them |
