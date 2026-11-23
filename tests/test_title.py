@@ -49,7 +49,7 @@ def setup(monkeypatch, terminal=None):
 def test_tab_title_follows_the_chat(sandbox, monkeypatch):
     out = setup(monkeypatch)
     nc.update_title()
-    assert out.data == f"\x1b]0;nanocode · {Path.cwd().name}\x07"
+    assert out.data == "\x1b]0;nanocode\x07"                 # start screen: just "nanocode"
     nc.st.session["title"] = "Fix the login bug"
     nc.st.task = Task()
     nc.update_title()
@@ -62,8 +62,9 @@ def test_tab_title_follows_the_chat(sandbox, monkeypatch):
     nc.st.pending_permission, nc.st.task = None, Task(done=True)
     nc.st.unseen = True
     assert nc.terminal_title() == "✓ Fix the login bug"
-    nc.st.session["title"] = "x" * 80
-    assert len(nc.terminal_title()) == 2 + 48
+    nc.st.session["title"] = "Refactor the payment module and add tests"
+    assert nc.terminal_title() == "✓ Refactor the payment module..."   # 30 characters at most
+    assert len(nc.terminal_title()) == 2 + 30
     nc.st.config["terminal_title"] = False
     out.data = ""
     nc.st.shown_title = None

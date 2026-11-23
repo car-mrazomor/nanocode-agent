@@ -48,7 +48,7 @@ nanocode opens on a start screen with the logo and the prompt in the middle. Whe
 
 ## Tab title and notifications
 
-The terminal tab is named after the chat (`nanocode · <folder>` before the first message), with a mark for what's happening:
+The terminal tab is named after the chat (`nanocode` before the first message; long titles are cut to 30 characters with `...`), with a mark for what's happening:
 
 | Title | Meaning |
 |---|---|
@@ -69,7 +69,7 @@ Like Claude Code, attachments show up in the input as chips:
 
 - **Images**: drag them onto the terminal, or paste a screenshot with **Ctrl+V** (**Alt+V** on Windows). Each becomes `[Image #1]`, `[Image #2]`, ... and is sent with the message. The chip stays in your text, so you can write "what's different between [Image #1] and [Image #2]?".
 - **Other files**: dropped files become `@path` mentions, and their content is attached when you send.
-- **Long pastes**: more than 800 characters or 3 lines collapse to `[Pasted text #1 +120 lines]`, and the full text is sent.
+- **Long pastes**: more than 800 characters or 3 lines collapse to `[Pasted text #1 +120 lines]`. Paste the same text again to see it in full and edit it. The full text is sent, and the chat shows it.
 - **Backspace** right after a chip removes the whole chip.
 
 On macOS, Ctrl+V takes a screenshot (Cmd+Ctrl+Shift+4) or an image file copied in Finder. On Linux it needs `wl-paste` (Wayland) or `xclip`. PNG, JPEG, WebP and GIF, up to 20 MB.

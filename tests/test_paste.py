@@ -59,3 +59,34 @@ def test_clipboard_image_on_macos(sandbox, monkeypatch):
     Result.stdout = b""
     Result.returncode = 1
     assert nc.clipboard_image() is None
+
+
+def test_paste_again_shows_the_text_to_edit(sandbox, monkeypatch):
+    from prompt_toolkit.buffer import Buffer
+    monkeypatch.setattr(nc, "show_toast", lambda *a, **k: None)
+    long = "def f():\n    return 1\n\nprint(f())\n"
+    buffer = Buffer(multiline=True)
+    buffer.insert_text("explain")
+    nc.paste_into(buffer, long)
+    assert buffer.text == "explain [Pasted text #1 +5 lines]"
+    buffer.insert_text(" please")
+    nc.paste_into(buffer, long)                                   # same text again: shown in full
+    assert buffer.text == "explain " + long + " please" and buffer.document.text_before_cursor.endswith(long)
+    nc.paste_into(buffer, long)                                   # a third paste collapses again
+    assert buffer.text.endswith(long + "[Pasted text #2 +5 lines] please")
+    nc.paste_into(buffer, "short")
+    assert buffer.text.endswith("lines]short please")
+
+
+def test_transcript_shows_the_pasted_text(sandbox, monkeypatch):
+    chip = nc.add_text_chip("line one\nline two\nline three\nline four")
+
+    def handler(req):
+        return sse([{"choices": [{"delta": {"content": "ok"}}]},
+                    {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}])
+
+    mock_http(monkeypatch, handler)
+    nc.st.backend, nc.st.model, nc.st.openrouter_key = "api", "z-ai/glm-5.3", "k"
+    asyncio.run(nc.run_input(f"fix {chip}"))
+    screen = nc.ANSI_RE.sub("", nc.st.output)
+    assert "line four" in screen and "[Pasted text" not in screen

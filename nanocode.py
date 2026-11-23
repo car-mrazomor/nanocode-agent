@@ -49,7 +49,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -516,6 +516,7 @@ class State:
         self.translate_keys = True
         self.attachments = {}  # "[Image #1]" -> ("image", saved name), "[Pasted text #1 +40 lines]" -> ("text", text)
         self.chip_counts = {"image": 0, "text": 0}
+        self.last_paste = None  # (text, its chip): pasting the same text again expands the chip
         self.always_allow = set()
         self.todos = []  # the agent's current plan (todo tool)
         self.permission_lock = None  # one permission question at a time (sub-agents run in parallel)
@@ -4810,6 +4811,38 @@ def clipboard_image():
     return "image/png", data
 
 
+def insert_chip(buffer, text):
+    before = buffer.document.text_before_cursor
+    buffer.insert_text((" " if before and not before[-1].isspace() else "") + text)
+
+
+def paste_into(buffer, data):
+    """A paste into the input: dropped files (the terminal pastes their paths), long text (a chip; pasting
+    the same text again shows it in full, to edit), or, when the paste is empty because the clipboard holds
+    a picture, the clipboard image."""
+    data = data.replace("\r\n", "\n").replace("\r", "\n")
+    if not data.strip():
+        image = clipboard_image()
+        if image:
+            insert_chip(buffer, add_image_chip(image[1], image[0]) + " ")
+        return
+    last = st.last_paste
+    if last and data == last[0] and last[1] in buffer.text:
+        at = buffer.text.index(last[1])
+        buffer.text = buffer.text[:at] + data + buffer.text[at + len(last[1]):]
+        buffer.cursor_position = at + len(data)
+        st.last_paste = None
+        return
+    text = pasted(data)
+    if text is data:
+        buffer.insert_text(data)
+        return
+    insert_chip(buffer, text)
+    if text.startswith("[Pasted text"):
+        st.last_paste = (data, text)
+        show_toast("paste again to see and edit the text", 4)
+
+
 def dropped_paths(data):
     """Files dragged into the terminal: it pastes their paths as text (quoted or with \\-escaped spaces, or as
     file:// URLs). Returns the paths, or None when the pasted text isn't only existing absolute paths."""
@@ -5110,12 +5143,13 @@ async def run_input(text):
             out(f"  {DIM}⎿  loaded skill {word[1:]}{RESET}")
             images = []
             task = expand_mentions(expand_chips(arg, images), images) if arg else f"Run the {word[1:]} skill."
-            await send(load_skill(word[1:]) + "\n\n" + task, display=text, images=images)
+            await send(load_skill(word[1:]) + "\n\n" + task, display=expand_chips(text, []), images=images)
         elif word.startswith("/") and " " not in word[1:] and len(word) > 1 and "/" not in word[1:]:
             out(f"{RED}⏺ unknown command {word}{RESET} {DIM}(/help lists them){RESET}\n")
         else:
             images = []
-            await send(expand_mentions(expand_chips(text, images), images), display=text, images=images)
+            await send(expand_mentions(expand_chips(text, images), images), display=expand_chips(text, []),
+                       images=images)
             if st.turn_errors >= 2 and st.config.get("auto_learn"):
                 out(f"  {DIM}⎿  that took a few tries; learning from it (auto_learn){RESET}")
                 await send(LEARN_PROMPT, display="/learn")
@@ -5207,6 +5241,7 @@ def start_input(text):
 FOCUS_ON, FOCUS_OFF = "\x1b[?1004h", "\x1b[?1004l"
 TITLE_PUSH = "\x1b[22;0t"                 # save the terminal's own title...
 TITLE_RESET = "\x1b]0;\x07\x1b[23;0t"      # ...and give it back on exit
+TITLE_MAX = 30
 NOTIFY_AFTER = 15  # seconds: when the terminal doesn't report focus, only longer turns notify
 
 
@@ -5215,8 +5250,8 @@ def titles_enabled():
 
 
 def terminal_title():
-    name = CONTROL_RE.sub("", st.session.get("title") or "") or f"nanocode · {Path.cwd().name}"
-    name = name if len(name) <= 48 else name[:47] + "…"
+    name = " ".join(CONTROL_RE.sub("", st.session.get("title") or "").split()) or "nanocode"
+    name = name if len(name) <= TITLE_MAX else name[:TITLE_MAX - 3].rstrip() + "..."
     if st.pending_permission is not None:
         return "△ " + name
     if st.task and not st.task.done() and not st.home:
@@ -5814,25 +5849,9 @@ def build_app():
             st.task.cancel()
         out(f"   {fg('error')}interrupted{RESET}")
 
-    def insert_chip(buffer, text):
-        before = buffer.document.text_before_cursor
-        buffer.insert_text((" " if before and not before[-1].isspace() else "") + text)
-
     @kb.add(Keys.BracketedPaste, filter=no_dialog)
     def _(event):
-        """A paste: dropped files (the terminal pastes their paths), long text, or (when the paste is empty
-        because the clipboard holds a picture) the clipboard image."""
-        data = event.data.replace("\r\n", "\n").replace("\r", "\n")
-        if not data.strip():
-            image = clipboard_image()
-            if image:
-                insert_chip(event.current_buffer, add_image_chip(image[1], image[0]) + " ")
-            return
-        text = pasted(data)
-        if text is data:
-            event.current_buffer.insert_text(data)
-        else:
-            insert_chip(event.current_buffer, text)
+        paste_into(event.current_buffer, event.data)
 
     @kb.add("c-v", filter=no_dialog)
     @kb.add("escape", "v", filter=no_dialog)
