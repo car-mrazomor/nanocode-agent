@@ -228,14 +228,14 @@ def test_search_fork_and_export_a_chat(sandbox, monkeypatch):
     with_server(test)
 
 
-def test_a_forked_claude_chat_sends_the_earlier_screen_with_its_first_message(sandbox):
+def test_a_forked_claude_chat_gets_the_chat_so_far_with_its_first_message(sandbox):
     nc.st.backend = "sdk"
     nc.sessions_dir().mkdir(parents=True, exist_ok=True)
     (nc.sessions_dir() / "orig.json").write_text(json.dumps({"id": "orig", "title": "t", "backend": "sdk",
                                                               "messages": [], "screen": "> hi\nearlier answer"}))
-    notes = {}
-    fork = server.api_fork("orig", notes)
-    assert notes == {fork["id"]: "> hi\nearlier answer"}
+    fork = server.api_fork("orig")
+    data = json.loads((nc.sessions_dir() / f"{fork['id']}.json").read_text())
+    assert data["sdk_session_id"] is None and "earlier answer" in data["handoff"]
 
 
 # --- Chat history for every provider, a reply that's still running, files ---

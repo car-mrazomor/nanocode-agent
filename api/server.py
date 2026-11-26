@@ -128,7 +128,6 @@ class ApiServer:
         self.lock = asyncio.Lock()
         self.runs = {}
         self.responses, self.conversations = self.load()
-        self.fork_notes = {}  # forked Claude subscription chat -> the earlier chat, sent with its first message
 
     # Stored responses (previous_response_id) survive restarts: .nanocode/api.json in the project
     def store_path(self):
@@ -184,10 +183,6 @@ class ApiServer:
                 run.emit("run.started", {"session_id": run.session_id, "model": nc.st.model})
                 text = run.prompt if not instructions else \
                     f"Extra instructions from the app calling nanocode's API:\n{instructions}\n\n---\n\n{run.prompt}"
-                note = None if run.command else self.fork_notes.pop(run.session_id, None)
-                if note:
-                    text = ("This chat continues an earlier conversation (a fork of it). This is what was on screen "
-                            f"there, most recent last:\n\n<earlier_chat>\n{note}\n</earlier_chat>\n\n---\n\n{text}")
                 token = nc.EVENTS.set(run.emit)
                 try:
                     nc.st.last_error = None
@@ -322,7 +317,7 @@ class ApiServer:
             return await write_json(writer, 200, api_export(parts[2], query.get("format", "md")))
         if method == "POST" and parts[:2] == ["v1", "sessions"] and parts[3:] == ["fork"]:
             async with self.lock:                    # not while a turn is writing that chat
-                fork = api_fork(parts[2], self.fork_notes)
+                fork = api_fork(parts[2])
             return await write_json(writer, 200, fork)
         if method == "GET" and path == "/v1/search":
             return await write_json(writer, 200, await api_search(query.get("q", "")))
@@ -530,8 +525,6 @@ async def api_switch_session(session_id):
             match = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
         except (OSError, json.JSONDecodeError):
             match = None
-        if match and match.get("backend") != nc.st.backend:
-            raise ApiError(400, f"session '{session_id}' was made with another provider ({match.get('backend')})")
     if match:
         await nc.open_session(match)
     else:
@@ -673,14 +666,20 @@ def api_export(session_id, kind):
     return {"filename": f"{share.slug(data.get('title'))}.{kind}", "content": content}
 
 
-def api_fork(session_id, fork_notes):
-    """A copy of a chat under a new id, to try another direction (like /fork)."""
+def api_fork(session_id):
+    """A copy of a chat under a new id, to try another direction (like /fork). A Claude chat's copy starts a new
+    Claude conversation, which gets the chat so far with its first message."""
     from nanokit import sessions
     data = read_session_file(session_id)
     title = data.get("title") or "chat"
     now = time.time()
     fork = {**data, "id": nc.make_session_id(), "title": nc.short_title(f"fork of {title}"), "created": now,
             "updated": now, "sdk_session_id": None, "usage": {"input": 0, "output": 0, "cost": 0.0}}
+    if data.get("backend") == "sdk":
+        turns = nc.saved_turns(data)
+        fork["turns"] = turns
+        fork["handoff"] = nc.history_note(turns) if turns else \
+            sessions.screen_text(data.get("screen") or "")[-sessions.FORK_NOTE_LIMIT:]
     path = nc.sessions_dir() / f"{fork['id']}.json"
     try:
         tmp = path.with_suffix(".tmp")
@@ -688,8 +687,6 @@ def api_fork(session_id, fork_notes):
         tmp.replace(path)
     except OSError as e:
         raise ApiError(500, f"can't save the fork: {e}", "server_error")
-    if data.get("backend") == "sdk":   # Claude Code's conversation can't be copied: its next message gets the screen
-        fork_notes[fork["id"]] = sessions.screen_text(data.get("screen") or "")[-sessions.FORK_NOTE_LIMIT:]
     return {"object": "nanocode.session", "id": fork["id"], "title": fork["title"]}
 
 

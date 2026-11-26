@@ -1,6 +1,14 @@
 # Your chats: search, fork, export, share, stats
 
-Every chat is saved in the project it was started in (`.nanocode/sessions/`). These commands work across them.
+Every chat is saved in the project it was started in (`.nanocode/sessions/`), with every message, reply and tool call, whatever provider or model you use. These commands work across them.
+
+## Any chat, any provider
+
+`/resume` lists every chat of this folder, whichever provider or model made it (in the terminal, the web app or over the API), and shows its whole history.
+
+- **A chat continues with whatever you use now.** API providers (OpenRouter, Ollama, OpenAI, Gemini…) share the same messages, so the model sees the whole chat. The Claude subscription can't load a conversation it didn't have: it gets the chat so far with your next message, once.
+- **Switching provider mid-chat** (`/provider <name>`) keeps the chat going the same way, instead of starting a new one.
+- **Chats on the Claude subscription** keep nanocode's own copy of what was said, like any other provider. Older ones (from before that copy) are read from Claude Code's own transcript, as long as Claude Code still has it (it deletes them after 30 days by default).
 
 ## Search: `/search`
 
@@ -13,7 +21,7 @@ Results show the chat's title, project, date and a snippet. A chat from another 
 
 The model can search too, with the read-only `session_search` tool: ask "what did we decide about the cache last week?" and it looks it up. It can also read a whole earlier chat by its id. It only looks in this project's chats; with `all_projects` it can look in every project's, but asks you first (the permission name is `session_search`). To let it without asking, set `"session_search_all_projects": true` in the config.
 
-How it works: an SQLite index at `~/.nanocode/search.db` holds the titles, your messages, the replies and the tool calls (not tool output). It uses SQLite's full-text search (FTS5) when your Python has it, and a simple word match otherwise. It's updated after every turn and before each search, reading only the chats that changed. Chats from the Claude subscription have no saved messages (Claude Code keeps them), so their saved screen is indexed instead. Projects are added as you use nanocode in them; a deleted folder drops out of the index.
+How it works: an SQLite index at `~/.nanocode/search.db` holds the titles, your messages, the replies and the tool calls (not tool output). It uses SQLite's full-text search (FTS5) when your Python has it, and a simple word match otherwise. It's updated after every turn and before each search, reading only the chats that changed. Chats from the Claude subscription are indexed from nanocode's own copy of what was said (older ones from their saved screen). Projects are added as you use nanocode in them; a deleted folder drops out of the index.
 
 ## Fork: `/fork`
 

@@ -67,33 +67,10 @@ def static(path):
 
 
 def session_turns(data):
-    """A saved chat as the page shows it: [{role: user|assistant|tool|tool_result|screen, ...}]."""
-    from nanokit.sessions import content_text, screen_text
-    turns = []
-    for m in data.get("messages") or []:
-        role = m.get("role")
-        text = content_text(m.get("content"))
-        if role == "user" and text:
-            turns.append({"role": "user", "text": text})
-        elif role == "assistant":
-            if text.strip():
-                turns.append({"role": "assistant", "text": text})
-            for call in m.get("tool_calls") or []:
-                fn = call.get("function") or {}
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except ValueError:
-                    args = {}
-                turns.append({"role": "tool", "id": call.get("id"), "name": fn.get("name"), "arguments": args})
-        elif role == "tool":
-            turns.append({"role": "tool_result", "id": m.get("tool_call_id"), "text": nc.cap(text, 20_000),
-                          "is_error": text.startswith("error:")})
-    if not turns and data.get("backend") == "sdk":
-        # Chats on the Claude subscription: nanocode's own copy ("turns", kept since 0.9.3), or Claude Code's
-        # transcript for older chats that started before that copy (whichever holds more of the chat).
-        own = [t for t in data.get("turns") or [] if isinstance(t, dict) and t.get("role")]
-        claude = claude_turns(data["sdk_session_id"]) if data.get("sdk_session_id") else []
-        turns = claude if len(claude) > len(own) else own
+    """A saved chat as the page shows it: [{role: user|assistant|tool|tool_result|screen, ...}], whatever
+    provider made it; a chat with nothing but a terminal screen shows that."""
+    from nanokit.sessions import screen_text
+    turns = nc.saved_turns(data)
     if not turns and data.get("screen"):
         turns.append({"role": "screen", "text": screen_text(data["screen"])})
     return turns
@@ -135,70 +112,4 @@ def web_cli(argv):
         return 0
 
 
-# --- Chats on the Claude subscription: read from Claude Code's own transcript ---
-
-def claude_transcript(sdk_session_id):
-    """The .jsonl file Claude Code keeps for a conversation, or None."""
-    import re
-    if not re.fullmatch(r"[A-Za-z0-9-]{8,80}", sdk_session_id or ""):
-        return None
-    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
-    exact = base / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd()) / f"{sdk_session_id}.jsonl"
-    if exact.is_file():
-        return exact
-    return next(iter(base.glob(f"*/{sdk_session_id}.jsonl")), None)
-
-
-def claude_turns(sdk_session_id):
-    """The turns of a Claude Code conversation, in the same shape as session_turns: your messages, replies, tool
-    calls and their results. Sub-agents' work and Claude Code's own notes are left out."""
-    path = claude_transcript(sdk_session_id)
-    if path is None:
-        return []
-    turns = []
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-    for line in lines:
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if entry.get("type") not in ("user", "assistant") or entry.get("isSidechain") or entry.get("isMeta") \
-                or entry.get("isCompactSummary"):
-            continue
-        message = entry.get("message") or {}
-        content = message.get("content")
-        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content or []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            kind = block.get("type")
-            if kind == "text":
-                text = (block.get("text") or "").strip()
-                if not text or text.startswith(("<system-reminder>", "<command-", "<local-command")):
-                    continue
-                role = "user" if message.get("role") == "user" else "assistant"
-                if role == "assistant" and turns and turns[-1]["role"] == "assistant":
-                    turns[-1]["text"] += "\n\n" + text
-                else:
-                    turns.append({"role": role, "text": text})
-            elif kind == "image" and message.get("role") == "user":
-                if turns and turns[-1]["role"] == "user":
-                    turns[-1]["text"] += "\n[image]"
-                else:
-                    turns.append({"role": "user", "text": "[image]"})
-            elif kind == "tool_use":
-                name = str(block.get("name") or "tool")
-                name = name[len("mcp__nano__"):] if name.startswith("mcp__nano__") else name   # nanocode's own tools
-                turns.append({"role": "tool", "id": block.get("id"), "name": name,
-                              "arguments": block.get("input") if isinstance(block.get("input"), dict) else {}})
-            elif kind == "tool_result":
-                result = block.get("content")
-                if isinstance(result, list):
-                    result = "\n".join(p.get("text") or "" for p in result if isinstance(p, dict))
-                turns.append({"role": "tool_result", "id": block.get("tool_use_id"), "text": nc.cap(str(result or ""), 20_000),
-                              "is_error": bool(block.get("is_error"))})
-    return turns
-
+claude_turns = nc.claude_turns          # older name, kept for callers

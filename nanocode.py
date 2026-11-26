@@ -3810,7 +3810,7 @@ async def recap():
 
 # --- Sessions: .nanocode/sessions/<id>.json ---
 
-SESSION_KEYS = ("id", "title", "created", "sdk_session_id", "turns")
+SESSION_KEYS = ("id", "title", "created", "sdk_session_id", "turns", "handoff")
 
 
 def make_session_id():
@@ -3854,7 +3854,7 @@ def list_sessions(limit=20):
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if data.get("backend") == st.backend and data.get("title"):
+            if data.get("title"):                 # every chat, whatever provider or model it was made with
                 sessions.append(data)
     return sorted(sessions, key=lambda s: s.get("updated", 0), reverse=True)[:limit]
 
@@ -3883,9 +3883,6 @@ async def resume_session(arg):
     if not match:
         out(f"{RED}⏺ no saved chat '{arg}' (try /resume to list them){RESET}\n")
         return
-    if st.backend == "sdk" and not match.get("sdk_session_id"):
-        out(f"{RED}⏺ that chat has no Claude session id, so it can't be resumed{RESET}\n")
-        return
     here = st.current_tab()
     other = next((t for t in st.tabs if t is not here and (t.session or {}).get("id") == match.get("id")), None)
     if other is not None:                      # open in another tab: go there (two copies would overwrite each other)
@@ -3909,22 +3906,238 @@ async def settle_connection():
 
 
 async def open_session(match):
-    """Makes a saved chat the current one: its messages (or Claude session), usage and screen."""
+    """Makes a saved chat the current one: its messages (or Claude session), usage and screen. A chat made with
+    another provider continues here too: API providers share the messages; to or from the Claude subscription,
+    the chat so far is converted (and Claude gets it with your next message)."""
     await settle_connection()
-    st.model = match.get("model") or st.model
+    same = match.get("backend") in (None, st.backend)
+    if same:
+        st.model = match.get("model") or st.model      # another provider's model wouldn't work here
+    st.session = {k: match.get(k) for k in SESSION_KEYS}
     if st.backend == "sdk":
+        resume = match.get("sdk_session_id") if same else None
+        if not resume:                                 # Claude has never seen this chat (or not all of it)
+            turns = saved_turns(match)
+            st.session.update(turns=turns, sdk_session_id=None,
+                              handoff=history_note(turns) if turns else match.get("handoff"))
         if st.client:
             await st.client.disconnect()
-        st.client = await make_client(resume=match.get("sdk_session_id"))
+        st.client = await make_client(resume=resume)
     else:
-        st.messages[:] = match.get("messages") or []
-    st.session = {k: match.get(k) for k in SESSION_KEYS}
+        st.messages[:] = match.get("messages") or turns_to_messages(saved_turns(match))
+        if match.get("backend") == "sdk":              # from now on the messages hold it
+            st.session.update(turns=None, sdk_session_id=None, handoff=None)
     st.usage.update(input=0, output=0, cost=0.0)
     st.usage.update({k: v for k, v in (match.get("usage") or {}).items() if k in st.usage})
     st.activity = [tuple(a) for a in match.get("activity") or []]
     st.changed = {k: list(v) for k, v in (match.get("changed") or {}).items()}
-    reset_view(match.get("screen", "") if not st.headless else "")
+    if st.headless:
+        reset_view("")
+    else:
+        turns = saved_turns(match)
+        screen = match.get("screen") or ""
+        asked = sum(t.get("role") == "user" for t in turns)
+        if screen and screen.count(USER_MARK) >= 3 * asked:   # the screen shows every message: keep its look
+            reset_view(screen)
+        else:                                  # made from the web app or the API, or only "Resumed" notes: draw it
+            reset_view("")
+            replay_turns(turns)
     st.trim_notice = False
+
+
+# --- Chats in one shape, whatever made them ---
+# A chat on an API provider keeps OpenAI-style messages; on the Claude subscription, Claude Code holds the
+# conversation and nanocode keeps "turns". Both read as turns: {role: user|assistant|tool|tool_result, ...}.
+
+def part_text(content):
+    """Text of a message's content: a string, or a list of parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(p.get("text") or "" for p in content if isinstance(p, dict) and p.get("type") in
+                         ("text", "input_text", "output_text"))
+    return ""
+
+
+def messages_to_turns(messages):
+    turns = []
+    for m in messages or []:
+        role = m.get("role")
+        text = part_text(m.get("content"))
+        if role == "user" and text:
+            turns.append({"role": "user", "text": text})
+        elif role == "assistant":
+            if text.strip():
+                turns.append({"role": "assistant", "text": text})
+            for call in m.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                turns.append({"role": "tool", "id": call.get("id"), "name": fn.get("name"), "arguments": args})
+        elif role == "tool":
+            turns.append({"role": "tool_result", "id": m.get("tool_call_id"), "text": cap(text, 20_000),
+                          "is_error": text.startswith("error:")})
+    return turns
+
+
+def saved_turns(data):
+    """What was said in a saved chat, as turns: its messages, nanocode's own copy of a Claude chat, or (for an
+    older Claude chat) Claude Code's transcript, whichever holds the most."""
+    if data.get("messages"):
+        return messages_to_turns(data["messages"])
+    own = [t for t in data.get("turns") or [] if isinstance(t, dict) and t.get("role")]
+    claude = claude_turns(data["sdk_session_id"]) if data.get("sdk_session_id") else []
+    return claude if len(claude) > len(own) else own
+
+
+def turns_to_messages(turns):
+    """Turns as OpenAI-style messages, so an API provider can continue the chat (every tool call gets a result)."""
+    messages, pending = [], {}
+    for t in turns:
+        role = t.get("role")
+        if role in ("user", "assistant") and pending:
+            for call_id in list(pending):
+                messages.append({"role": "tool", "tool_call_id": call_id, "content": "(no result)"})
+            pending.clear()
+        if role == "user":
+            messages.append({"role": "user", "content": t.get("text") or ""})
+        elif role == "assistant":
+            messages.append({"role": "assistant", "content": t.get("text") or ""})
+        elif role == "tool":
+            call_id = t.get("id") or "call_" + os.urandom(6).hex()
+            if not messages or messages[-1]["role"] != "assistant":
+                messages.append({"role": "assistant", "content": ""})
+            messages[-1].setdefault("tool_calls", []).append({"id": call_id, "type": "function", "function": {
+                "name": t.get("name") or "tool", "arguments": json.dumps(t.get("arguments") or {})}})
+            pending[call_id] = True
+        elif role == "tool_result" and t.get("id") in pending:
+            pending.pop(t["id"])
+            messages.append({"role": "tool", "tool_call_id": t["id"], "content": t.get("text") or ""})
+    for call_id in pending:
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": "(no result)"})
+    return messages
+
+
+HISTORY_NOTE_LIMIT = 60_000
+
+
+def history_note(turns):
+    """The chat so far as text, for a model that hasn't seen it (Claude Code can't load another conversation)."""
+    lines = []
+    for t in turns:
+        role = t.get("role")
+        if role == "user":
+            lines.append(f"User: {t.get('text')}")
+        elif role == "assistant":
+            lines.append(f"Assistant: {t.get('text')}")
+        elif role == "tool":
+            lines.append(f"[tool {t.get('name')} {json.dumps(t.get('arguments') or {})[:300]}]")
+        elif role == "tool_result":
+            text = str(t.get("text") or "")
+            lines.append(f"[result{' (error)' if t.get('is_error') else ''}: {text[:1500]}"
+                         f"{'…' if len(text) > 1500 else ''}]")
+    return "\n\n".join(lines)[-HISTORY_NOTE_LIMIT:]
+
+
+def with_handoff(text):
+    """A message to Claude in a chat it hasn't seen yet: the chat so far comes with it, once."""
+    note = st.session.get("handoff")
+    if not note:
+        return text
+    st.session["handoff"] = None
+    return ("This chat continues an earlier conversation (with another model, or a copy of one). This is what was "
+            f"said there, most recent last:\n\n<earlier_chat>\n{note}\n</earlier_chat>\n\n---\n\n{text}")
+
+
+FILE_BLOCK_RE = re.compile(r'\n*<file path="([^"]*)"[^>]*>[\s\S]*?</file>')
+
+
+def replay_turns(turns):
+    """Draws a chat that has no saved screen (made from the web app or the API) as the terminal would have."""
+    try:
+        for t in turns:
+            role = t.get("role")
+            if role == "user":
+                text = FILE_BLOCK_RE.sub(lambda m: f"\n📎 {os.path.basename(m.group(1))}", t.get("text") or "").strip()
+                out(user_block(text))
+                out()
+            elif role == "assistant":
+                out(render_markdown(t.get("text") or ""))
+            elif role == "tool":
+                show_tool_call(t.get("name") or "tool", t.get("arguments") if isinstance(t.get("arguments"), dict) else {})
+            elif role == "tool_result":
+                show_tool_result(str(t.get("text") or ""), bool(t.get("is_error")))
+    except Exception as e:                     # an odd old chat shouldn't stop it from opening
+        log_error(e)
+
+
+# --- Chats on the Claude subscription: Claude Code's own transcript (for chats older than nanocode's copy) ---
+
+def claude_transcript(sdk_session_id):
+    """The .jsonl file Claude Code keeps for a conversation, or None."""
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,80}", sdk_session_id or ""):
+        return None
+    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    exact = base / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd()) / f"{sdk_session_id}.jsonl"
+    if exact.is_file():
+        return exact
+    return next(iter(base.glob(f"*/{sdk_session_id}.jsonl")), None)
+
+
+def claude_turns(sdk_session_id):
+    """The turns of a Claude Code conversation: your messages, replies, tool calls and their results. Sub-agents'
+    work and Claude Code's own notes are left out."""
+    path = claude_transcript(sdk_session_id)
+    if path is None:
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    turns = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") not in ("user", "assistant") or entry.get("isSidechain") \
+                or entry.get("isMeta") or entry.get("isCompactSummary"):
+            continue
+        message = entry.get("message") or {}
+        content = message.get("content")
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content or []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text":
+                text = (block.get("text") or "").strip()
+                if not text or text.startswith(("<system-reminder>", "<command-", "<local-command")):
+                    continue
+                role = "user" if message.get("role") == "user" else "assistant"
+                if role == "assistant" and turns and turns[-1]["role"] == "assistant":
+                    turns[-1]["text"] += "\n\n" + text
+                else:
+                    turns.append({"role": role, "text": text})
+            elif kind == "image" and message.get("role") == "user":
+                if turns and turns[-1]["role"] == "user":
+                    turns[-1]["text"] += "\n[image]"
+                else:
+                    turns.append({"role": "user", "text": "[image]"})
+            elif kind == "tool_use":
+                name = str(block.get("name") or "tool")
+                name = name[len("mcp__nano__"):] if name.startswith("mcp__nano__") else name   # nanocode's own tools
+                turns.append({"role": "tool", "id": block.get("id"), "name": name,
+                              "arguments": block.get("input") if isinstance(block.get("input"), dict) else {}})
+            elif kind == "tool_result":
+                result = block.get("content")
+                if isinstance(result, list):
+                    result = "\n".join(p.get("text") or "" for p in result if isinstance(p, dict))
+                turns.append({"role": "tool_result", "id": block.get("tool_use_id"), "text": cap(str(result or ""), 20_000),
+                              "is_error": bool(block.get("is_error"))})
+    return turns
 
 
 async def new_chat(announce=True):
@@ -4058,6 +4271,13 @@ async def cmd_provider(arg):
     if problem:
         out(f"{RED}⏺ can't switch to {PROVIDERS[name][1]}:{RESET} {problem}\n")
         return
+    carry = None
+    if st.session.get("title"):                 # the chat goes on with the new provider (converted if needed)
+        save_session()
+        try:
+            carry = json.loads((sessions_dir() / f"{st.session['id']}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            carry = None
     old_backend, saved = st.backend, dict(st.config)
     os.environ.pop("MODEL", None)  # a `-m` from the command line was meant for the old provider
     st.config["provider"] = name
@@ -4072,11 +4292,16 @@ async def cmd_provider(arg):
         await st.client.disconnect()
         st.client = None
     keeps_history = old_backend != "sdk" and st.backend != "sdk"
-    if not keeps_history:
+    if carry is not None and not keeps_history:
+        screen = st.output
+        await open_session(carry)               # converts the chat; Claude gets it with the next message
+        reset_view(screen)
+        keeps_history = True
+    elif not keeps_history:
         st.messages.clear()
         new_session()
-    if st.backend == "sdk":
-        st.client = await make_client()
+        if st.backend == "sdk":
+            st.client = await make_client()
     save_config()
     st.ctx_budget = st.ctx_tokens = 0
     note = "the chat continues" if keeps_history else "new chat started (the old one is saved: /resume)"
@@ -4740,7 +4965,7 @@ async def _send(text, display=None, images=None):
     error = None
     try:
         if st.backend == "sdk":
-            await sdk_query(text, images)
+            await sdk_query(with_handoff(text), images)
         else:
             await api_query(text, images)
     except BaseException as e:

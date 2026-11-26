@@ -172,3 +172,100 @@ def test_fork_on_the_claude_subscription_sends_a_note(sandbox, monkeypatch):
         run(nc.run_input("again"))
     assert "The plan is X." in sent[0][0] and "> what's the plan" in sent[0][0] and sent[0][1] == "go on"
     assert sent[1] == ("again", "again")
+
+
+# --- Every chat, whatever provider or model made it ---
+
+def saved_chat(sid, **data):
+    import json
+    nc.sessions_dir().mkdir(parents=True, exist_ok=True)
+    chat = {"id": sid, "title": sid, "created": 1, "updated": 1, "messages": [], **data}
+    (nc.sessions_dir() / f"{sid}.json").write_text(json.dumps(chat))
+    return chat
+
+
+API_CHAT = [{"role": "user", "content": "read a.py"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"path\": \"a.py\"}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "print(1)"},
+            {"role": "assistant", "content": "It prints 1."}]
+
+
+def test_resume_lists_chats_of_every_provider(sandbox):
+    saved_chat("a-claude", backend="sdk", turns=[{"role": "user", "text": "hi"}])
+    saved_chat("b-api", backend="api", messages=API_CHAT)
+    nc.st.backend = "api"
+    assert {s["id"] for s in nc.list_sessions()} == {"a-claude", "b-api"}
+
+
+def test_a_claude_chat_continues_on_an_api_provider(sandbox):
+    import asyncio
+    chat = saved_chat("c", backend="sdk", sdk_session_id="abcd1234-x", turns=nc.messages_to_turns(API_CHAT))
+    nc.st.backend = "api"
+    asyncio.run(nc.open_session(chat))
+    assert nc.st.messages == [{"role": "user", "content": "read a.py"},
+                              {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                               "function": {"name": "read", "arguments": "{\"path\": \"a.py\"}"}}]},
+                              {"role": "tool", "tool_call_id": "c1", "content": "print(1)"},
+                              {"role": "assistant", "content": "It prints 1."}]
+    assert nc.st.session["sdk_session_id"] is None and "It prints 1." in nc.st.output   # drawn from its messages
+
+
+def test_an_api_chat_continues_on_claude_which_gets_it_with_the_next_message(sandbox, monkeypatch):
+    import asyncio
+    chat = saved_chat("d", backend="api", messages=API_CHAT, model="z-ai/glm")
+    nc.st.backend, nc.st.model = "sdk", "claude-opus"
+    resumed, sent = [], []
+
+    async def fake_client(resume=None):
+        resumed.append(resume)
+        return None
+    async def fake_query(text, images=None):
+        sent.append(text)
+    monkeypatch.setattr(nc, "make_client", fake_client)
+    monkeypatch.setattr(nc, "sdk_query", fake_query)
+    asyncio.run(nc.open_session(chat))
+    assert resumed == [None] and nc.st.model == "claude-opus"          # a new Claude conversation, our model
+    assert [t["role"] for t in nc.st.session["turns"]] == ["user", "tool", "tool_result", "assistant"]
+    asyncio.run(nc.send("and now?", display="and now?"))
+    asyncio.run(nc.send("thanks", display="thanks"))
+    assert "<earlier_chat>" in sent[0] and "It prints 1." in sent[0] and sent[0].endswith("and now?")
+    assert sent[1] == "thanks"                                          # only once
+
+
+def test_resume_draws_a_chat_made_from_the_web_app(sandbox):
+    import asyncio
+    chat = saved_chat("e", backend="api", messages=[
+        {"role": "user", "content": "look\n\n<file path=\".nanocode/uploads/x-people.csv\">\na,b\n</file>"},
+        {"role": "assistant", "content": "**Done.**"}], screen="")
+    nc.st.backend = "api"
+    asyncio.run(nc.open_session(chat))
+    plain = nc.ANSI_RE.sub("", nc.st.output)
+    assert "look" in plain and "📎 x-people.csv" in plain and "a,b" not in plain and "Done." in plain
+
+
+def test_turns_to_messages_answers_every_tool_call():
+    msgs = nc.turns_to_messages([{"role": "user", "text": "go"}, {"role": "tool", "id": "t1", "name": "bash",
+                                 "arguments": {"command": "ls"}}, {"role": "assistant", "text": "stopped"}])
+    assert [m["role"] for m in msgs] == ["user", "assistant", "tool", "assistant"]
+    assert msgs[2] == {"role": "tool", "tool_call_id": "t1", "content": "(no result)"}
+
+
+def test_switching_provider_mid_chat_keeps_the_chat(sandbox, monkeypatch):
+    import asyncio
+    nc.st.config = {"provider": "openrouter", "openrouter_api_key": "k", "models": {"openrouter": "z-ai/glm-5.3"}}
+    assert nc.apply_config() is None
+    nc.new_session()
+    nc.st.messages[:] = [dict(m) for m in API_CHAT]
+    nc.st.session["title"] = "read a.py"
+    nc.st.output = "the screen so far"
+    monkeypatch.setattr(nc, "provider_status", lambda name: None)
+
+    async def fake_client(resume=None):
+        return None
+    monkeypatch.setattr(nc, "make_client", fake_client)
+    sid = nc.st.session["id"]
+    asyncio.run(nc.run_input("/provider claude"))
+    assert nc.st.backend == "sdk" and nc.st.session["id"] == sid and nc.st.output.startswith("the screen so far")
+    assert "the chat continues" in nc.ANSI_RE.sub("", nc.st.output) and "It prints 1." in nc.st.session["handoff"]
+    assert nc.list_sessions()[0]["id"] == sid
