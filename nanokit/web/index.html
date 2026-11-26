@@ -142,6 +142,16 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
 .results .hit .t { color: var(--text); }
 .results .hit .s { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
 .results .hit mark { background: none; color: var(--warning); }
+.pick { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.pick:hover { background: var(--panel); }
+.pick input { margin: 0; accent-color: var(--accent); }
+.pick .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick .m { color: var(--faint); font-size: 12px; white-space: nowrap; }
+.picklist { border: 1px solid var(--line); border-radius: 6px; max-height: 50vh; overflow-y: auto; margin: 0 0 12px; }
+.section { margin: 0 0 26px; }
+.section h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 0 0 10px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; color: var(--muted); font-size: 13px; }
+.kv b { color: var(--text); font-weight: 400; overflow-wrap: anywhere; }
 .themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
 .swatch { text-align: left; padding: 10px; border-radius: 8px; }
 .swatch.on { box-shadow: 0 0 0 2px var(--accent); }
@@ -260,6 +270,8 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
   <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
   <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7M12 12v5"/></symbol>
   <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></symbol>
   <symbol id="i-env" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
 </svg>
 
@@ -648,6 +660,25 @@ async function exportChat(id, format) {
   } catch (e) { toast(e.message, "error"); }
 }
 
+async function deleteChats(ids, all) {
+  const n = all ? state.sessions.length : ids.length;
+  if (!n) return false;
+  if (!confirm(all ? "Delete all " + n + " chats in this folder? This can't be undone."
+                   : "Delete " + (n === 1 ? "this chat" : n + " chats") + "? This can't be undone.")) return false;
+  try {
+    const res = all ? await api("POST", "/v1/sessions/delete", { all: true })
+                    : await api("POST", "/v1/sessions/delete", { ids });
+    const gone = res.deleted || [];
+    toast("Deleted " + gone.length + " chat" + (gone.length === 1 ? "" : "s"), "success");
+    if (state.session && gone.includes(state.session)) {
+      state.session = null; store.set("nanocode.session", null); setTitle("");
+      if (!state.panel) hero();
+    }
+    await loadSessions();
+    return true;
+  } catch (e) { toast(e.message, "error"); return false; }
+}
+
 // --- Small menus (chat actions, model, thinking) ---
 function popMenu(items, x, y) {
   const pop = $("menuPop");
@@ -674,6 +705,7 @@ function chatMenu(s, x, y) {
     { label: "Fork", desc: "a copy to try another direction", run: () => forkChat(s.id) },
     { label: "Export Markdown", run: () => exportChat(s.id, "md") },
     { label: "Export JSON", desc: "the whole chat", run: () => exportChat(s.id, "json") },
+    { label: "Delete", desc: "can't be undone", run: () => deleteChats([s.id]) },
   ], x, y);
 }
 function aboveRect(el) { const r = el.getBoundingClientRect(); return [r.left, r.top]; }
@@ -805,6 +837,7 @@ const PANELS = [
   { id: "plugins", label: "Plugins", icon: "puzzle", cmd: "/plugins", desc: "Python plugins that add commands and tools.",
     buttons: [{ label: "Trust this project's plugins", cmd: "/plugins trust" }] },
   { id: "theme", label: "Theme", icon: "palette", desc: "Colors for this page (kept in this browser)." },
+  { id: "settings", label: "Settings", icon: "gear", desc: "Your chats in this folder, and this server." },
   { id: "help", label: "Help", icon: "help", cmd: "/help", desc: "Every command. In the box: / for commands, Shift+Tab switches Plan/Build, Esc stops." },
 ];
 function buildNav() {
@@ -837,6 +870,7 @@ function openPanel(id, arg) {
   back.textContent = "← Chat"; back.onclick = showChat; actions.appendChild(back);
   if (id === "search") return searchPanel(actions, out, arg);
   if (id === "theme") return themePanel(out);
+  if (id === "settings") return settingsPanel(out);
   const show = (cmd) => {
     const term = document.createElement("div");
     term.className = "term";
@@ -891,6 +925,48 @@ function searchPanel(actions, out, initial) {
   const input = form.querySelector("input");
   if (initial) { input.value = initial; run(initial); }
   setTimeout(() => input.focus(), 0);
+}
+async function settingsPanel(out) {
+  await loadSessions();
+  const ws = state.ws || {};
+  out.innerHTML = '<div class="section"><h3>Chats</h3><div class="actions">' +
+    '<label class="pick" style="border:0;padding:0"><input type="checkbox" id="pickAll"> <span>Select all</span></label>' +
+    '<button id="delSel" class="danger" disabled>' + icon("trash") + ' Delete selected</button>' +
+    '<button id="delAll" class="danger">Delete all chats</button></div><div class="picklist" id="picks"></div>' +
+    '<p class="desc">Deleting removes the chat from this folder\'s saved chats and from search. It can\'t be undone. ' +
+    'In the terminal: <code>/delete</code>, <code>/delete 2-5</code>, <code>/delete all</code>.</p></div>' +
+    '<div class="section"><h3>Server</h3><div class="kv">' +
+    [["Folder", ws.folder], ["Version", ws.version], ["Provider", ws.provider_label], ["Model", ws.model],
+     ["Edits and commands", ws.permissions === "auto" ? "allowed" : "off (read-only; nanocode serve --yes allows them)"]]
+      .map(([k, v]) => "<span>" + esc(k) + "</span><b>" + esc(v || "") + "</b>").join("") +
+    '</div></div><div class="section"><h3>This browser</h3><button id="forget">Forget the API key</button></div>';
+  const picks = out.querySelector("#picks"), sel = new Set();
+  const update = () => {
+    const b = out.querySelector("#delSel");
+    b.disabled = !sel.size;
+    b.innerHTML = icon("trash") + " Delete selected" + (sel.size ? " (" + sel.size + ")" : "");
+    out.querySelector("#pickAll").checked = sel.size && sel.size === state.sessions.length;
+  };
+  picks.innerHTML = state.sessions.length ? "" : '<div class="empty-note" style="padding:10px">no chats yet</div>';
+  for (const c of state.sessions) {
+    const row = document.createElement("label");
+    row.className = "pick";
+    row.innerHTML = '<input type="checkbox"><span class="t"></span><span class="m"></span>';
+    row.querySelector(".t").textContent = c.title || "untitled";
+    row.querySelector(".m").textContent = ago(c.updated) + (c.model ? " · " + c.model : "");
+    row.querySelector("input").onchange = (e) => { e.target.checked ? sel.add(c.id) : sel.delete(c.id); update(); };
+    picks.appendChild(row);
+  }
+  out.querySelector("#pickAll").onchange = (e) => {
+    sel.clear();
+    if (e.target.checked) state.sessions.forEach((c) => sel.add(c.id));
+    picks.querySelectorAll("input").forEach((i) => { i.checked = e.target.checked; });
+    update();
+  };
+  out.querySelector("#delSel").onclick = async () => { if (await deleteChats([...sel])) settingsPanel(out); };
+  out.querySelector("#delAll").onclick = async () => { if (await deleteChats([], true)) settingsPanel(out); };
+  out.querySelector("#forget").onclick = () => { store.set("nanocode.key", null); askKey(""); };
+  update();
 }
 function themePanel(out) {
   const themes = (state.ws && state.ws.themes) || {};
@@ -1096,7 +1172,9 @@ $("titleBtn").onclick = (e) => {
            { label: "Export Markdown", run: () => exportChat(state.session, "md") },
            { label: "Export JSON", desc: "the whole chat", run: () => exportChat(state.session, "json") },
            { label: "Compact", desc: "summarize to free up context", run: () => command("/compact") },
-           { label: "Recap", desc: "what happened, and what's next", run: () => command("/recap") }], r.left, r.bottom + 4);
+           { label: "Recap", desc: "what happened, and what's next", run: () => command("/recap") },
+           { label: "Delete", desc: "can't be undone", run: () => state.session ? deleteChats([state.session]) : toast("Nothing to delete yet", "warning") }],
+          r.left, r.bottom + 4);
 };
 $("modelBtn").onclick = (e) => { e.stopPropagation(); modelMenu(); };
 $("think").onclick = (e) => { e.stopPropagation(); thinkMenu(); };

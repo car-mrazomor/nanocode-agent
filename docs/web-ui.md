@@ -15,7 +15,7 @@ nanocode web --no-open        # don't open the browser
 
 A sidebar with every nanocode feature, and the chat next to it:
 
-- **Chats:** this project's saved chats; click one to continue it. The `⋯` menu (or a right-click) forks a chat or downloads it as Markdown or JSON. **New chat** is `Ctrl+Shift+O`.
+- **Chats:** this project's saved chats; click one to continue it. The `⋯` menu (or a right-click) forks a chat, downloads it as Markdown or JSON, or deletes it. **New chat** is `Ctrl+Shift+O`.
 - **Search** (`Ctrl+K`): every chat in this folder that mentions your words, with the matching part.
 - **Tools**, each a page with its terminal output and buttons for the usual actions:
 
@@ -33,6 +33,7 @@ A sidebar with every nanocode feature, and the chat next to it:
 | Environment | Where commands run: here, Docker, SSH, Apptainer |
 | Hooks, Plugins | What's set up; trust this project's plugins |
 | Theme | Every nanocode theme, for this page (kept in this browser) |
+| Settings | Delete chats (pick several, or all), and what this server runs |
 | Help | Every command |
 
 In the message box:

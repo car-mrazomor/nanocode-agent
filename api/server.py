@@ -35,7 +35,7 @@ API_HEADER_TIMEOUT = 30  # seconds to send the request line and headers
 API_BODY_TIMEOUT = 120  # seconds to send the body (room for big images on a slow link)
 API_MAX_HEADERS = 100
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
-HTTP_REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
+HTTP_REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found", 409: "Conflict",
                 405: "Method Not Allowed", 408: "Request Timeout", 413: "Payload Too Large",
                 429: "Too Many Requests", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}
 
@@ -313,6 +313,20 @@ class ApiServer:
                  "model": c.get("model")} for c in chats]})
         if method == "GET" and parts[:2] == ["v1", "sessions"] and len(parts) == 3:
             return await write_json(writer, 200, await self.session_with_run(parts[2]))
+        if method == "DELETE" and parts[:2] == ["v1", "sessions"] and len(parts) == 3:
+            deleted = await self.delete_sessions([api_session_id(parts[2])])
+            if not deleted:
+                raise ApiError(404, f"no saved session '{parts[2]}'", "not_found")
+            return await write_json(writer, 200, {"object": "list", "deleted": deleted})
+        if method == "POST" and path == "/v1/sessions/delete":
+            data = parse_json(body)
+            if data.get("all") is True:
+                ids = [c["id"] for c in await asyncio.to_thread(nc.list_sessions, 100_000)]
+            elif isinstance(data.get("ids"), list):
+                ids = [api_session_id(i) for i in data["ids"]]
+            else:
+                raise ApiError(400, 'send {"ids": [...]} or {"all": true}')
+            return await write_json(writer, 200, {"object": "list", "deleted": await self.delete_sessions(ids)})
         if method == "GET" and parts[:2] == ["v1", "sessions"] and parts[3:] == ["export"]:
             return await write_json(writer, 200, api_export(parts[2], query.get("format", "md")))
         if method == "POST" and parts[:2] == ["v1", "sessions"] and parts[3:] == ["fork"]:
@@ -365,6 +379,14 @@ class ApiServer:
                 await self.stop(run)
                 return await write_json(writer, 200, {"run_id": run.id, "status": "stopping"})
         raise ApiError(404, f"{method} {path} isn't an endpoint (GET /v1/capabilities lists them)", "not_found")
+
+    async def delete_sessions(self, ids):
+        """Deletes saved chats; a chat whose reply is still being written can't be (stop it first)."""
+        from nanokit import sessions
+        running = {r.session_id for r in self.runs.values() if not r.done} & set(ids)
+        if running:
+            raise ApiError(409, "a reply is being written in that chat: stop it first", "conflict")
+        return await sessions.delete_chats(ids)
 
     async def session_with_run(self, session_id):
         """A saved chat, plus the turn still running in it (so a page opened mid-reply can follow it). A new chat
@@ -858,7 +880,7 @@ def api_capabilities():
                          "run_submission": True, "run_status": True, "run_events_sse": True, "run_stop": True,
                          "skills": True, "tools": True, "images": True, "concurrent_runs": 1,
                          "sessions": True, "web_ui": True, "commands": True, "search": True, "fork": True,
-                         "export": True, "workspace": True},
+                         "export": True, "workspace": True, "delete": True},
             "session_header": "X-Nanocode-Session-Id",
             "endpoints": {"chat_completions": "POST /v1/chat/completions", "responses": "POST /v1/responses",
                           "response": "GET|DELETE /v1/responses/{id}", "runs": "POST /v1/runs",
@@ -868,6 +890,7 @@ def api_capabilities():
                           "sessions": "GET /v1/sessions", "session": "GET /v1/sessions/{id}",
                           "export": "GET /v1/sessions/{id}/export?format=md|json",
                           "fork": "POST /v1/sessions/{id}/fork", "search": "GET /v1/search?q=",
+                          "delete": "DELETE /v1/sessions/{id}", "delete_many": "POST /v1/sessions/delete",
                           "workspace": "GET /v1/workspace", "web": "GET /"}}
 
 

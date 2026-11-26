@@ -356,3 +356,45 @@ def test_serve_yes_allows_edits_even_when_reachable_from_other_devices(sandbox, 
     nc.st.config = {"api": {"key": "k" * 16}}
     assert asyncio.run(server.serve(nc, "0.0.0.0", 1)) == 1 and nc.st.auto_approve is False
     assert asyncio.run(server.serve(nc, "0.0.0.0", 1, yes=True)) == 1 and nc.st.auto_approve is True
+
+
+def test_delete_chats_over_the_api(sandbox, monkeypatch):
+    import asyncio
+    fake_openrouter(monkeypatch, [text_reply("Zebras are striped.")])
+    release = asyncio.Event()
+
+    async def test(port, api):
+        ids = []
+        for _ in range(3):
+            status, _, body = await request(port, "POST", "/v1/runs", {"input": "zebras?"})
+            run = api.runs[json.loads(body)["run_id"]]
+            await run.task
+            ids.append(run.session_id)
+        status, _, body = await request(port, "DELETE", f"/v1/sessions/{ids[0]}")
+        assert status == 200 and json.loads(body)["deleted"] == [ids[0]]
+        status, _, _ = await request(port, "DELETE", f"/v1/sessions/{ids[0]}")
+        assert status == 404
+        status, _, body = await request(port, "GET", "/v1/search?q=zebras")
+        assert ids[0] not in [h["id"] for h in json.loads(body)["data"]]
+        status, _, body = await request(port, "POST", "/v1/sessions/delete", {"ids": [ids[1]]})
+        assert json.loads(body)["deleted"] == [ids[1]]
+
+        async def slow(text, display=None, images=None):
+            nc.st.session["title"] = "slow"
+            await release.wait()
+        monkeypatch.setattr(nc, "_send", slow)
+        status, _, body = await request(port, "POST", "/v1/runs", {"input": "x", "session_id": ids[2]})
+        run = api.runs[json.loads(body)["run_id"]]
+        while run.status != "running":
+            await asyncio.sleep(0.01)
+        status, _, _ = await request(port, "POST", "/v1/sessions/delete", {"all": True})
+        assert status == 409                                   # a reply is running in one of them
+        release.set()
+        await run.task
+        status, _, body = await request(port, "POST", "/v1/sessions/delete", {"all": True})
+        assert ids[2] in json.loads(body)["deleted"]
+        status, _, body = await request(port, "GET", "/v1/sessions")
+        assert json.loads(body)["data"] == []
+        status, _, _ = await request(port, "POST", "/v1/sessions/delete", {})
+        assert status == 400
+    with_server(test)

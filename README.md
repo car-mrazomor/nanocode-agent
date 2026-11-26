@@ -98,6 +98,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/think [level]` | How hard the model thinks: `off`, `low`, `medium` (default) or `high`. Shown under the prompt after the model, like OpenCode (`· medium`); click it to change |
 | `/model [name]` | List models (with prices, or what's installed in Ollama), or switch. Tab completes |
 | `/theme` | Colors: `/theme opencode` (default) or `nanocode`, `/theme accent #ff79c6` for one color, `/theme reset` |
+| `/delete [n\|2-5\|all]` | Delete this chat, some of `/resume`'s, or all of them (asks first) |
 | `/resume [n]` | Continue a saved chat. Every chat is saved per project, with every message, on any provider; it continues with whatever provider and model you use now |
 | `/recap` | What happened this session (files changed, commands run, cost) and what's next |
 | `/compact` | Summarize a long chat to free up context |

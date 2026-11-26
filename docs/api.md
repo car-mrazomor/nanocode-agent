@@ -48,6 +48,8 @@ print(reply.choices[0].message.content)
 | `GET` | `/v1/sessions/{id}` | One saved chat: its turns (your messages, replies, tool calls and results), on every provider, and `run` when a turn is still running in it (follow it with `/v1/runs/{id}/events`) |
 | `GET` | `/v1/sessions/{id}/export?format=md` | A chat as Markdown (or `json`): `{"filename", "content"}` |
 | `POST` | `/v1/sessions/{id}/fork` | A copy of a chat under a new id, to try another direction |
+| `DELETE` | `/v1/sessions/{id}` | Delete a chat (`409` while a reply is being written in it) |
+| `POST` | `/v1/sessions/delete` | Delete several: `{"ids": [...]}`, or every chat in the folder: `{"all": true}` |
 | `GET` | `/v1/search?q=words` | This folder's chats that mention the words, best first, with the matching part |
 | `GET` | `/v1/workspace` | The model and the models to pick from, thinking level, mode, themes, and the commands a client may run |
 | `GET` | `/` | The [web app](web-ui.md) (no key needed for the page; it asks for the key) |

@@ -23,6 +23,17 @@ The model can search too, with the read-only `session_search` tool: ask "what di
 
 How it works: an SQLite index at `~/.nanocode/search.db` holds the titles, your messages, the replies and the tool calls (not tool output). It uses SQLite's full-text search (FTS5) when your Python has it, and a simple word match otherwise. It's updated after every turn and before each search, reading only the chats that changed. Chats from the Claude subscription are indexed from nanocode's own copy of what was said (older ones from their saved screen). Projects are added as you use nanocode in them; a deleted folder drops out of the index.
 
+## Delete: `/delete`
+
+```
+/delete                        this chat
+/delete 3                      chat 3 of /resume's list (or its id)
+/delete 2-5                    chats 2 to 5
+/delete all                    every chat in this folder
+```
+
+It asks first, and it can't be undone: the chat's file and its search entry go. A chat open in a tab is replaced there by a new one. A chat whose reply is still being written can't be deleted (stop it first). In the web app: the chat's `⋯` menu, or **Settings** to pick several (or all).
+
 ## Fork: `/fork`
 
 `/fork` copies the current chat into a new tab, so you can try another direction and keep the original. The copy gets its own id and is titled "fork of …" (or `/fork <title>`).

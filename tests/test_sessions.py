@@ -269,3 +269,41 @@ def test_switching_provider_mid_chat_keeps_the_chat(sandbox, monkeypatch):
     assert nc.st.backend == "sdk" and nc.st.session["id"] == sid and nc.st.output.startswith("the screen so far")
     assert "the chat continues" in nc.ANSI_RE.sub("", nc.st.output) and "It prints 1." in nc.st.session["handoff"]
     assert nc.list_sessions()[0]["id"] == sid
+
+
+# --- Deleting chats ---
+
+def test_delete_command_numbers_ranges_all_and_the_open_chat(sandbox, monkeypatch):
+    import asyncio
+    for n in range(1, 6):
+        saved_chat(f"c{n}", backend="api", messages=API_CHAT, updated=n)     # c5 is newest: /resume's 1
+    nc.st.backend = "api"
+    asked = []
+
+    async def yes(tool, preview, dangerous):
+        asked.append(preview)
+        return True
+    monkeypatch.setattr(nc, "ask_permission", yes)
+    asyncio.run(nc.open_session(nc.list_sessions()[0]))                        # c5 is open
+    asyncio.run(nc.run_input("/delete 2-3"))                                    # c4, c3
+    assert {c["id"] for c in nc.list_sessions()} == {"c5", "c2", "c1"} and asked[0].startswith("2 chats: c4, c3")
+    asyncio.run(nc.run_input("/delete"))                                        # the open one
+    assert {c["id"] for c in nc.list_sessions()} == {"c2", "c1"} and nc.st.session["id"] != "c5"
+    nc.save_session()                                                           # isn't saved back
+    assert not (nc.sessions_dir() / "c5.json").exists()
+    asyncio.run(nc.run_input("/delete nope"))
+    assert "no saved chat 'nope'" in nc.ANSI_RE.sub("", nc.st.output)
+    asyncio.run(nc.run_input("/delete all"))
+    assert nc.list_sessions() == []
+
+
+def test_delete_asks_and_a_no_keeps_the_chats(sandbox, monkeypatch):
+    import asyncio
+    saved_chat("keep", backend="api", messages=API_CHAT)
+    nc.st.backend = "api"
+
+    async def no(tool, preview, dangerous):
+        return False
+    monkeypatch.setattr(nc, "ask_permission", no)
+    asyncio.run(nc.run_input("/delete all"))
+    assert [c["id"] for c in nc.list_sessions()] == ["keep"]

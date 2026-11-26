@@ -336,14 +336,7 @@ async def open_result(n):
 
 
 async def resume_data(data):
-    """Opens a saved chat of this project in the current tab (like /resume)."""
-    if data.get("backend") != nc.st.backend:
-        nc.out(f"{nc.RED}⏺ that chat was made with another provider ({data.get('backend')}); switch with "
-               f"/provider first{nc.RESET}\n")
-        return
-    if nc.st.backend == "sdk" and not data.get("sdk_session_id"):
-        nc.out(f"{nc.RED}⏺ that chat has no Claude session id, so it can't be resumed{nc.RESET}\n")
-        return
+    """Opens a saved chat of this project in the current tab (like /resume), whatever provider made it."""
     here = nc.st.current_tab()
     other = next((t for t in nc.st.tabs if t is not here and (t.session or {}).get("id") == data.get("id")), None)
     if other is not None:
@@ -483,3 +476,104 @@ async def send_fork_note(text):
         nc.log_error(e)
         nc.out(f"{nc.RED}⏺ Error: {e}{nc.RESET}\n")
     return ""
+
+
+# --- Deleting chats: /delete here, DELETE /v1/sessions in the API (the web app, the iOS app) ---
+
+CHAT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def busy_chats():
+    """Ids of the chats whose reply is being written right now (in a tab): those can't be deleted."""
+    return {(t.session or {}).get("id") for t in nc.st.tabs if t.task and not t.task.done()}
+
+
+async def delete_chats(ids):
+    """Deletes saved chats of this project (their files and their search entries). A chat open in a tab is
+    replaced there by a new one, so it isn't saved back. Returns the ids deleted."""
+    removed = []
+    for sid in dict.fromkeys(ids):
+        if not CHAT_ID_RE.fullmatch(str(sid)):
+            continue
+        path = nc.sessions_dir() / f"{sid}.json"
+        for tab in list(nc.st.tabs) or [nc.st.current_tab()]:
+            if (tab.session or {}).get("id") == sid:
+                with nc.for_tab(tab):
+                    await nc.new_chat(announce=False)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            nc.log_error(e)
+            continue
+        removed.append(sid)
+        try:
+            conn = connect()
+            try:
+                conn.execute("DELETE FROM docs WHERE file=?", (str(path),))
+                conn.execute("DELETE FROM chats WHERE file=?", (str(path),))
+                conn.commit()
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError) as e:
+            nc.log_error(e)
+    return removed
+
+
+def pick_chats(words, chats):
+    """The ids that /delete's words name: numbers and ranges from /resume's list (1, 2-5), ids, or "all"."""
+    if words == ["all"]:
+        return [c["id"] for c in chats]
+    ids = []
+    for word in words:
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", word)
+        if m:
+            first, last = int(m.group(1)), int(m.group(2) or m.group(1))
+            ids += [chats[n - 1]["id"] for n in range(min(first, last), max(first, last) + 1) if 1 <= n <= len(chats)]
+        elif any(c["id"] == word for c in chats):
+            ids.append(word)
+        else:
+            raise ValueError(word)
+    return ids
+
+
+@command("/delete", "delete chats: /delete (this one), /delete 3 or 2-5 (numbers from /resume), /delete <id>, /delete all")
+async def cmd_delete(arg):
+    chats = nc.list_sessions(10_000)
+    words = arg.split()
+    if not words:
+        sid = nc.st.session.get("id")
+        ids = [sid] if any(c["id"] == sid for c in chats) else []
+        if not ids:
+            nc.out(f"{nc.DIM}this chat isn't saved yet: nothing to delete (/delete <n> deletes a saved one){nc.RESET}\n")
+            return
+    else:
+        try:
+            ids = pick_chats(words, chats[:20] if words != ["all"] else chats)
+        except ValueError as e:
+            nc.out(f"{nc.RED}⏺ no saved chat '{e}'{nc.RESET} {nc.DIM}(/resume lists them; /delete 2-5 or /delete all){nc.RESET}\n")
+            return
+    running = busy_chats() & set(ids)
+    if running:
+        nc.out(f"{nc.YELLOW}⏺ a reply is being written in {len(running)} of them: stop it first{nc.RESET}\n")
+        return
+    if not ids:
+        nc.out(f"{nc.DIM}no chats to delete{nc.RESET}\n")
+        return
+    titles = {c["id"]: c.get("title") or c["id"] for c in chats}
+    preview = (f"{len(ids)} chats" if len(ids) > 1 else "1 chat") + ": " + ", ".join(titles.get(i, i) for i in ids[:5]) \
+        + ("…" if len(ids) > 5 else "")
+    if not nc.CONFIRMED.get():
+        if nc.st.headless:
+            nc.out(f"  {nc.DIM}⎿  not deleted: it needs your OK, and nobody can answer here{nc.RESET}")
+            return
+        if nc.st.permission_lock is None:
+            nc.st.permission_lock = asyncio.Lock()
+        async with nc.st.permission_lock:
+            if not await nc.ask_permission("delete", preview, True):
+                return
+    removed = await delete_chats(ids)
+    nc.out(f"{nc.GREEN}⏺ Deleted{nc.RESET} {len(removed)} chat{'s' * (len(removed) != 1)} "
+           f"{nc.DIM}({preview.split(': ', 1)[1]}){nc.RESET}\n")
+
