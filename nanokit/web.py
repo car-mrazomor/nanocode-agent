@@ -20,10 +20,14 @@ from nanokit import cli
 
 PAGE = Path(__file__).resolve().parent / "web" / "index.html"
 
-ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-<rect width="512" height="512" rx="96" fill="#0a0a0a"/>
-<path d="M150 360V152h36l140 156V152h36v208h-36L186 204v156z" fill="#7fa7c9"/>
-<rect x="150" y="384" width="212" height="18" rx="9" fill="#9d8fc4"/>
+ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="512" height="512">
+<title>nanocode</title>
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#6fb6c6"/><stop offset=".5" stop-color="#8a8cc4"/><stop offset="1" stop-color="#bf89ae"/>
+</linearGradient></defs>
+<rect x="1" y="1" width="46" height="46" rx="12" fill="#1b1d21" stroke="#34373d"/>
+<rect x="12" y="11" width="5" height="26" rx="2.5" fill="url(#g)"/>
+<path d="M24 17l9 7-9 7" fill="none" stroke="#e6e7ea" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
 """
 
