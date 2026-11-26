@@ -18,7 +18,6 @@ import fnmatch
 import getpass
 import glob
 import hashlib
-from html.parser import HTMLParser
 import io
 import json
 import os
@@ -43,13 +42,18 @@ from rich.markdown import Markdown
 
 import warnings
 
+# Feature modules (nanokit/) do `import nanocode`: run as a script this module is __main__, so register it under
+# its name too, or they'd load a second copy with its own state.
+sys.modules.setdefault("nanocode", sys.modules[__name__])
+import nanokit  # noqa: E402 (features and parts of nanocode live in nanokit/; the installer brings both)
+
 warnings.filterwarnings("ignore", message="can_use_tool will not be invoked")
 try:
     import claude_agent_sdk as sdk
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -156,6 +160,10 @@ PROVIDERS = {
     "ollama": ("ollama", "Ollama", "local models on this machine, free and private"),
 }
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "openrouter": "openrouter/auto-code"}
+# More OpenAI-compatible APIs (OpenAI, Anthropic, Gemini, DeepSeek, LM Studio…), added by nanokit/providers.py:
+# provider name -> its endpoint (url(), headers(), prepare(payload, reasoning), cost(model, usage), cost_note(model),
+# error(status, message), models(), status(), setup(models, current)). They run in the same loop as OpenRouter.
+API_PROVIDERS = {}
 
 LEARN_PROMPT = (
     "Review our conversation so far and learn from it. Look for: mistakes you made and how they were fixed, "
@@ -323,7 +331,9 @@ def in_tab(tab, coro):
     even after you switch to another."""
     context = contextvars.copy_context()
     context.run(CURRENT_TAB.set, tab)
-    return context.run(asyncio.ensure_future, coro)   # the task copies the context it's created in
+    task = context.run(asyncio.ensure_future, coro)   # the task copies the context it's created in
+    task.add_done_callback(lambda _: invalidate())    # its tab's mark changes, even if it's in the background
+    return task
 
 
 class for_tab:
@@ -552,6 +562,7 @@ class Tab:
         self.live_cache = {"source": "", "width": 0, "rendered": []}
         self.attention = None  # "done" or "error": a turn ended while you were in another tab
         self.client_signature = None  # tools and prompt this tab's Claude client connected with
+        self.connecting = None  # the Claude connection started at launch, while it's being made
 
 
 class State:
@@ -735,11 +746,17 @@ def render_live(final=False):
 # set per asyncio task, so the chat's own streaming is never affected.
 CALL_MODEL = contextvars.ContextVar("call_model", default=None)
 QUIET = contextvars.ContextVar("quiet", default=False)
+CALL_API = contextvars.ContextVar("call_api", default=None)  # /compare: the provider of the model being asked
 OUT_BUFFER = contextvars.ContextVar("out_buffer", default=None)
 
 
 def call_model():
     return CALL_MODEL.get() or st.model
+
+
+def api_endpoint():
+    """The endpoint of an API provider other than OpenRouter (see API_PROVIDERS), or None for OpenRouter."""
+    return API_PROVIDERS.get(CALL_API.get() or st.provider)
 
 
 # Set while an API request runs (nanocode serve): gets the reply text, tool calls and usage as they happen.
@@ -1399,6 +1416,9 @@ def fmt_duration(seconds):
 def fmt_cost(cost):
     if st.backend == "ollama":
         return "free (local)"
+    api = API_PROVIDERS.get(st.provider)
+    if api and not cost and api.cost_note(st.model):
+        return api.cost_note(st.model)           # "cost unknown", or "free (local)"
     cost = cost or 0
     amount = f"${cost:.4f}" if cost < 1 else f"${cost:.2f}"
     return f"{amount} (in your plan)" if st.backend == "sdk" else amount
@@ -1426,6 +1446,15 @@ DANGEROUS = re.compile(
 )
 
 
+async def hook(event, **data):
+    """Answers from the feature modules' hooks for an event (see nanokit.EVENTS); [] without nanokit."""
+    return await nanokit.emit(event, **data) if nanokit else []
+
+
+def hook_sync(event, **data):
+    return nanokit.emit_sync(event, **data) if nanokit else []
+
+
 def answer_permission(key):
     if st.pending_permission is not None and not st.pending_permission.done():
         st.pending_permission.set_result(key)
@@ -1433,17 +1462,22 @@ def answer_permission(key):
 
 async def allowed(tool_name, preview):
     dangerous = (tool_name in ("bash", "shell") and bool(DANGEROUS.search(preview))) or tool_name in ALWAYS_ASK
-    if not dangerous and (st.auto_approve or tool_name in st.always_allow):
+    decisions = await hook("permission", tool=tool_name, preview=preview)   # the user's permission rules
+    if "deny" in decisions:
+        out(f"  {DIM}⎿  denied {tool_name} by your permission rules{RESET}")
+        return False
+    forced_ask = "ask" in decisions
+    if not dangerous and not forced_ask and ("allow" in decisions or st.auto_approve or tool_name in st.always_allow):
         return True
     if st.headless:
-        reason = "sending always asks" if tool_name in ALWAYS_ASK else "looks dangerous" if dangerous else \
+        reason = f"{tool_name} always asks" if tool_name in ALWAYS_ASK else "looks dangerous" if dangerous else \
             "run with --yes to allow"
         out(f"  {DIM}⎿  denied {tool_name} ({reason}){RESET}")
         return False
     if st.permission_lock is None:
         st.permission_lock = asyncio.Lock()
     async with st.permission_lock:
-        if not dangerous and tool_name in st.always_allow:   # answered "always" while this one waited
+        if not dangerous and not forced_ask and tool_name in st.always_allow:   # answered "always" meanwhile
             return True
         return await ask_permission(tool_name, preview, dangerous)
 
@@ -1464,8 +1498,10 @@ async def ask_permission(tool_name, preview, dangerous):
 
 async def _ask_permission(tool_name, preview, dangerous):
     stream_end()
-    warn = f"   {fg('warning')}{BOLD}✉ this sends an email{RESET}\n" if tool_name in ALWAYS_ASK else \
-        f"   {fg('error')}{BOLD}⚠ this looks destructive{RESET}\n" if dangerous else ""
+    always = {"email_send": "✉ this sends an email", "cron": "◷ this schedules a task that runs by itself",
+              "rollback": "↺ this restores files to an earlier checkpoint"}
+    warn = f"   {fg('warning')}{BOLD}{always.get(tool_name, '△ this always asks')}{RESET}\n" if tool_name in ALWAYS_ASK \
+        else f"   {fg('error')}{BOLD}⚠ this looks destructive{RESET}\n" if dangerous else ""
     options = "y allow · n deny" if dangerous else "y allow · a always · n deny"
     agent = AGENT_LABEL.get()
     who = f"{fg('muted')}sub-agent {agent[:30]} · {RESET}" if agent else ""
@@ -1576,8 +1612,16 @@ async def run_tool(name, args):
         text, is_error = f"error: unknown tool '{name}'. Available: {', '.join(TOOLS)}", True
     else:
         missing = [k for k in entry["schema"].get("required", []) if args.get(k) in (None, "")]
+        denied = None
+        for answer in [] if missing else await hook("before_tool", name=name, args=args):
+            if isinstance(answer, dict) and answer.get("deny"):
+                denied = str(answer["deny"])
+            elif isinstance(answer, dict) and isinstance(answer.get("args"), dict):
+                args = answer["args"]
         if missing:
             text, is_error = f"error: missing required argument(s): {', '.join(missing)}", True
+        elif denied:
+            text, is_error = f"error: {denied}", True
         else:
             try:
                 text = await entry["fn"](args)
@@ -1589,6 +1633,11 @@ async def run_tool(name, args):
             except Exception as e:
                 log_error(e)
                 text, is_error = f"error: {type(e).__name__}: {e}", True
+    if entry is not None:
+        extra = [a for a in await hook("after_tool", name=name, args=args, result=text, is_error=is_error)
+                 if isinstance(a, str) and a.strip()]
+        if extra:                              # e.g. type errors after an edit, a formatter's note
+            text = text + "\n\n" + "\n\n".join(extra)
     if is_error:
         st.turn_errors += 1
     key = TOOL_PREVIEW.get(name)
@@ -1602,6 +1651,14 @@ async def run_tool(name, args):
     if top:
         emit("tool.completed", id=call_id, name=name, output=text, is_error=is_error)
     return text, is_error
+
+
+async def wrapped_command(command):
+    """The shell command to really run: an environment (Docker, SSH…) may run it somewhere else."""
+    for answer in await hook("wrap_command", command=command, cwd=os.getcwd()):
+        if isinstance(answer, str) and answer.strip():
+            return answer
+    return command
 
 
 def resolve(path):
@@ -1971,6 +2028,7 @@ async def tool_bash(args):
         return DENIED
     env = {**os.environ, "PAGER": "cat", "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0", "NO_COLOR": "1"}
     extra = {"start_new_session": True} if os.name != "nt" else {}
+    command = await wrapped_command(command)
     proc = await asyncio.create_subprocess_shell(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                                  stderr=subprocess.STDOUT, env=env, **extra)
     chunks, shown, pending = [], 0, ""
@@ -2020,950 +2078,8 @@ async def tool_bash(args):
     return f"{output}\n{status}"
 
 
-# --- Background shells: commands that keep running (dev servers, watchers, long builds) ---
-# Backends: tmux (you can watch: tmux attach -t nanocode-<name>), then screen, then nanocode itself
-# (works everywhere, incl. Windows). Shells stop when nanocode exits.
-
-SHELL_KEYS = {"enter": ("Enter", "\r"), "ctrl-c": ("C-c", "\x03"), "ctrl-d": ("C-d", "\x04"),
-              "escape": ("Escape", "\x1b"), "none": (None, "")}
+# Terminal control sequences (colors, cursor moves) and control characters, to strip from text we show.
 CONTROL_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]|\x1b[=>78]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
-
-def shell_backend():
-    choice = st.config.get("shell_backend", "auto")
-    if choice in ("tmux", "screen", "builtin"):
-        return choice if choice == "builtin" or shutil.which(choice) else "builtin"
-    if os.name != "nt":
-        for name in ("tmux", "screen"):
-            if shutil.which(name):
-                return name
-    return "builtin"
-
-
-async def run_cmd(*cmd, timeout=15):
-    proc = await asyncio.create_subprocess_exec(*cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                                stderr=subprocess.STDOUT)
-    try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
-    except asyncio.TimeoutError:
-        kill_tree(proc)
-        raise ToolError(f"{cmd[0]} didn't respond within {timeout}s")
-    return proc.returncode, stdout.decode(errors="replace")
-
-
-def clean_terminal_text(text):
-    lines = []
-    for line in CONTROL_RE.sub("", text.replace("\r\n", "\n")).split("\n"):
-        lines.append(line.rsplit("\r", 1)[-1].rstrip())
-    return "\n".join(lines).strip("\n")
-
-
-def tail_file(path, n):
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - 200_000))
-            data = f.read().decode(errors="replace")
-    except OSError:
-        return ""
-    return "\n".join(clean_terminal_text(data).split("\n")[-n:])
-
-
-async def shell_start(name, command):
-    backend, cwd = shell_backend(), os.getcwd()
-    ensure_project_dir()
-    log = project_dir() / "shells" / f"{name}.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text("")
-    # The session name includes this nanocode's PID: two nanocodes (other projects or terminals) can both have
-    # a shell called "dev" without stopping each other's.
-    session = f"nanocode-{os.getpid()}-{name}"
-    info = {"name": name, "command": command, "backend": backend, "log": str(log), "started": time.time(),
-            "session": session}
-    if backend == "tmux":
-        await sweep_orphan_shells()
-        await run_cmd("tmux", "kill-session", "-t", f"={session}")
-        rc, output = await run_cmd("tmux", "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", cwd)
-        if rc != 0:
-            raise ToolError(f"tmux couldn't start: {output.strip()}")
-        await run_cmd("tmux", "send-keys", "-t", f"={session}:", "-l", command)
-        await run_cmd("tmux", "send-keys", "-t", f"={session}:", "Enter")
-        info["attach"] = f"tmux attach -t {session}"
-    elif backend == "screen":
-        # Logging set in a config file at startup and plain `sh` inside: works the same on screen 4.0 (macOS) to 5.x.
-        await run_cmd("screen", "-S", session, "-X", "quit")
-        rc_file = log.with_suffix(".screenrc")
-        rc_file.write_text(f"logfile {log}\nlogfile flush 1\ndeflog on\n")
-        rc, output = await run_cmd("screen", "-c", str(rc_file), "-dmS", session, "sh")
-        if rc != 0:
-            raise ToolError(f"screen couldn't start: {output.strip()}")
-        await asyncio.sleep(0.3)
-        await run_cmd("screen", "-S", session, "-p", "0", "-X", "stuff", f"cd {shlex.quote(cwd)} && {command}\r")
-        info["attach"] = f"screen -r {session}"
-    else:
-        extra = {"start_new_session": True} if os.name != "nt" else {}
-        handle = open(log, "ab")
-        info["proc"] = await asyncio.create_subprocess_shell(
-            command, stdin=subprocess.PIPE, stdout=handle, stderr=subprocess.STDOUT, cwd=cwd,
-            env={**os.environ, "PAGER": "cat", "GIT_PAGER": "cat"}, **extra)
-        info["handle"] = handle
-    st.shells[name] = info
-    return info
-
-
-async def sweep_orphan_shells():
-    """Stops tmux shells left by a nanocode that crashed or was killed (its PID is gone)."""
-    try:
-        rc, output = await run_cmd("tmux", "list-sessions", "-F", "#{session_name}", timeout=5)
-    except ToolError:
-        return
-    for session in output.split() if rc == 0 else []:
-        found = re.match(r"nanocode-(\d+)-", session)
-        if found and int(found.group(1)) != os.getpid() and not pid_alive(int(found.group(1))):
-            try:
-                await run_cmd("tmux", "kill-session", "-t", f"={session}", timeout=5)
-            except ToolError:
-                pass
-
-
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True
-    return True
-
-
-def shell_session(info):
-    return info.get("session") or f"nanocode-{info['name']}"
-
-
-async def shell_alive(info):
-    session = shell_session(info)
-    if info["backend"] == "tmux":
-        rc, output = await run_cmd("tmux", "list-panes", "-t", f"={session}:", "-F", "#{pane_current_command}")
-        shell_names = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh"}
-        return rc == 0 and output.strip().split("\n")[0] not in shell_names
-    if info["backend"] == "screen":
-        rc, output = await run_cmd("screen", "-ls")
-        return re.search(rf"\.{re.escape(session)}\s", output) is not None
-    return info["proc"].returncode is None
-
-
-async def shell_output(info, lines):
-    if info["backend"] == "tmux":
-        rc, output = await run_cmd("tmux", "capture-pane", "-p", "-J", "-t", f"={shell_session(info)}:",
-                                   "-S", f"-{max(lines, 50)}")
-        if rc == 0:
-            return "\n".join(clean_terminal_text(output).split("\n")[-lines:])
-        return ""
-    return tail_file(info["log"], lines)
-
-
-async def shell_stop(info):
-    session = shell_session(info)
-    try:
-        if info["backend"] == "tmux":
-            await run_cmd("tmux", "kill-session", "-t", f"={session}")
-        elif info["backend"] == "screen":
-            await run_cmd("screen", "-S", session, "-X", "quit")
-        else:
-            await reap(info["proc"])
-    except ToolError:
-        pass
-    if info.get("handle"):
-        info["handle"].close()
-    st.shells.pop(info["name"], None)
-
-
-async def stop_all_shells():
-    for info in list(st.shells.values()):
-        await shell_stop(info)
-
-
-@tool("shell", "Background shells for commands that keep running: dev servers, watchers, long builds, REPLs. "
-      "action=start (name, command), read (name, lines), send (name, text and/or key), stop (name), list. "
-      "Use bash for commands that finish on their own.",
-      {"action": {"type": "string", "enum": ["start", "read", "send", "stop", "list"]},
-       "name": {"type": "string", "description": "short name, e.g. dev or tests"},
-       "command": {"type": "string", "description": "for start"},
-       "text": {"type": "string", "description": "for send: text to type"},
-       "key": {"type": "string", "enum": list(SHELL_KEYS), "description": "for send: key after the text (default enter)"},
-       "lines": {"type": "integer", "description": "for read: how many recent lines (default 60)"}},
-      ["action"])
-async def tool_shell(args):
-    action = args["action"]
-    if action == "list":
-        if not st.shells:
-            return "no background shells running"
-        rows = []
-        for info in st.shells.values():
-            state = "running" if await shell_alive(info) else "finished"
-            rows.append(f"{info['name']}: {state} · {info['command']} · started {fmt_duration(time.time() - info['started'])} ago")
-        return "\n".join(rows)
-    name = re.sub(r"[^A-Za-z0-9_-]+", "-", str(args.get("name") or "")).strip("-")[:40]
-    if not name:
-        raise ToolError("`name` is required (e.g. dev)")
-    if action == "start":
-        command = args.get("command")
-        if not command:
-            raise ToolError("`command` is required to start a shell")
-        if name in st.shells:
-            if await shell_alive(st.shells[name]):
-                raise ToolError(f"shell '{name}' is already running; read it, stop it, or pick another name")
-            await shell_stop(st.shells[name])
-        if not await allowed("shell", command):
-            return DENIED
-        info = await shell_start(name, command)
-        await asyncio.sleep(2)
-        state = "running" if await shell_alive(info) else "already finished"
-        output = await shell_output(info, 20)
-        attach = f"\n(the user can watch it: {info['attach']})" if info.get("attach") else ""
-        return f"started '{name}' ({info['backend']}), {state}. First output:\n{output or '(none yet)'}{attach}"
-    info = st.shells.get(name)
-    if info is None:
-        known = ", ".join(st.shells) or "none"
-        raise ToolError(f"no shell named '{name}' (running: {known})")
-    if action == "read":
-        lines = min(max(int(args.get("lines") or 60), 1), 500)
-        state = "running" if await shell_alive(info) else "finished"
-        return f"[{name}: {state}]\n" + (await shell_output(info, lines) or "(no output yet)")
-    if action == "send":
-        text, key = args.get("text") or "", (args.get("key") or "enter").lower()
-        if key not in SHELL_KEYS:
-            raise ToolError(f"unknown key '{key}' (use: {', '.join(SHELL_KEYS)})")
-        if text and not await allowed("shell", f"{name} ← {text}"):
-            return DENIED
-        tmux_key, raw = SHELL_KEYS[key]
-        session = shell_session(info)
-        if info["backend"] == "tmux":
-            if text:
-                await run_cmd("tmux", "send-keys", "-t", f"={session}:", "-l", text)
-            if tmux_key:
-                await run_cmd("tmux", "send-keys", "-t", f"={session}:", tmux_key)
-        elif info["backend"] == "screen":
-            await run_cmd("screen", "-S", session, "-p", "0", "-X", "stuff", text + raw)
-        else:
-            proc = info["proc"]
-            if key == "ctrl-c" and proc.returncode is None:
-                try:
-                    if os.name != "nt":
-                        os.killpg(proc.pid, signal.SIGINT)
-                    else:
-                        proc.terminate()
-                except (ProcessLookupError, OSError):
-                    pass
-            elif proc.returncode is None and proc.stdin:
-                proc.stdin.write((text + ("\n" if key == "enter" else raw)).encode())
-                await proc.stdin.drain()
-        await asyncio.sleep(1)
-        return f"sent. Recent output:\n{await shell_output(info, 15) or '(none)'}"
-    if action == "stop":
-        await shell_stop(info)
-        return f"stopped '{name}'"
-    raise ToolError(f"unknown action '{action}'")
-
-
-# --- Web: search and read pages through the user's own browser (headless), for any model and provider ---
-
-WEB_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
-          "Chrome/131.0.0.0 Safari/537.36")
-SEARCH_ENGINES = ("duckduckgo", "bing", "google", "openrouter")
-
-
-def find_browser():
-    """Chrome, Chromium, Edge or Brave installed on this machine (or the "browser" path in the config)."""
-    configured = st.config.get("browser")
-    if configured and Path(configured).exists():
-        return configured
-    if sys.platform == "darwin":
-        apps = ["Google Chrome.app/Contents/MacOS/Google Chrome", "Chromium.app/Contents/MacOS/Chromium",
-                "Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Brave Browser.app/Contents/MacOS/Brave Browser"]
-        places = [Path("/Applications") / a for a in apps] + [Path.home() / "Applications" / a for a in apps]
-    elif os.name == "nt":
-        places = [Path(os.path.expandvars(p)) for p in (
-            r"%ProgramFiles%\Google\Chrome\Application\chrome.exe", r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
-            r"%LocalAppData%\Google\Chrome\Application\chrome.exe", r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
-            r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe")]
-    else:
-        places = []
-    for place in places:
-        if place.exists():
-            return str(place)
-    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge",
-                 "brave-browser", "chrome"):
-        if shutil.which(name):
-            return shutil.which(name)
-    return None
-
-
-async def browser_dom(url, timeout=45):
-    """The page after JavaScript ran, from a headless copy of the user's browser with a throwaway profile."""
-    browser = find_browser()
-    if not browser:
-        return None
-    profile = tempfile.mkdtemp(prefix="nanocode-browser-")
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-            "--disable-extensions", "--mute-audio", f"--user-data-dir={profile}", f"--user-agent={WEB_UA}",
-            "--virtual-time-budget=7000", "--window-size=1280,2000", "--dump-dom", url,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-            **({"start_new_session": True} if os.name != "nt" else {}))   # so its helper processes stop with it
-        data, _ = await asyncio.wait_for(proc.communicate(), timeout)
-        html = data.decode("utf-8", errors="replace")
-        return html if "<" in html else None
-    except (OSError, asyncio.TimeoutError):
-        return None
-    finally:
-        if proc is not None and proc.returncode is None:      # timed out, or Esc stopped the turn
-            await asyncio.shield(reap(proc))
-        shutil.rmtree(profile, ignore_errors=True)
-
-
-async def plain_get(url):
-    try:
-        async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers={"User-Agent": WEB_UA,
-                                     "Accept-Language": "en"}) as http:
-            resp = await http.get(url)
-    except httpx.HTTPError as e:
-        raise ToolError(f"couldn't load {url}: {type(e).__name__}") from e
-    if resp.status_code >= 400:
-        raise ToolError(f"{url} answered HTTP {resp.status_code}")
-    return resp.text
-
-
-async def load_page(url, browser_first=True):
-    """Rendered by the browser when there is one, else a plain request. (html, how)"""
-    if not browser_first:
-        try:
-            return await plain_get(url), "http"
-        except ToolError:
-            pass
-    html = await browser_dom(url)
-    if html and len(html) > 500:
-        return html, "browser"
-    return await plain_get(url), "http"
-
-
-class PageText(HTMLParser):
-    """Readable text from HTML: no scripts or styles, line breaks at blocks."""
-    SKIP = {"script", "style", "noscript", "svg", "template", "iframe", "head", "canvas", "select", "button"}
-    BLOCK = {"p", "div", "br", "li", "tr", "section", "article", "header", "footer", "h1", "h2", "h3", "h4", "h5",
-             "h6", "pre", "table", "ul", "ol", "blockquote", "main", "nav", "aside", "form", "hr", "dd", "dt"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts, self.skip, self.title, self.in_title = [], 0, "", False
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self.skip += 1
-        elif tag in self.BLOCK:
-            self.parts.append("\n")
-        if tag == "title":
-            self.in_title = True
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP:
-            self.skip = max(0, self.skip - 1)
-        elif tag in self.BLOCK:
-            self.parts.append("\n")
-        if tag == "title":
-            self.in_title = False
-
-    def handle_data(self, data):
-        if self.in_title:
-            self.title += data
-        elif not self.skip:
-            self.parts.append(data)
-
-    def text(self):
-        lines = [" ".join(line.split()) for line in "".join(self.parts).split("\n")]
-        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
-
-
-def page_text(html):
-    parser = PageText()
-    parser.feed(html)
-    return " ".join(parser.title.split()), parser.text()
-
-
-class SearchResults(HTMLParser):
-    """Results from a DuckDuckGo, Bing or Google results page: [(title, url, snippet)]."""
-
-    def __init__(self, engine):
-        super().__init__(convert_charrefs=True)
-        self.engine, self.results, self.cur, self.field, self.in_h2 = engine, [], None, None, False
-
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        cls = a.get("class") or ""
-        if self.engine == "duckduckgo":
-            if tag == "a" and "result__a" in cls:
-                self.cur = {"title": "", "url": a.get("href", ""), "snippet": ""}
-                self.results.append(self.cur)
-                self.field = "title"
-            elif "result__snippet" in cls and self.cur is not None:
-                self.field = "snippet"
-        elif self.engine == "bing":
-            if tag == "li" and "b_algo" in cls:
-                self.cur = {"title": "", "url": "", "snippet": ""}
-                self.results.append(self.cur)
-            elif self.cur is not None and tag == "h2":
-                self.in_h2 = True
-            elif self.cur is not None and tag == "a" and self.in_h2 and not self.cur["url"]:
-                self.cur["url"], self.field = a.get("href", ""), "title"
-            elif self.cur is not None and tag == "p" and not self.cur["snippet"]:
-                self.field = "snippet"
-        elif self.engine == "google":
-            href = a.get("href", "")
-            if tag == "a" and (href.startswith("http") or href.startswith("/url?")):
-                target = clean_result_url(href)
-                own = re.match(r"https?://([a-z]+\.)*google\.[a-z.]+/", target)   # Google's own links (sign-in, …)
-                self.cur = None if own else {"title": "", "url": href, "snippet": "", "h3": False}
-            elif tag == "h3" and self.cur is not None and not self.cur["h3"]:
-                self.cur["h3"], self.field = True, "title"
-                self.results.append(self.cur)
-
-    def handle_endtag(self, tag):
-        if tag == "h2":
-            self.in_h2 = False
-        if (self.engine == "duckduckgo" and tag == "a") or tag in ("h3", "p", "h2") or \
-                (self.engine == "bing" and tag == "a" and self.field == "title"):
-            self.field = None
-
-    def handle_data(self, data):
-        if self.cur is not None and self.field:
-            self.cur[self.field] += data
-
-
-def clean_result_url(url):
-    from urllib.parse import parse_qs, urlparse, unquote
-    parsed = urlparse(url if not url.startswith("//") else "https:" + url)
-    query = parse_qs(parsed.query)
-    if "uddg" in query:                       # DuckDuckGo redirect
-        return unquote(query["uddg"][0])
-    if parsed.path == "/url" and "q" in query:  # Google redirect
-        return query["q"][0]
-    if parsed.netloc.endswith("bing.com") and parsed.path.startswith("/ck/") and query.get("u", [""])[0][:2] == "a1":
-        # Bing redirect: the target is base64 after "a1"
-        raw = query["u"][0][2:]
-        try:
-            return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode()
-        except (ValueError, UnicodeDecodeError):
-            return url
-    return url
-
-
-async def search_openrouter(query, limit):
-    """OpenRouter's own web search (its web plugin) with the chosen model: costs a little extra per search."""
-    key = st.openrouter_key or os.environ.get("OPENROUTER_API_KEY") or st.config.get("openrouter_api_key")
-    if not key:
-        raise ToolError("the openrouter search engine needs an OpenRouter key (nanocode setup)")
-    model = st.config.get("search_model") or (st.model if st.backend == "api" else "openrouter/auto")
-    payload = {"model": model, "plugins": [{"id": "web", "max_results": limit}], "messages": [{"role": "user",
-               "content": f"Search the web for: {query}\nList the most relevant results, each as: title — URL — "
-                          "one-line summary."}]}
-    async with httpx.AsyncClient(timeout=90) as http:
-        resp = await http.post(OPENROUTER_URL, json=payload, headers={"Authorization": f"Bearer {key}",
-                               "X-Title": "nanocode", "HTTP-Referer": f"https://github.com/{REPO}"})
-    if resp.status_code != 200:
-        raise ToolError(api_error(resp.status_code, resp.text))
-    data = resp.json()
-    message = (data.get("choices") or [{}])[0].get("message") or {}
-    st.usage["cost"] += (data.get("usage") or {}).get("cost") or 0
-    sources = [a.get("url_citation", {}) for a in message.get("annotations") or [] if a.get("type") == "url_citation"]
-    text = message.get("content") or ""
-    if sources:
-        text += "\n\nSources:\n" + "\n".join(f"- {c.get('title', '')} {c.get('url', '')}" for c in sources)
-    return text
-
-
-@tool("web_search", "Search the web (through the user's browser) for current information, docs, errors or news. "
-      "Returns titles, URLs and snippets; read a page with web_fetch.",
-      {"query": {"type": "string"}, "engine": {"type": "string", "enum": list(SEARCH_ENGINES),
-       "description": "default: the user's choice (usually duckduckgo)"},
-       "limit": {"type": "integer", "description": "results, default 8"}}, ["query"])
-async def tool_web_search(args):
-    from urllib.parse import quote_plus
-    query = args["query"].strip()
-    engine = args.get("engine") or st.config.get("search_engine", "duckduckgo")
-    if engine not in SEARCH_ENGINES:
-        engine = "duckduckgo"
-    limit = min(max(int(args.get("limit") or 8), 1), 20)
-    if not await allowed("web", f"search ({engine}): {query}"):
-        return DENIED
-    if engine == "openrouter":
-        return await search_openrouter(query, limit)
-    urls = {"duckduckgo": "https://html.duckduckgo.com/html/?q=", "bing": "https://www.bing.com/search?setlang=en&q=",
-            "google": "https://www.google.com/search?hl=en&q="}
-    async def attempt(name, browser_first):
-        try:
-            html, how = await load_page(urls[name] + quote_plus(query), browser_first)
-        except ToolError:
-            return [], "none"
-        parser = SearchResults(name)
-        parser.feed(html)
-        return [r for r in parser.results if r["url"] and r["title"].strip()], how
-
-    # DuckDuckGo's no-JavaScript page is made for plain requests (it turns headless browsers away);
-    # Bing and Google work better in the browser. Each falls back to the other way, then to DuckDuckGo.
-    results, how = await attempt(engine, engine != "duckduckgo")
-    if not results:
-        results, how = await attempt(engine, engine == "duckduckgo")
-    if not results and engine != "duckduckgo":
-        engine = "duckduckgo"
-        results, how = await attempt(engine, False)
-    if not results:
-        return f"no results for '{query}' ({engine})"
-    lines, seen = [], set()
-    for r in results:
-        url = clean_result_url(r["url"])
-        if url in seen or "duckduckgo.com/y.js" in url:
-            continue
-        seen.add(url)
-        snippet = " ".join(r["snippet"].split())[:240]
-        lines.append(f"{len(lines) + 1}. {' '.join(r['title'].split())}\n   {url}" + (f"\n   {snippet}" if snippet else ""))
-        if len(lines) >= limit:
-            break
-    return f"{engine} · via {how}\n\n" + "\n".join(lines)
-
-
-@tool("web_fetch", "Read a web page (rendered by the user's browser, JavaScript included) as plain text.",
-      {"url": {"type": "string"}, "max_chars": {"type": "integer", "description": "default 20000"}}, ["url"])
-async def tool_web_fetch(args):
-    url = args["url"].strip()
-    if not re.match(r"https?://", url):
-        url = "https://" + url
-    if not await allowed("web", f"fetch {url}"):
-        return DENIED
-    html, how = await load_page(url)
-    title, text = page_text(html)
-    limit = min(max(int(args.get("max_chars") or 20_000), 1000), 100_000)
-    if len(text) > limit:
-        text = text[:limit] + f"\n\n… [{len(text) - limit} more characters; ask for a bigger max_chars to read on]"
-    return f"{title}\n{url} · via {how}\n\n{text or '(no readable text on this page)'}"
-
-
-@tool("remember", "Save a lasting fact, preference or lesson to memory so it's known in future chats. "
-      "scope: project (default) or global (all projects).",
-      {"fact": {"type": "string"}, "scope": {"type": "string", "enum": ["project", "global"]}}, ["fact"])
-async def tool_remember(args):
-    # Global memory goes into every future chat's instructions: ask first, so text from a web page or an email
-    # can't quietly plant lasting instructions.
-    if args.get("scope") == "global" and not await allowed("remember", f"(global) {args['fact']}"):
-        return DENIED
-    return f"saved to {tilde(add_memory(args['fact'], args.get('scope') or 'project'))}"
-
-
-# --- Email: read, search, triage, draft and send over IMAP/SMTP (standard library only). Set up with
-#     `nanocode email` in a terminal, so the password is never typed into the chat. ---
-
-EMAIL_PRESETS = {
-    ("gmail.com", "googlemail.com"): ("imap.gmail.com", 993, "smtp.gmail.com", 465),
-    ("icloud.com", "me.com", "mac.com"): ("imap.mail.me.com", 993, "smtp.mail.me.com", 587),
-    ("outlook.com", "hotmail.com", "live.com", "msn.com"): ("outlook.office365.com", 993, "smtp-mail.outlook.com", 587),
-    ("yahoo.com", "ymail.com"): ("imap.mail.yahoo.com", 993, "smtp.mail.yahoo.com", 465),
-    ("fastmail.com", "fastmail.fm"): ("imap.fastmail.com", 993, "smtp.fastmail.com", 465),
-}
-ALWAYS_ASK = {"email_send"}  # asks every time, even in Auto mode, and "always" can't be chosen
-
-
-def email_config():
-    cfg = st.config.get("email") or {}
-    return cfg if cfg.get("imap_host") and cfg.get("user") and cfg.get("password") else None
-
-
-def email_preset(address):
-    domain = address.rpartition("@")[2].lower()
-    return next((v for k, v in EMAIL_PRESETS.items() if domain in k), None)
-
-
-def is_gmail():
-    return "gmail.com" in (email_config() or {}).get("imap_host", "")
-
-
-class Mailbox:
-    """One IMAP connection for one tool call."""
-
-    def __enter__(self):
-        import imaplib
-        cfg = email_config()
-        if not cfg:
-            raise ToolError("email isn't set up yet: run `nanocode email` in a terminal")
-        try:
-            self.m = imaplib.IMAP4_SSL(cfg["imap_host"], int(cfg.get("imap_port") or 993), timeout=40)
-            self.m.login(cfg["user"], cfg["password"])
-        except (OSError, imaplib.IMAP4.error) as e:
-            raise ToolError(f"couldn't log in to {cfg['imap_host']}: {e}") from e
-        try:   # servers (Gmail, Dovecot) list MOVE and UIDPLUS only once you're logged in
-            typ, data = self.m.capability()
-            if typ == "OK" and data and data[0]:
-                self.m.capabilities = tuple(data[0].decode(errors="replace").upper().split())
-        except (OSError, imaplib.IMAP4.error):
-            pass
-        return self
-
-    def __exit__(self, *exc):
-        try:
-            self.m.logout()
-        except Exception:
-            pass
-
-    def folders(self):
-        """[(name, flags)] with special-use flags like \\Sent, \\Drafts, \\Junk, \\Trash, \\Archive, \\All."""
-        typ, data = self.m.list()
-        result = []
-        for raw in data or []:
-            line = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
-            match = re.match(r'\((?P<flags>[^)]*)\) (?:"[^"]*"|NIL) (?P<name>.+)$', line)
-            if match:
-                result.append((match["name"].strip().strip('"'), match["flags"]))
-        return result
-
-    def special(self, kind):
-        """The folder for "inbox", "sent", "drafts", "junk", "trash" or "archive" (else the name as given)."""
-        kind_l = kind.lower()
-        if kind_l == "inbox":
-            return "INBOX"
-        flags = {"sent": "\\Sent", "drafts": "\\Drafts", "junk": "\\Junk", "spam": "\\Junk", "trash": "\\Trash",
-                 "archive": "\\All" if is_gmail() else "\\Archive"}.get(kind_l)
-        names = self.folders()
-        if flags:
-            for name, f in names:
-                if flags.lower() in f.lower():
-                    return name
-            for name, _ in names:
-                if name.lower().rsplit("/", 1)[-1] in {"sent": ("sent", "sent items", "sent messages", "sent mail"),
-                                                       "drafts": ("drafts",), "junk": ("junk", "spam", "junk email"),
-                                                       "spam": ("junk", "spam"), "trash": ("trash", "deleted items"),
-                                                       "archive": ("archive", "all mail")}[kind_l]:
-                    return name
-            raise ToolError(f"no {kind_l} folder found (folders: {', '.join(n for n, _ in names)})")
-        return kind
-
-    def select(self, folder, readonly=True):
-        name = self.special(folder or "inbox")
-        typ, _ = self.m.select(f'"{name}"', readonly=readonly)
-        if typ != "OK":
-            raise ToolError(f"can't open folder '{name}'")
-        return name
-
-    def uid(self, *args):
-        typ, data = self.m.uid(*args)
-        if typ != "OK":
-            raise ToolError(f"the mail server refused {args[0]}: {data}")
-        return data
-
-    def search(self, *criteria):
-        data = self.uid("SEARCH", *criteria)
-        return [int(x) for x in (data[0] or b"").split()]
-
-    def headers(self, uids):
-        if not uids:
-            return []
-        from email import policy
-        from email.parser import BytesHeaderParser
-        data = self.uid("FETCH", ",".join(map(str, uids)), "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])")
-        rows, i = [], 0
-        while i < len(data):
-            item = data[i]
-            if isinstance(item, tuple):
-                meta = item[0].decode(errors="replace")
-                tail = data[i + 1].decode(errors="replace") if i + 1 < len(data) and isinstance(data[i + 1], bytes) else ""
-                uid = re.search(r"UID (\d+)", meta + tail)
-                flags = re.search(r"FLAGS \(([^)]*)\)", meta + tail)
-                h = BytesHeaderParser(policy=policy.default).parsebytes(item[1])
-                rows.append({"uid": int(uid[1]) if uid else 0, "flags": flags[1] if flags else "",
-                             "from": str(h.get("From", "")), "to": str(h.get("To", "")),
-                             "subject": str(h.get("Subject", "")), "date": str(h.get("Date", ""))})
-            i += 1
-        return sorted(rows, key=lambda r: r["uid"], reverse=True)
-
-    def message(self, uid):
-        from email import message_from_bytes, policy
-        data = self.uid("FETCH", str(uid), "(BODY.PEEK[])")
-        raw = next((item[1] for item in data if isinstance(item, tuple)), None)
-        if raw is None:
-            raise ToolError(f"no message with uid {uid} in this folder")
-        return message_from_bytes(raw, policy=policy.default)
-
-
-def email_rows(rows):
-    if not rows:
-        return "(no messages)"
-    lines = []
-    for r in rows:
-        unread = "" if "\\Seen" in r["flags"] else " ●"
-        star = " ★" if "\\Flagged" in r["flags"] else ""
-        lines.append(f"[{r['uid']}]{unread}{star} {r['date'][:22]} · {r['from'][:48]} · {r['subject'][:90]}")
-    return "\n".join(lines)
-
-
-def uid_list(value):
-    items = value if isinstance(value, list) else re.split(r"[\s,]+", str(value or ""))
-    uids = [int(x) for x in items if str(x).strip().isdigit()]
-    if not uids:
-        raise ToolError("give the message uids (the numbers in [brackets] from email_list)")
-    return uids
-
-
-@tool("email_list", "List recent emails in a folder (inbox, sent, drafts, junk, trash, archive or a folder name), "
-      "newest first. ● marks unread.",
-      {"folder": {"type": "string", "description": "default inbox"}, "limit": {"type": "integer", "description": "default 20"},
-       "unread_only": {"type": "boolean"}})
-async def tool_email_list(args):
-    def work():
-        with Mailbox() as box:
-            name = box.select(args.get("folder") or "inbox")
-            uids = box.search("UNSEEN" if args.get("unread_only") else "ALL")
-            limit = min(max(int(args.get("limit") or 20), 1), 100)
-            return f"{name} · {len(uids)} {'unread' if args.get('unread_only') else 'messages'}\n" + \
-                email_rows(box.headers(uids[-limit:]))
-    return await asyncio.to_thread(work)
-
-
-@tool("email_search", "Search emails by words, sender or subject (Gmail search syntax works on Gmail).",
-      {"query": {"type": "string"}, "folder": {"type": "string", "description": "default inbox"},
-       "limit": {"type": "integer", "description": "default 20"}}, ["query"])
-async def tool_email_search(args):
-    def work():
-        with Mailbox() as box:
-            name = box.select(args.get("folder") or "inbox")
-            query = args["query"].replace('"', "")
-            key = "X-GM-RAW" if is_gmail() else "TEXT"
-            if query.isascii():
-                uids = box.search(key, f'"{query}"') if is_gmail() else box.search("CHARSET", "UTF-8", key, f'"{query}"')
-            else:                     # imaplib only sends ASCII: other text goes as a UTF-8 literal
-                box.m.literal = query.encode("utf-8")
-                uids = box.search("CHARSET", "UTF-8", key)
-            limit = min(max(int(args.get("limit") or 20), 1), 100)
-            return f"{name} · {len(uids)} found for '{query}'\n" + email_rows(box.headers(uids[-limit:]))
-    return await asyncio.to_thread(work)
-
-
-@tool("email_read", "Read one email (headers and text) by its uid. Doesn't mark it as read.",
-      {"uid": {"type": "integer"}, "folder": {"type": "string", "description": "default inbox"}}, ["uid"])
-async def tool_email_read(args):
-    def work():
-        with Mailbox() as box:
-            box.select(args.get("folder") or "inbox")
-            msg = box.message(int(args["uid"]))
-        body = msg.get_body(preferencelist=("plain", "html"))
-        text = ""
-        if body is not None:
-            text = body.get_content()
-            if body.get_content_type() == "text/html":
-                text = page_text(text)[1]
-        files = [p.get_filename() for p in msg.iter_attachments() if p.get_filename()]
-        head = "\n".join(f"{k}: {msg[k]}" for k in ("From", "To", "Cc", "Date", "Subject") if msg[k])
-        extra = f"\nAttachments: {', '.join(files)}" if files else ""
-        return cap(f"{head}{extra}\n\n<email-content untrusted>\n{text.strip()}\n</email-content>", 20_000)
-    return await asyncio.to_thread(work)
-
-
-@tool("email_folders", "List the mail folders.", {})
-async def tool_email_folders(args):
-    def work():
-        with Mailbox() as box:
-            return "\n".join(f"{name}  {flags}" for name, flags in box.folders())
-    return await asyncio.to_thread(work)
-
-
-def compose(args, reply_to=None):
-    from email.message import EmailMessage
-    from email.utils import formatdate, make_msgid
-    cfg = email_config()
-    msg = EmailMessage()
-    msg["From"] = cfg.get("address") or cfg["user"]
-    msg["To"] = args["to"]
-    if args.get("cc"):
-        msg["Cc"] = args["cc"]
-    subject = args.get("subject") or ""
-    if reply_to is not None:
-        if not subject:
-            subject = str(reply_to.get("Subject", ""))
-            subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
-        if reply_to.get("Message-ID"):
-            msg["In-Reply-To"] = reply_to["Message-ID"]
-            msg["References"] = f"{reply_to.get('References', '')} {reply_to['Message-ID']}".strip()
-    msg["Subject"] = subject
-    msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid()
-    msg.set_content(args["body"])
-    return msg
-
-
-COMPOSE_ARGS = {"to": {"type": "string"}, "subject": {"type": "string", "description": "for a reply, can be left out"},
-                "body": {"type": "string"}, "cc": {"type": "string"},
-                "reply_to_uid": {"type": "integer", "description": "uid of the email this replies to (threads it)"},
-                "reply_folder": {"type": "string", "description": "folder of that email, default inbox"}}
-
-
-def original(box, args):
-    if not args.get("reply_to_uid"):
-        return None
-    box.select(args.get("reply_folder") or "inbox")
-    return box.message(int(args["reply_to_uid"]))
-
-
-@tool("email_draft", "Save an email as a draft in the Drafts folder (nothing is sent). Prefer this over sending.",
-      COMPOSE_ARGS, ["to", "body"])
-async def tool_email_draft(args):
-    if not await allowed("email_draft", f"draft to {args['to']}: {args.get('subject') or '(reply)'}"):
-        return DENIED
-
-    def work():
-        import imaplib
-        with Mailbox() as box:
-            msg = compose(args, original(box, args))
-            drafts = box.special("drafts")
-            typ, data = box.m.append(f'"{drafts}"', "\\Draft", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
-            if typ != "OK":
-                raise ToolError(f"couldn't save the draft: {data}")
-            return f"draft saved in {drafts}: to {msg['To']} · {msg['Subject']}"
-    return await asyncio.to_thread(work)
-
-
-@tool("email_send", "Send an email. Only when the user explicitly asked to send it; they confirm every send.",
-      COMPOSE_ARGS, ["to", "body"])
-async def tool_email_send(args):
-    preview = f"to {args['to']}" + (f" cc {args['cc']}" if args.get("cc") else "") + \
-        f": {args.get('subject') or '(reply)'} — {' '.join(args['body'].split())[:80]}"
-    if not await allowed("email_send", preview):
-        return DENIED
-
-    def work():
-        import imaplib
-        import smtplib
-        cfg = email_config()
-        with Mailbox() as box:
-            msg = compose(args, original(box, args))
-            port = int(cfg.get("smtp_port") or 465)
-            try:
-                smtp = smtplib.SMTP_SSL(cfg["smtp_host"], port, timeout=40) if port == 465 else \
-                    smtplib.SMTP(cfg["smtp_host"], port, timeout=40)
-                with smtp:
-                    if port != 465:
-                        smtp.starttls()
-                    smtp.login(cfg["user"], cfg["password"])
-                    smtp.send_message(msg)
-            except (OSError, smtplib.SMTPException) as e:
-                raise ToolError(f"sending failed: {e}") from e
-            if not is_gmail():                      # Gmail files sent mail itself
-                try:
-                    box.m.append(f'"{box.special("sent")}"', "\\Seen", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
-                except (ToolError, imaplib.IMAP4.error):
-                    pass
-            return f"sent to {msg['To']}: {msg['Subject']}"
-    return await asyncio.to_thread(work)
-
-
-@tool("email_tag", "Organize emails: mark read/unread, star, add or remove tags (Gmail labels), or move them "
-      "(e.g. spam to junk, to archive or trash). Ask the user before changing many messages.",
-      {"uids": {"type": "array", "items": {"type": "integer"}}, "folder": {"type": "string", "description": "default inbox"},
-       "add": {"type": "array", "items": {"type": "string"}, "description": "read, starred, or tag names"},
-       "remove": {"type": "array", "items": {"type": "string"}},
-       "move_to": {"type": "string", "description": "junk, trash, archive, inbox or a folder name"}}, ["uids"])
-async def tool_email_tag(args):
-    uids = uid_list(args["uids"])
-    what = ", ".join(x for x in [("+" + " +".join(args["add"])) if args.get("add") else "",
-                                 ("-" + " -".join(args["remove"])) if args.get("remove") else "",
-                                 f"move to {args['move_to']}" if args.get("move_to") else ""] if x)
-    if not what:
-        raise ToolError("say what to do: add, remove or move_to")
-    if not await allowed("email_tag", f"{len(uids)} message{'s' if len(uids) != 1 else ''}: {what}"):
-        return DENIED
-
-    def flag(name):
-        return {"read": "\\Seen", "seen": "\\Seen", "starred": "\\Flagged", "flagged": "\\Flagged",
-                "star": "\\Flagged"}.get(name.lower())
-
-    def work():
-        with Mailbox() as box:
-            box.select(args.get("folder") or "inbox", readonly=False)
-            ids = ",".join(map(str, uids))
-            for change, key in (("+", "add"), ("-", "remove")):
-                for name in args.get(key) or []:
-                    system = flag(name)
-                    if system:
-                        box.uid("STORE", ids, f"{change}FLAGS", f"({system})")
-                    elif is_gmail():
-                        box.uid("STORE", ids, f"{change}X-GM-LABELS", f'("{name}")')
-                    else:
-                        box.uid("STORE", ids, f"{change}FLAGS", "(" + re.sub(r"[^\w-]", "_", name) + ")")
-            if args.get("move_to"):
-                target = box.special(args["move_to"])
-                if "MOVE" in box.m.capabilities:
-                    box.uid("MOVE", ids, f'"{target}"')
-                else:
-                    box.uid("COPY", ids, f'"{target}"')
-                    box.uid("STORE", ids, "+FLAGS", "(\\Deleted)")
-                    if "UIDPLUS" in box.m.capabilities:
-                        box.uid("EXPUNGE", ids)      # only these, not other mail flagged deleted elsewhere
-                    else:
-                        box.m.expunge()
-            return f"done: {len(uids)} message{'s' if len(uids) != 1 else ''} ({what})"
-    return await asyncio.to_thread(work)
-
-
-EMAIL_TRIAGE = ("Check my email inbox: list the unread messages, then give me a short summary grouped by what "
-                "needs a reply, what's FYI, and what looks like spam or newsletters. Suggest tags and which ones "
-                "to move to junk or archive, but don't change or send anything until I say so.")
-
-
-async def cmd_email(arg):
-    if arg in ("setup", "set up"):
-        out(f"⏺ Set up email in a terminal, so your password isn't typed into the chat:\n"
-            f"  {CYAN}nanocode email{RESET}  {DIM}(Gmail and iCloud need an app password){RESET}\n")
-        return
-    if not email_config():
-        out(f"{YELLOW}⏺ email isn't set up yet.{RESET} Run {CYAN}nanocode email{RESET} in a terminal first.\n")
-        return
-    await send(EMAIL_TRIAGE if not arg else f"Email task: {arg}", display=f"/email {arg}".strip())
-
-
-def email_setup():
-    """`nanocode email`: connect a mailbox (IMAP for reading, SMTP for sending)."""
-    import imaplib
-    st.config = load_config()
-    print(f"{BOLD}Email for nanocode{RESET} {DIM}(IMAP/SMTP; the password is stored in {tilde(config_file())}, "
-          f"readable only by you){RESET}\n")
-    current = st.config.get("email") or {}
-    known = current.get("address", "")
-    address = input(f"  Email address{f' [{known}]' if known else ''}: ").strip() or known
-    if not address:
-        print("nothing to set up")
-        return 1
-    preset = email_preset(address) or (current.get("imap_host"), current.get("imap_port") or 993,
-                                       current.get("smtp_host"), current.get("smtp_port") or 465)
-
-    def ask(label, default):
-        value = input(f"  {label}{f' [{default}]' if default else ''}: ").strip()
-        return value or default
-
-    cfg = {"address": address, "imap_host": ask("IMAP server", preset[0]), "imap_port": int(ask("IMAP port", preset[1] or 993)),
-           "smtp_host": ask("SMTP server", preset[2]), "smtp_port": int(ask("SMTP port (465 or 587)", preset[3] or 465)),
-           "user": ask("Username", address)}
-    if "gmail" in cfg["imap_host"] or "me.com" in cfg["imap_host"]:
-        print(f"  {DIM}Use an app password: Gmail → myaccount.google.com/apppasswords · iCloud → account.apple.com → App-Specific Passwords{RESET}")
-    cfg["password"] = getpass.getpass("  Password (hidden): ") or current.get("password", "")
-    print(f"  {DIM}checking…{RESET}")
-    try:
-        box = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"], timeout=30)
-        box.login(cfg["user"], cfg["password"])
-        box.logout()
-    except Exception as e:
-        print(f"  {RED}✗ couldn't log in: {e}{RESET}")
-        return 1
-    st.config["email"] = cfg
-    save_config()
-    print(f"  {GREEN}✓ connected{RESET} · in nanocode try {CYAN}/email{RESET}")
-    return 0
 
 
 # --- Planning and sub-agents ---
@@ -3013,18 +2129,21 @@ def subagent_tools(tool):
     return name in AGENT_READ_ONLY
 
 
-async def run_subagent(task, label):
+async def run_subagent(task, label, prompt=SUBAGENT_PROMPT, tools=None, model=None):
     """A fresh context for one subtask; returns its report. Runs in its own asyncio task, so its quiet
-    streaming and narrower tools never affect the main chat."""
+    streaming and narrower tools never affect the main chat. A custom agent (nanokit/agents.py) passes its own
+    prompt, tool filter and model."""
     async def work():
         QUIET.set(True)
         AGENT_LABEL.set(label)
-        TOOL_FILTER.set(subagent_tools)
-        system = build_system_prompt() + "\n\n" + SUBAGENT_PROMPT
+        TOOL_FILTER.set(tools or subagent_tools)
+        if model:
+            CALL_MODEL.set(model)
+        system = build_system_prompt() + "\n\n" + prompt
         totals = {"input": 0, "output": 0, "cost": 0.0, "steps": 0}
         if st.backend == "sdk":
             server = sdk.create_sdk_mcp_server(name="nano", version=__version__, tools=sdk_tools())
-            options = sdk.ClaudeAgentOptions(mcp_servers={"nano": server}, model=st.model, system_prompt=system,
+            options = sdk.ClaudeAgentOptions(mcp_servers={"nano": server}, model=call_model(), system_prompt=system,
                                              allowed_tools=[f"mcp__nano__{t['name']}" for t in active_tools()],
                                              setting_sources=[], strict_mcp_config=True, max_turns=40, cwd=os.getcwd(),
                                              disallowed_tools=["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob",
@@ -3530,6 +2649,8 @@ def mcp_result_text(result, spec, label):
 
 MCP_TOOLS = {}
 MCP_DIRECT_LIMIT = 20
+# Remote servers ({"url": ...}): set by nanokit/mcp_http.py to (name, spec) -> a client like McpClient.
+MCP_REMOTE = None
 
 
 def mcp_servers():
@@ -3544,12 +2665,19 @@ def mcp_spawn_for(name, spec):
     def spawn():
         command = spec.get("command")
         if not command:
-            raise ToolError(f"MCP server '{name}' has no command (only local stdio servers are supported)")
+            raise ToolError(f"MCP server '{name}' has no command" +
+                            (" (remote servers need nanokit/mcp_http.py)" if spec.get("url") else ""))
         expand = lambda v: os.path.expandvars(os.path.expanduser(str(v)))  # noqa: E731
         argv = [expand(command)] + [expand(a) for a in spec.get("args") or []]
         env = {**os.environ, **{k: expand(v) for k, v in (spec.get("env") or {}).items()}}
         return argv, env
     return spawn
+
+
+def mcp_client_for(name, spec):
+    if spec.get("url") and MCP_REMOTE:
+        return MCP_REMOTE(name, spec)
+    return McpClient(f"MCP {name}", mcp_spawn_for(name, spec))
 
 
 def mcp_tool_name(server, tool):
@@ -3602,12 +2730,15 @@ async def _ensure_mcp():
 
     async def load(name, spec):
         if name not in st.mcp:
-            st.mcp[name] = McpClient(f"MCP {name}", mcp_spawn_for(name, spec))
+            st.mcp[name] = mcp_client_for(name, spec)
             st.mcp[name].spec = json.dumps(spec, sort_keys=True)
         try:
             return name, await asyncio.wait_for(st.mcp[name].list_tools(), wait)
-        except (ToolError, OSError, asyncio.TimeoutError) as e:
-            st.mcp_errors[name] = str(e) or f"didn't answer within {wait}s"
+        except Exception as e:                 # any failure of one server (network, protocol, a bug) stays its own
+            if not isinstance(e, (ToolError, OSError, asyncio.TimeoutError)):
+                log_error(e)
+            st.mcp_errors[name] = str(e) or (f"didn't answer within {wait}s" if isinstance(e, asyncio.TimeoutError)
+                                             else type(e).__name__)
             return name, {}
 
     st.mcp_errors = {}
@@ -3755,6 +2886,12 @@ async def cmd_mcp(arg):
         for name, (label, spec) in mcp_import_candidates().items():
             if name in servers:
                 continue
+            if spec.get("url") and MCP_REMOTE:   # a remote server: its URL and headers
+                servers[name] = {k: spec[k] for k in ("url", "headers") if spec.get(k)}
+                if spec.get("type") == "sse":
+                    servers[name]["type"] = "sse"
+                added.append(f"{name} {DIM}from {label}{RESET}")
+                continue
             if not spec.get("command") or spec.get("type") not in (None, "stdio"):
                 skipped.append(f"{name} (remote server)")
                 continue
@@ -3813,7 +2950,7 @@ async def cmd_mcp(arg):
             on = len(mcp_enabled_tools(name))
             how = "via mcp_search" if name in st.mcp_many else "offered directly"
             state = f"{GREEN}● {on}/{len(tools)} tools{RESET} {DIM}{how}{RESET}"
-        lines.append(f"  {CYAN}{name:<16}{RESET} {state}  {DIM}{spec.get('command', '')}{RESET}")
+        lines.append(f"  {CYAN}{name:<16}{RESET} {state}  {DIM}{spec.get('command') or spec.get('url', '')}{RESET}")
     if not mcp_servers():
         lines.append(f"  {DIM}none yet. Add one: /mcp add github npx -y @modelcontextprotocol/server-github{RESET}")
         lines.append(f"  {DIM}or copy the ones you use in Claude Code / Claude Desktop: /mcp import{RESET}")
@@ -3903,6 +3040,7 @@ def build_system_prompt():
         "finishing a non-trivial multi-step task that's likely to recur, save the procedure with `save_skill` "
         "(or improve the existing skill). Keep saved items short and specific; never save secrets."
     )
+    parts += [p for p in hook_sync("system_prompt") if isinstance(p, str) and p.strip()]
     return "\n\n".join(parts)
 
 
@@ -3980,6 +3118,12 @@ async def make_client(resume=None):
     try:
         await client.connect()
     except Exception as e:
+        if resume and "no conversation found" in str(e).lower():
+            # Claude Code no longer has that conversation (cleaned up, or another machine): start a new one,
+            # keeping what's on screen, rather than failing to open the chat at all.
+            out(f"  {DIM}⎿  Claude Code no longer has this chat's conversation; continuing in a new one{RESET}")
+            st.session["sdk_session_id"] = None
+            return await make_client()
         if type(e).__name__ == "CLINotFoundError":
             raise RuntimeError("Claude Code CLI not found. Install it (curl -fsSL https://claude.ai/install.sh | bash), "
                                "log in with `claude` → /login, or switch provider: nanocode setup") from e
@@ -3988,11 +3132,29 @@ async def make_client(resume=None):
 
 
 async def sdk_query(text, images=None):
+    connecting = st.current_tab().connecting
+    if st.client is None and connecting is not None and not connecting.done():
+        try:
+            await asyncio.shield(connecting)       # the connection started at launch: use it, don't make a second
+        except Exception:
+            pass
     if st.client is None:                      # a new tab connects on its first message
         st.client = await make_client(resume=st.session.get("sdk_session_id"))
     st.sdk_streaming = True       # Esc lets the SDK stop this itself (cancelling would leave its reply half read)
     try:
-        return await _sdk_query(text, images)
+        try:
+            return await _sdk_query(text, images)
+        except Exception as e:
+            if type(e).__name__ != "CLIConnectionError":
+                raise
+            # Claude Code's process went away (sleep, crash, a failed resume): connect again, same chat, once.
+            out(f"  {DIM}⎿  reconnecting to Claude Code…{RESET}")
+            try:
+                await st.client.disconnect()
+            except Exception:
+                pass
+            st.client = await make_client(resume=st.session.get("sdk_session_id"))
+            return await _sdk_query(text, images)
     finally:
         st.sdk_streaming = False
 
@@ -4119,13 +3281,15 @@ def fit_history(messages, budget):
     return msgs, True
 
 
-def api_error(status, body):
+def api_error(status, body, api=None):
     try:
         err = json.loads(body).get("error", body)
         message = err.get("message", str(err)) if isinstance(err, dict) else str(err)
     except (json.JSONDecodeError, AttributeError):
         message = body
     message = str(message)[:300]
+    if api:
+        return api.error(status, message)
     if status == 401:
         return f"OpenRouter rejected the API key ({message}). Fix it with: nanocode setup"
     if status == 402:
@@ -4175,13 +3339,16 @@ async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
         payload["reasoning"] = reasoning
     headers = {"Authorization": f"Bearer {st.openrouter_key}", "X-Title": "nanocode",
                "HTTP-Referer": f"https://github.com/{REPO}"}
+    url, api = OPENROUTER_URL, api_endpoint()
+    if api:                                    # OpenAI, Gemini, DeepSeek…: their URL, key and fields
+        url, headers, payload = api.url(), api.headers(), api.prepare(payload, reasoning)
     timeout = httpx.Timeout(connect=20, read=300, write=60, pool=20)
     try:
         async with httpx.AsyncClient(timeout=timeout) as http:
-            async with http.stream("POST", OPENROUTER_URL, headers=headers, json=payload) as resp:
+            async with http.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode(errors="replace")
-                    message = api_error(resp.status_code, body)
+                    message = api_error(resp.status_code, body, api)
                     if reasoning and rejects_thinking(resp.status_code, message):
                         raise ThinkingUnsupported(message)
                     if resp.status_code == 400 and "cache" in message.lower() and \
@@ -4205,7 +3372,8 @@ async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
                         continue
                     if chunk.get("error"):
                         err = chunk["error"]
-                        raise RuntimeError(f"OpenRouter: {err.get('message', err) if isinstance(err, dict) else err}")
+                        raise RuntimeError(f"{api.label if api else 'OpenRouter'}: "
+                                           f"{err.get('message', err) if isinstance(err, dict) else err}")
                     if chunk.get("model") and not QUIET.get():
                         st.routed_model = chunk["model"]
                     if chunk.get("usage"):
@@ -4238,7 +3406,7 @@ async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
             for i, tc in sorted(tool_calls.items())
         ]
     return message, {"input": usage.get("prompt_tokens") or 0, "output": usage.get("completion_tokens") or 0,
-                     "cost": usage.get("cost") or 0}
+                     "cost": (api.cost(call_model(), usage) if api else usage.get("cost")) or 0}
 
 
 def with_cache_marks(messages):
@@ -4699,8 +3867,20 @@ async def resume_session(arg):
     out(f"{GREEN}⏺ Resumed:{RESET} {match['title']} {DIM}({time_ago(match['updated'])}){RESET}\n")
 
 
+async def settle_connection():
+    """Waits for this tab's launch connection to Claude Code, if it's still being made, so whatever replaces
+    the client next (another chat, a new chat, another model) isn't overwritten by it afterwards."""
+    connecting = st.current_tab().connecting
+    if connecting is not None and not connecting.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(connecting), 60)
+        except Exception:
+            pass
+
+
 async def open_session(match):
     """Makes a saved chat the current one: its messages (or Claude session), usage and screen."""
+    await settle_connection()
     st.model = match.get("model") or st.model
     if st.backend == "sdk":
         if st.client:
@@ -4718,6 +3898,7 @@ async def open_session(match):
 
 
 async def new_chat(announce=True):
+    await settle_connection()
     if st.backend == "sdk":
         if st.client:
             await st.client.disconnect()
@@ -4798,7 +3979,8 @@ def model_choices():
     if st.backend == "ollama":
         return {m["name"]: f"{m['params']} · {m['size_gb']:.1f} GB" + ("" if m["tools"] else " · no tool support")
                 for m in st.ollama_models}
-    return OPENROUTER_MODELS
+    api = API_PROVIDERS.get(st.provider)
+    return api.models() if api else OPENROUTER_MODELS
 
 
 def provider_status(name):
@@ -4814,6 +3996,8 @@ def provider_status(name):
             return None if st.config.get("models", {}).get("ollama") else "no model chosen yet: run `nanocode setup`"
         except Exception:
             return "Ollama isn't running (open the Ollama app, or run: ollama serve)"
+    if name in API_PROVIDERS:
+        return API_PROVIDERS[name].status()
     return "unknown provider"
 
 
@@ -4872,6 +4056,7 @@ async def cmd_provider(arg):
 async def cmd_model(arg):
     if arg:
         st.model = arg
+        await settle_connection()
         if st.backend == "sdk" and st.client:
             await st.client.set_model(arg)
         st.config.setdefault("models", {})[st.provider] = arg
@@ -4887,8 +4072,10 @@ async def cmd_model(arg):
     for name, desc in model_choices().items():
         mark = f"{GREEN}●{RESET}" if name == st.model else " "
         lines.append(f" {mark} {CYAN}{name:<32}{RESET} {DIM}{desc}{RESET}")
-    if st.backend == "api":
+    if st.provider == "openrouter":
         lines.append(f"\n  {DIM}any slug from openrouter.ai/models works too{RESET}")
+    elif st.provider in API_PROVIDERS:
+        lines.append(f"\n  {DIM}any model name {provider_label()} accepts works too{RESET}")
     out("\n".join(lines) + "\n")
 
 
@@ -5143,8 +4330,9 @@ SECRET_WORDS = ("key", "token", "password", "secret", "auth", "pass", "cookie", 
 
 def redact(value, name=""):
     """A copy of a config value with secrets masked, at any depth (email password, MCP env tokens, API keys)."""
-    if isinstance(value, dict):
-        return {k: redact(v, k) for k, v in value.items()}
+    if isinstance(value, dict):   # under a secret's name ("api_keys": {"openai": ...}), everything is secret
+        secret = any(w in name.lower() for w in SECRET_WORDS)
+        return {k: redact(v, name if secret else k) for k, v in value.items()}
     if isinstance(value, list):
         return [redact(v, name) for v in value]
     if isinstance(value, str) and value and any(w in name.lower() for w in SECRET_WORDS):
@@ -5470,139 +4658,9 @@ async def cmd_think(arg):
     out(f"{GREEN}⏺ Thinking: {arg}{RESET} {DIM}{THINK_HELP[arg]}{RESET}\n")
 
 
-# --- /compare: one prompt to several models, answers side by side. Runs only when the user types the
-#     command; it is not a tool, so the model can never start it. Only the prompt (and files the user
-#     attached with @) is sent: no chat history, no memory, no project details. ---
-
-COMPARE_SYSTEM = "Answer the user's message directly and concisely. Use Markdown where it helps."
-
-
-def compare_models():
-    chosen = st.config.get("compare_models")
-    if chosen:
-        return list(chosen)
-    others = [m for m in model_choices() if m != st.model and not m.startswith("openrouter/")]
-    prefix = "claude:" if st.backend == "sdk" else "ollama:" if st.backend == "ollama" else ""
-    return [prefix + m for m in [st.model] + others[:2]]
-
-
-def compare_target(entry):
-    """("claude" | "ollama" | "openrouter", model) for 'claude:x', 'ollama:x' or a plain OpenRouter model."""
-    head, _, rest = entry.partition(":")
-    if head in ("claude", "ollama", "openrouter") and rest:
-        return head, rest
-    return "openrouter", entry
-
-
-async def compare_one(entry, prompt):
-    """One model's answer, without streaming into the chat. {model, text, error, seconds, input, output, cost}"""
-    kind, model = compare_target(entry)
-    result = {"model": entry, "text": "", "error": None, "input": 0, "output": 0, "cost": 0.0}
-    started = time.time()
-    QUIET.set(True)
-    CALL_MODEL.set(model)
-    try:
-        if kind == "claude":
-            if sdk is None:
-                raise RuntimeError("claude-agent-sdk isn't installed")
-            options = sdk.ClaudeAgentOptions(model=model, system_prompt=COMPARE_SYSTEM, setting_sources=[],
-                                             strict_mcp_config=True, max_turns=1, cwd=os.getcwd(),
-                                             disallowed_tools=["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob",
-                                                               "Grep", "WebFetch", "WebSearch", "Task", "TodoWrite"])
-            if "tools" in {f.name for f in dataclasses.fields(sdk.ClaudeAgentOptions)}:
-                options.tools = []
-            async for msg in sdk.query(prompt=prompt, options=options):
-                if isinstance(msg, sdk.AssistantMessage):
-                    result["text"] += "".join(b.text for b in msg.content if isinstance(b, sdk.TextBlock))
-                elif isinstance(msg, sdk.ResultMessage):
-                    usage = msg.usage or {}
-                    result["input"] = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens",
-                                                                       "cache_creation_input_tokens"))
-                    result["output"], result["cost"] = usage.get("output_tokens") or 0, msg.total_cost_usd or 0
-                    if msg.is_error:
-                        raise RuntimeError(msg.result or msg.subtype)
-        else:
-            messages = [{"role": "user", "content": prompt}]
-            if kind == "ollama":
-                message, usage = await ollama_stream(COMPARE_SYSTEM, messages, use_tools=False)
-            else:
-                st.openrouter_key = st.openrouter_key or os.environ.get("OPENROUTER_API_KEY") or \
-                    st.config.get("openrouter_api_key")
-                if not st.openrouter_key:
-                    raise RuntimeError("no OpenRouter key (nanocode setup)")
-                message, usage = await openrouter_stream(COMPARE_SYSTEM, messages, use_tools=False)
-            result["text"] = message.get("content") or ""
-            result.update(input=usage.get("input") or 0, output=usage.get("output") or 0, cost=usage.get("cost") or 0)
-    except Exception as e:  # one model failing doesn't stop the others
-        result["error"] = str(e) or type(e).__name__
-    result["seconds"] = time.time() - started
-    return result
-
-
-def render_compare(results):
-    """Columns when they fit (up to 3, at least ~30 characters each), otherwise one under the other."""
-    from rich.markdown import Markdown as Md
-    from rich.panel import Panel
-    from rich.table import Table
-    from rich.text import Text
-    width = max(40, messages_width() - 3)
-    buf = io.StringIO()
-    console = Console(file=buf, force_terminal=True, color_system="truecolor", width=width)
-
-    def cell(r):
-        foot = Text(f"{fmt_duration(r['seconds'])} · {fmt_tokens(r['input'])} in · {fmt_tokens(r['output'])} out"
-                    + (f" · ${r['cost']:.4f}" if r["cost"] else ""), style=THEME["muted"])
-        body = Text(f"error: {r['error']}", style=THEME["error"]) if r["error"] else Md(r["text"] or "(empty)")
-        from rich.console import Group
-        return Group(body, Text(""), foot)
-
-    side = len(results) <= 3 and width // len(results) >= 30
-    if side:
-        table = Table(box=None, expand=True, show_edge=False, padding=(0, 2, 0, 0))
-        for r in results:
-            table.add_column(Text(pretty_model(r["model"]), style=f"bold {THEME['accent']}"), ratio=1)
-        table.add_row(*[cell(r) for r in results])
-        console.print(table)
-    else:
-        for r in results:
-            console.print(Panel(cell(r), title=Text(pretty_model(r["model"]), style=f"bold {THEME['accent']}"),
-                                title_align="left", border_style=THEME["border"]))
-    return "\n".join("   " + line for line in buf.getvalue().rstrip("\n").split("\n"))
-
-
-async def cmd_compare(arg):
-    if not arg:
-        models = compare_models()
-        out(f"{BOLD}Compare{RESET} {DIM}(/compare <prompt>){RESET}\n  models: " + ", ".join(models) +
-            f"\n  {DIM}change: /compare models <a>, <b>, <c>  ·  claude:<model> and ollama:<model> work too{RESET}\n"
-            f"  {DIM}only your prompt (and files you attach with @) is sent: no chat history or memory{RESET}\n")
-        return
-    if arg.startswith("models"):
-        chosen = [m.strip() for m in arg[len("models"):].replace(",", " ").split() if m.strip()]
-        if not chosen:
-            st.config.pop("compare_models", None)
-        else:
-            st.config["compare_models"] = chosen[:6]
-        save_config()
-        out(f"{GREEN}⏺ Compare models:{RESET} {', '.join(compare_models())}\n")
-        return
-    models = compare_models()
-    if len(models) < 2:
-        out(f"{RED}⏺ pick at least two models: /compare models <a>, <b>{RESET}\n")
-        return
-    out(user_block(arg))
-    out(f"   {fg('muted')}comparing {len(models)} models: {', '.join(models)}{RESET}")
-    prompt = expand_mentions(expand_chips(arg, []))
-    results = await asyncio.gather(*(compare_one(m, prompt) for m in models))
-    for r in results:
-        st.usage["input"] += r["input"]
-        st.usage["output"] += r["output"]
-        st.usage["cost"] += r["cost"] or 0
-    out(render_compare(results) + "\n")
-
-
 async def refresh_sdk_prompt():
     """The SDK fixes the system prompt at connect time; reconnect (same chat) so new memory applies now."""
+    await settle_connection()
     if st.backend == "sdk" and st.client:
         await st.client.disconnect()
         st.client = await make_client(resume=st.session.get("sdk_session_id"))
@@ -5635,23 +4693,38 @@ async def send(text, display=None, images=None):
     if st.backend == "sdk" and st.client and st.client_signature != sdk_signature():
         await refresh_sdk_prompt()             # tools or memory changed since this tab connected (maybe in another)
 
+    await hook("turn_start", text=text)
+    error = None
     try:
         if st.backend == "sdk":
             await sdk_query(text, images)
         else:
             await api_query(text, images)
+    except BaseException as e:
+        error = str(e) or type(e).__name__
+        raise
     finally:
         save_session()
+        if not isinstance(error, str) or error != "CancelledError":
+            await asyncio.shield(hook("turn_end", text=text, error=error))
 
 
 async def run_input(text):
     """Handles one input from the prompt: a command, a # memory note, a /skill, or a message."""
     st.last_error = None
     try:
+        for answer in await hook("message", text=text):
+            if isinstance(answer, str):
+                text = answer
+        if not text.strip():
+            return
         word, _, arg = text.partition(" ")
         word = ALIASES.get(word, word)
         arg = arg.strip()
-        if text.startswith("#") and len(text) > 1 and not text.startswith("#!"):
+        feature = nanokit.COMMANDS.get(word) if nanokit else None
+        if feature:
+            await feature["fn"](arg)
+        elif text.startswith("#") and len(text) > 1 and not text.startswith("#!"):
             path = add_memory(text.lstrip("#").strip())
             out(f"{GREEN}⏺ Remembered{RESET} {DIM}→ {tilde(path)}{RESET}\n")
             await refresh_sdk_prompt()
@@ -6305,6 +5378,9 @@ def build_app():
 
     def meta_row():
         mode = ("Auto", "class:mode.auto") if st.auto_approve else ("Ask", "class:mode")
+        modes = sys.modules.get("nanokit.modes")
+        if modes and modes.current_mode() == "plan":   # plan mode (shift+tab): read-only, like OpenCode's
+            mode = ("Plan", "class:mode.plan")
         level = think_level()
         following = THINK_LEVELS[(THINK_LEVELS.index(level) + 1) % len(THINK_LEVELS)]
 
@@ -6629,6 +5705,8 @@ def build_app():
                     for name, info in list_skills().items()]
         actions.append(("Exit", "ctrl+x q", lambda: st.app.exit()))
         open_dialog("Commands", actions)
+
+    st.ui.update(palette=palette, sessions_dialog=sessions_dialog, models_dialog=models_dialog)
 
     # --- keys ---
     kb = KeyBindings()
@@ -6971,6 +6049,8 @@ def build_app():
         Window(FormattedTextControl(toast_fragments), dont_extend_height=True, dont_extend_width=True),
         filter=Condition(lambda: bool(live_toasts())))
 
+    hook_sync("keybindings", kb=kb, ui=st.ui)   # keys added by feature modules (and your own keybinds)
+
     style = tui_style()
 
     app = Application(
@@ -7024,6 +6104,7 @@ def tui_style():
         "placeholder": f"fg:{T['faint']}",
         "mode": f"bg:{T['panel']} fg:{T['accent']} bold",
         "mode.auto": f"bg:{T['panel']} fg:{T['warning']} bold",
+        "mode.plan": f"bg:{T['panel']} fg:{T['accent2']} bold",
         "think": f"bg:{T['panel']} fg:{T['think']} bold", "think.off": f"bg:{T['panel']} fg:{T['muted']}",
         "thinking": f"fg:{T['think']}",
         "bar": f"bg:{T['bg']} fg:{T['accent']}",
@@ -7121,6 +6202,10 @@ def on_enter(buff):
         return False
     if ALIASES.get(text, text) == "/q":
         restart_app() if st.update_state == "installed" else st.app.exit()  # like OpenCode: /exit to restart
+        return False
+    feature = nanokit.COMMANDS.get(word) if nanokit else None
+    if feature and feature.get("anytime") and st.task and not st.task.done():
+        in_tab(st.active_tab, run_input(text))   # runs now, beside the reply being written
         return False
     if (st.task and not st.task.done()) or st.queue:
         st.queue.append(text)                  # like Claude Code: sent when the current reply finishes
@@ -7253,8 +6338,14 @@ def setup_wizard():
     print(f"  {BOLD}Setup{RESET} {DIM}· saved to {tilde(config_file())} · change anytime: nanocode setup{RESET}")
     if sdk is None:
         print(f"  {YELLOW}claude-agent-sdk isn't installed here, so only OpenRouter and Ollama will work.{RESET}")
-    provider = pick("Which provider?", [(k, v[1], v[2]) for k, v in PROVIDERS.items()],
-                    st.config.get("provider", "claude" if sdk else "openrouter"))
+    saved_provider = st.config.get("provider", "claude" if sdk else "openrouter")
+    options = [(k, v[1], v[2]) for k, v in PROVIDERS.items() if k not in API_PROVIDERS]
+    more = [(k, v[1], v[2]) for k, v in PROVIDERS.items() if k in API_PROVIDERS]
+    if more:                                   # OpenAI, Anthropic, Gemini… (nanokit/providers.py)
+        options.append(("more", "More providers", "OpenAI, Anthropic, Gemini, DeepSeek, Groq, LM Studio, any API…"))
+    provider = pick("Which provider?", options, "more" if saved_provider in API_PROVIDERS else saved_provider)
+    if provider == "more":
+        provider = pick("More providers", more, saved_provider if saved_provider in API_PROVIDERS else more[0][0])
     if provider not in PROVIDERS:
         provider = "claude"
     st.config["provider"] = provider
@@ -7300,6 +6391,8 @@ def setup_wizard():
         size = ask("Context size in tokens (bigger = slower on small machines)",
                    str(st.config.get("ollama_num_ctx", default_num_ctx())))
         st.config["ollama_num_ctx"] = int(size) if size.isdigit() else default_num_ctx()
+    elif provider in API_PROVIDERS:
+        API_PROVIDERS[provider].setup(models, current)   # its key and model
 
     if rea_runtime() is not None:
         st.config["rea"] = pick("REA reverse-engineering tools (loaded only when a task needs them)",
@@ -7326,6 +6419,9 @@ def apply_config(provider=None):
     apply_theme(st.config)
     if st.backend == "sdk" and sdk is None:
         return "claude-agent-sdk isn't installed. Reinstall nanocode, or pick another provider: nanocode setup"
+    if provider in API_PROVIDERS:
+        st.model = st.model or API_PROVIDERS[provider].default_model()
+        return API_PROVIDERS[provider].status()
     if st.backend == "api":
         st.openrouter_key = os.environ.get("OPENROUTER_API_KEY") or st.config.get("openrouter_api_key")
         if not st.openrouter_key:
@@ -7357,6 +6453,12 @@ def doctor():
         print(f"  {warn} nanocode {latest} is available (you have {__version__}): nanocode update")
     else:
         print(f"  {ok} nanocode {__version__} is the latest")
+    if nanokit is None:
+        print(f"  {warn} the nanokit/ folder is missing, so only the core features work: nanocode update")
+    else:
+        print(f"  {ok} features: {len(nanokit.LOADED)} loaded" + (f", {len(nanokit.ERRORS)} failed" if nanokit.ERRORS else ""))
+        for name, error in nanokit.ERRORS.items():
+            print(f"  {bad} feature {name}: {error}")
     from importlib import metadata
     for name in ("httpx", "rich", "prompt_toolkit"):
         try:
@@ -7380,7 +6482,7 @@ def doctor():
     if error:
         print(f"  {bad} {error}")
         return 1
-    if st.backend == "api":
+    if st.provider == "openrouter":
         try:
             resp = httpx.get("https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {st.openrouter_key}"},
                              timeout=10)
@@ -7474,18 +6576,26 @@ async def run_interactive(resume_last=False):
     install_key_translation(keys)
 
     async def startup():
+        await asyncio.sleep(0.05)  # after the switch to the full-screen buffer, which has its own key modes
+        app.output.write_raw((KEYS_ON if keys else "") + FOCUS_ON + (TITLE_PUSH if titles_enabled() else ""))
+        app.output.flush()
+        invalidate()  # draws, and sets the tab title
+
+    async def connect():
+        """Connects to Claude Code in the background, so the first message is quick. It isn't the tab's turn:
+        the tab isn't shown as busy, and a message sent meanwhile waits for this connection (see sdk_query)."""
         try:
-            await asyncio.sleep(0.05)  # after the switch to the full-screen buffer, which has its own key modes
-            app.output.write_raw((KEYS_ON if keys else "") + FOCUS_ON + (TITLE_PUSH if titles_enabled() else ""))
-            app.output.flush()
-            invalidate()  # draws, and sets the tab title
-            if st.backend == "sdk":
-                st.client = await make_client()
-            if resume_last:
-                if list_sessions(1):
-                    await resume_session("1")
-                else:
-                    out(f"{DIM}no saved chat to continue in this folder{RESET}\n")
+            st.client = await make_client()
+        except Exception as e:
+            log_error(e)
+            out(f"{RED}⏺ {e}{RESET}\n")
+
+    async def resume_last_chat():
+        try:
+            if list_sessions(1):
+                await resume_session("1")
+            else:
+                out(f"{DIM}no saved chat to continue in this folder{RESET}\n")
         except Exception as e:
             log_error(e)
             out(f"{RED}⏺ {e}{RESET}\n")
@@ -7493,14 +6603,20 @@ async def run_interactive(resume_last=False):
     asyncio.ensure_future(check_for_update())
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(lambda _loop, ctx: log_error(ctx.get("exception") or RuntimeError(ctx.get("message"))))
-    st.task_started = time.time()
-    st.task = in_tab(st.active_tab, startup())
+    asyncio.ensure_future(startup())
+    asyncio.ensure_future(hook("startup"))
+    first = st.active_tab
+    if resume_last:                            # opening the chat connects to it
+        st.task_started = time.time()
+        st.task = in_tab(first, resume_last_chat())
+    elif st.backend == "sdk":
+        first.connecting = in_tab(first, connect())
     try:
         await app.run_async()
     finally:
         sys.stdout.write((KEYS_OFF if keys else "") + FOCUS_OFF + (TITLE_RESET if st.shown_title else ""))
         sys.stdout.flush()
-        running = [tab.task for tab in st.tabs if tab.task and not tab.task.done()]
+        running = [t for tab in st.tabs for t in (tab.task, tab.connecting) if t and not t.done()]
         for task in running:
             task.cancel()
         if running:                            # let them tidy their history (and save it) first
@@ -7508,6 +6624,10 @@ async def run_interactive(resume_last=False):
         for tab in list(st.tabs):
             with for_tab(tab):
                 save_session()
+        try:
+            await asyncio.wait_for(hook("shutdown"), 5)
+        except asyncio.TimeoutError:
+            pass
         await stop_all_shells()
         if st.rea:
             await st.rea.close()
@@ -7555,7 +6675,8 @@ def read_piped_stdin():
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         prog="nanocode", description="A small coding agent for the terminal.",
-        epilog="commands: setup (provider, key, model) · config · doctor · serve (HTTP API) · update · uninstall [--purge]")
+        epilog="commands: setup (provider, key, model) · config · doctor · serve (HTTP API) · update · uninstall [--purge]"
+               + "".join(f" · {name} ({info['description']})" for name, info in (nanokit.CLI if nanokit else {}).items()))
     parser.add_argument("command", nargs="?",
                         choices=["setup", "config", "doctor", "update", "uninstall", "version", "email", "serve"],
                         help=argparse.SUPPRESS)
@@ -7573,7 +6694,11 @@ def parse_args(argv):
 
 
 def main(argv=None):
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and nanokit and argv[0] in nanokit.CLI:   # e.g. `nanocode gateway`, `nanocode acp`
+        st.config = load_config()
+        return nanokit.CLI[argv[0]]["fn"](list(argv[1:]))
+    args = parse_args(argv)
     if args.version or args.command == "version":
         if args.version:
             print(f"nanocode {__version__}")  # -v stays instant and offline
@@ -7644,6 +6769,39 @@ def main(argv=None):
         return after_exit()
     except KeyboardInterrupt:
         return 130
+
+
+from nanokit.email import ALWAYS_ASK, email_config, cmd_email, email_setup  # noqa: E402 (moved out of this file)
+
+
+# Parts of nanocode that live in their own file in nanokit/ (imported above). Their names stay reachable as
+# nanocode.<name>, as before they moved.
+MOVED_MODULES = ("shells", "compare", "web_tools", "email",)
+
+
+
+
+from nanokit.compare import cmd_compare  # noqa: E402
+
+
+from nanokit.shells import shell_backend, shell_alive, shell_stop, stop_all_shells  # noqa: E402
+
+
+def load_features():
+    """Loads the feature modules in nanokit/ and lists their slash commands with the built-in ones."""
+    import importlib
+    for module in MOVED_MODULES:
+        moved = importlib.import_module(f"nanokit.{module}")
+        for name in moved.__all__:
+            globals().setdefault(name, getattr(moved, name))
+    if nanokit is None:
+        return
+    nanokit.load()
+    for name, info in nanokit.COMMANDS.items():
+        COMMANDS.setdefault(name, info["description"])
+
+
+load_features()
 
 
 if __name__ == "__main__":

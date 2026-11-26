@@ -44,6 +44,9 @@ print(reply.choices[0].message.content)
 | `GET` | `/v1/models` | Lists `nanocode` (for apps that need a model list) |
 | `GET` | `/v1/capabilities` | What this server supports, for apps that check first |
 | `GET` | `/v1/tools`, `/v1/skills` | nanocode's tools and your skills |
+| `GET` | `/v1/sessions` | This folder's saved chats (id, title, dates, model), newest first |
+| `GET` | `/v1/sessions/{id}` | One saved chat: its turns (your messages, replies, tool calls and results) |
+| `GET` | `/` | The [web app](web-ui.md) (no key needed for the page; it asks for the key) |
 | `GET` | `/health`, `/v1/health` | Liveness check (no key needed) |
 
 ### Chat completions

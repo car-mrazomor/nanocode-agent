@@ -17,7 +17,7 @@ BIN="$NANO_HOME/bin"
 TOOLS="$NANO_HOME/tools"
 PYDIR="$NANO_HOME/python"
 NODEDIR="$NANO_HOME/node"
-REQUIRED="httpx>=0.27 rich>=13 prompt_toolkit>=3.0.40"
+REQUIRED="httpx>=0.27 rich>=13 prompt_toolkit>=3.0.40 websockets>=12"
 OPTIONAL="claude-agent-sdk"
 LEGACY_APP="${XDG_DATA_HOME:-$HOME/.local/share}/nanocode"
 LEGACY_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/nanocode"
@@ -177,18 +177,38 @@ step "Python $("$PY" -c 'import platform; print(platform.python_version())') ${D
 
 mkdir -p "$APP" "$BIN"
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
+# MANIFEST lists the app's files (nanocode.py, api/, nanokit/ and its feature modules), one path per line.
+install_files() {  # $1: how to get one file: "copy" (from $SCRIPT_DIR) or "fetch" (from GitHub)
+  while IFS= read -r f || [ -n "$f" ]; do
+    case "$f" in ""|\#*) continue ;; esac
+    mkdir -p "$APP/$(dirname "$f")"
+    if [ "$1" = copy ]; then cp "$SCRIPT_DIR/$f" "$APP/$f.new"
+    else fetch "$REPO_RAW/$f" "$APP/$f.new" || die "couldn't download $f; try again later"; fi
+  done < "$APP/MANIFEST.new"
+}
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/nanocode.py" ]; then
-  cp "$SCRIPT_DIR/nanocode.py" "$APP/nanocode.py.new"
-  mkdir -p "$APP/api" && cp "$SCRIPT_DIR"/api/*.py "$APP/api/" 2>/dev/null || true
+  if [ -f "$SCRIPT_DIR/MANIFEST" ]; then
+    cp "$SCRIPT_DIR/MANIFEST" "$APP/MANIFEST.new" && install_files copy
+  else
+    cp "$SCRIPT_DIR/nanocode.py" "$APP/nanocode.py.new"
+    mkdir -p "$APP/api" && cp "$SCRIPT_DIR"/api/*.py "$APP/api/" 2>/dev/null || true
+  fi
   cp "$SCRIPT_DIR/install.sh" "$APP/install.sh"
   [ -f "$SCRIPT_DIR/install.ps1" ] && cp "$SCRIPT_DIR/install.ps1" "$APP/install.ps1"
   step "Copied nanocode from $SCRIPT_DIR"
 else
-  fetch "$REPO_RAW/nanocode.py" "$APP/nanocode.py.new"
-  mkdir -p "$APP/api"
-  for f in __init__.py server.py; do fetch "$REPO_RAW/api/$f" "$APP/api/$f" || true; done
+  fetch "$REPO_RAW/MANIFEST" "$APP/MANIFEST.new" || die "couldn't download the file list; try again later"
+  install_files fetch
   fetch "$REPO_RAW/install.sh" "$APP/install.sh" || true
   step "Downloaded nanocode"
+fi
+# Every file arrived: put them in place together (a failed download above left the old version untouched).
+if [ -f "$APP/MANIFEST.new" ]; then
+  while IFS= read -r f || [ -n "$f" ]; do
+    case "$f" in ""|\#*|nanocode.py) continue ;; esac
+    mv "$APP/$f.new" "$APP/$f"
+  done < "$APP/MANIFEST.new"
+  mv "$APP/MANIFEST.new" "$APP/MANIFEST"
 fi
 head -1 "$APP/nanocode.py.new" | grep -q python || die "downloaded nanocode.py looks broken; try again later"
 mv "$APP/nanocode.py.new" "$APP/nanocode.py"
@@ -219,7 +239,7 @@ VPY="$(venv_python)"
 export PIP_USER=0 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_CACHE_DIR="$NANO_HOME/.pip-cache"
 unset PIP_TARGET PIP_PREFIX
 
-step "Installing dependencies ${DIM}(httpx, rich, prompt_toolkit)${RESET}"
+step "Installing dependencies ${DIM}(httpx, rich, prompt_toolkit, websockets)${RESET}"
 "$VPY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
 # shellcheck disable=SC2086
 "$VPY" -m pip install --quiet --upgrade $REQUIRED || die "pip install failed (see the error above)"

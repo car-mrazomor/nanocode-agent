@@ -44,8 +44,13 @@ See [Memory, skills and learning](memory-and-skills.md).
 |---|---|---|
 | `web_search` | Search the web through your browser | yes (`a` allows for the session) |
 | `web_fetch` | Read a page as plain text, JavaScript included | yes |
+| `browser_open` | Open a page in a real browser that stays open, and show it with numbered elements | yes |
+| `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll` | Read the page, click, fill in fields, scroll | no |
+| `browser_screenshot` | Save a PNG of the page in `.nanocode/images` | no |
+| `browser_eval` | Run JavaScript in the page | yes |
+| `browser_close` | Close the browser | no |
 
-See [Web search](web.md).
+See [Web search](web.md) and [Browser](browser.md).
 
 ## Email
 

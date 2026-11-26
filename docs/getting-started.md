@@ -23,6 +23,8 @@ Everything is saved in `~/.nanocode/config.json`. `nanocode doctor` checks that 
 | **OpenRouter** | A key from [openrouter.ai/keys](https://openrouter.ai/keys) (or `OPENROUTER_API_KEY`) | Per token |
 | **Ollama** | [Ollama](https://ollama.com/download) and a model with tool support, e.g. `ollama pull qwen3` | Free, local |
 
+nanocode also talks directly to OpenAI, the Anthropic API, Gemini, DeepSeek, Groq, Mistral, xAI, Together, Fireworks, LM Studio and any OpenAI-compatible API: see [More providers](providers.md).
+
 Switch while running with `/provider claude`, `/provider openrouter` or `/provider ollama`. For one run: `nanocode --provider ollama -m qwen3`.
 
 Default models: `claude-opus-5-5` on the Claude subscription, `openrouter/auto-code` on OpenRouter. On Ollama you pick one of your installed models.

@@ -263,6 +263,11 @@ class ApiServer:
         path = path.split("?", 1)[0].rstrip("/") or "/"
         if path in ("/health", "/v1/health"):
             return await write_json(writer, 200, {"status": "ok", "version": nc.__version__})
+        page = web_page(path) if method == "GET" else None
+        if page:                                 # the browser chat page (nanokit/web): no data in it, so no key
+            content_type, body, extra = page
+            writer.write(http_head(200, content_type, extra, len(body)) + body)
+            return await writer.drain()
         self.check_auth(headers)
         parts = path.strip("/").split("/")
         if method == "GET" and path == "/v1/models":
@@ -277,6 +282,13 @@ class ApiServer:
         if method == "GET" and path == "/v1/tools":
             return await write_json(writer, 200, [{"name": t["name"], "description": t["description"],
                                                    "read_only": nc.tool_is_read_only(t)} for t in nc.active_tools()])
+        if method == "GET" and path == "/v1/sessions":
+            chats = await asyncio.to_thread(nc.list_sessions, 200)    # reads up to 200 files: not on the loop
+            return await write_json(writer, 200, {"object": "list", "data": [
+                {"id": c["id"], "title": c.get("title"), "created": c.get("created"), "updated": c.get("updated"),
+                 "model": c.get("model")} for c in chats]})
+        if method == "GET" and parts[:2] == ["v1", "sessions"] and len(parts) == 3:
+            return await write_json(writer, 200, api_session(parts[2]))
         if method == "POST" and path == "/v1/chat/completions":
             return await self.chat_completions(parse_json(body), headers, writer, reader)
         if method == "POST" and path == "/v1/responses":
@@ -467,6 +479,34 @@ async def api_switch_session(session_id):
             nc.st.session["id"] = session_id  # the client named it: later requests continue it
 
 
+def web_page(path):
+    """The browser chat page's files (nanokit/web), or None without nanokit."""
+    try:
+        from nanokit import web
+    except ImportError:
+        return None
+    return web.static(path)
+
+
+def api_session(session_id):
+    """A saved chat of this folder: its title and turns (user and assistant text, tool calls and results)."""
+    if not SESSION_ID_RE.match(session_id):
+        raise ApiError(400, "a session id must be 1-64 letters, digits, '.', '_' or '-'")
+    try:
+        data = json.loads((nc.sessions_dir() / f"{session_id}.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise ApiError(404, f"no saved session '{session_id}'", "not_found")
+    try:
+        from nanokit.web import session_turns
+        turns = session_turns(data)
+    except ImportError:
+        turns = [{"role": m["role"], "text": message_text(m.get("content"))} for m in data.get("messages") or []
+                 if m.get("role") in ("user", "assistant") and m.get("content")]
+    return {"object": "nanocode.session", "id": data.get("id"), "title": data.get("title"),
+            "created": data.get("created"), "updated": data.get("updated"), "model": data.get("model"),
+            "backend": data.get("backend"), "turns": turns}
+
+
 def api_session_id(value):
     if value in (None, ""):
         return None
@@ -586,13 +626,15 @@ def api_capabilities():
             "features": {"chat_completions": True, "chat_completions_streaming": True, "responses_api": True,
                          "responses_streaming": True, "previous_response_id": True, "conversations": True,
                          "run_submission": True, "run_status": True, "run_events_sse": True, "run_stop": True,
-                         "skills": True, "tools": True, "images": True, "concurrent_runs": 1},
+                         "skills": True, "tools": True, "images": True, "concurrent_runs": 1,
+                         "sessions": True, "web_ui": True},
             "session_header": "X-Nanocode-Session-Id",
             "endpoints": {"chat_completions": "POST /v1/chat/completions", "responses": "POST /v1/responses",
                           "response": "GET|DELETE /v1/responses/{id}", "runs": "POST /v1/runs",
                           "run": "GET /v1/runs/{id}", "run_events": "GET /v1/runs/{id}/events",
                           "run_stop": "POST /v1/runs/{id}/stop", "models": "GET /v1/models",
-                          "skills": "GET /v1/skills", "tools": "GET /v1/tools", "health": "GET /health"}}
+                          "skills": "GET /v1/skills", "tools": "GET /v1/tools", "health": "GET /health",
+                          "sessions": "GET /v1/sessions", "session": "GET /v1/sessions/{id}", "web": "GET /"}}
 
 
 def parse_json(body):

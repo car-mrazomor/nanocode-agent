@@ -10,7 +10,7 @@ nanocode asks before every file edit and command, and shows a diff for edits. An
 
 Dangerous commands only offer `y` and `n`.
 
-To stop asking, pick "just do it" in setup (`"permissions": "auto"`), toggle `/auto`, or pass `--yes`.
+To stop asking, pick "just do it" in setup (`"permissions": "auto"`), toggle `/auto`, or pass `--yes`. For finer control (allow `git status`, always ask for `git push`), set [permission rules](permissions.md).
 
 ## What always asks
 
@@ -28,7 +28,7 @@ Even in Auto mode:
 
 ## Undo
 
-`/undo` reverts file changes one at a time, newest first. Backups are kept in `.nanocode/undo/`.
+`/undo` reverts everything the last turn changed, `/redo` puts it back, and `/rollback` returns the project to an earlier checkpoint ([more](snapshots.md)). Without git, `/undo` reverts file edits one at a time, newest first, from backups in `.nanocode/undo/`.
 
 ## Privacy
 

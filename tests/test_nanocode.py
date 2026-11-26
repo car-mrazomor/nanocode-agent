@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import nanocode as nc  # noqa: E402
+from nanokit import web_tools  # noqa: E402
 
 
 def plain(text):
@@ -1280,8 +1281,11 @@ def test_mcp_servers_tools_toggles_and_import(sandbox, monkeypatch):
         return False
     monkeypatch.setattr(nc, "ensure_mcp", no_start)
     run(nc.cmd_mcp("import"))
-    assert nc.st.config["mcp_servers"] == {"files": {"command": "npx", "args": ["-y", "server-files"]}}
-    assert "skipped remote" in plain(nc.st.output)
+    assert nc.st.config["mcp_servers"]["files"] == {"command": "npx", "args": ["-y", "server-files"]}
+    if nc.MCP_REMOTE:                     # nanokit/mcp_http.py keeps remote servers
+        assert nc.st.config["mcp_servers"]["remote"] == {"url": "https://x"}
+    else:
+        assert "skipped remote" in plain(nc.st.output)
 
 
 DDG_PAGE = """<html><body><div class="result"><h2 class="result__title"><a class="result__a"
@@ -1308,8 +1312,8 @@ def test_web_search_and_fetch(sandbox, monkeypatch):
             return pages["duckduckgo"]
         raise nc.ToolError("offline")
 
-    monkeypatch.setattr(nc, "browser_dom", fake_browser)
-    monkeypatch.setattr(nc, "plain_get", fake_get)
+    monkeypatch.setattr(web_tools, "browser_dom", fake_browser)
+    monkeypatch.setattr(web_tools, "plain_get", fake_get)
     ddg = run(nc.TOOLS["web_search"]["fn"]({"query": "asyncio"}))
     assert "1. asyncio docs\n   https://docs.python.org/3/library/asyncio.html\n   Write concurrent code." in ddg
     bing = run(nc.TOOLS["web_search"]["fn"]({"query": "x", "engine": "bing"}))

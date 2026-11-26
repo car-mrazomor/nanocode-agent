@@ -85,18 +85,35 @@ Step "Python: $($Python.Exe)"
 
 New-Item -ItemType Directory -Force -Path $App, $Bin | Out-Null
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { "" }
+# MANIFEST lists the app's files (nanocode.py, api\, nanokit\ and its feature modules), one path per line.
+function Install-Files($Source) {
+    $files = Get-Content (Join-Path $App "MANIFEST.new") | Where-Object { $_ -and -not $_.StartsWith("#") }
+    foreach ($f in $files) {
+        $target = Join-Path $App ($f -replace "/", "\")
+        New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+        if ($Source -eq "copy") { Copy-Item (Join-Path $ScriptDir ($f -replace "/", "\")) "$target.new" -Force }
+        else { Invoke-WebRequest -UseBasicParsing "$RepoRaw/$f" -OutFile "$target.new" }
+    }
+    foreach ($f in $files) {   # every file arrived: put them in place together
+        $target = Join-Path $App ($f -replace "/", "\")
+        Move-Item "$target.new" $target -Force
+    }
+    Move-Item (Join-Path $App "MANIFEST.new") (Join-Path $App "MANIFEST") -Force
+}
 if ($ScriptDir -and (Test-Path (Join-Path $ScriptDir "nanocode.py"))) {
-    Copy-Item (Join-Path $ScriptDir "nanocode.py") (Join-Path $App "nanocode.py") -Force
-    New-Item -ItemType Directory -Force -Path (Join-Path $App "api") | Out-Null
-    Copy-Item (Join-Path $ScriptDir "api\*.py") (Join-Path $App "api") -Force -ErrorAction SilentlyContinue
+    if (Test-Path (Join-Path $ScriptDir "MANIFEST")) {
+        Copy-Item (Join-Path $ScriptDir "MANIFEST") (Join-Path $App "MANIFEST.new") -Force
+        Install-Files "copy"
+    } else {
+        Copy-Item (Join-Path $ScriptDir "nanocode.py") (Join-Path $App "nanocode.py") -Force
+        New-Item -ItemType Directory -Force -Path (Join-Path $App "api") | Out-Null
+        Copy-Item (Join-Path $ScriptDir "api\*.py") (Join-Path $App "api") -Force -ErrorAction SilentlyContinue
+    }
     Copy-Item (Join-Path $ScriptDir "install.ps1") (Join-Path $App "install.ps1") -Force
     Step "Copied nanocode from $ScriptDir"
 } else {
-    Invoke-WebRequest -UseBasicParsing "$RepoRaw/nanocode.py" -OutFile (Join-Path $App "nanocode.py")
-    New-Item -ItemType Directory -Force -Path (Join-Path $App "api") | Out-Null
-    foreach ($f in "__init__.py", "server.py") {
-        try { Invoke-WebRequest -UseBasicParsing "$RepoRaw/api/$f" -OutFile (Join-Path $App "api\$f") } catch {}
-    }
+    Invoke-WebRequest -UseBasicParsing "$RepoRaw/MANIFEST" -OutFile (Join-Path $App "MANIFEST.new")
+    Install-Files "fetch"
     Invoke-WebRequest -UseBasicParsing "$RepoRaw/install.ps1" -OutFile (Join-Path $App "install.ps1")
     Step "Downloaded nanocode"
 }
@@ -115,7 +132,7 @@ Remove-Item Env:PIP_TARGET, Env:PIP_PREFIX -ErrorAction SilentlyContinue
 
 Step "Installing dependencies (httpx, rich, prompt_toolkit)"
 & $VenvPython -m pip install --quiet --upgrade pip 2>$null | Out-Null
-& $VenvPython -m pip install --quiet --upgrade "httpx>=0.27" "rich>=13" "prompt_toolkit>=3.0.40"
+& $VenvPython -m pip install --quiet --upgrade "httpx>=0.27" "rich>=13" "prompt_toolkit>=3.0.40" "websockets>=12"
 if ($LASTEXITCODE -ne 0) { Fail "pip install failed (see the error above)" }
 Step "Installing claude-agent-sdk (for the Claude subscription provider)"
 & $VenvPython -m pip install --quiet --upgrade claude-agent-sdk 2>$null | Out-Null
