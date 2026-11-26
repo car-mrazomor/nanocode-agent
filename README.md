@@ -20,7 +20,9 @@ It runs on:
 
 With tabs to run several chats at once, and tools to read, edit and run code, plan and hand work to sub-agents, search the web and drive a real browser, use any MCP server (local or remote), compare models side by side, and handle your email. Undo a whole turn, see type errors as the model edits, talk to it from Telegram, Discord, Slack, WhatsApp or Matrix, schedule tasks, and use it from your browser, your editor or GitHub.
 
-<p align="center"><img src="assets/demo.gif" alt="nanocode fixing failing tests in one tab while a second tab writes a README" width="900"></p>
+<p align="center"><img src="assets/demo.gif" alt="nanocode plans a change in plan mode, builds it with a passing test, then /undo reverts every file of that turn" width="900"></p>
+
+<p align="center"><sub>A real session: <code>/plan</code> only reads and proposes, <code>/build</code> edits two files and runs the tests, <code>/undo</code> puts both back.</sub></p>
 
 > Inspired by [1rgs/nanocode](https://github.com/1rgs/nanocode), a minimal Claude Code alternative in ~250 lines. This project started from it and grew into a full agent.
 
@@ -159,6 +161,8 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 While you scroll through a long answer, your message stays pinned at the top; click it to jump back to it.
 
 **Tabs:** `ctrl+t` opens another chat in a new tab, like OpenCode's desktop app. Each tab has its own history, model and prompt draft, and keeps working while you're in another one. The tab bar at the top shows each tab's state: a spinner while it works, `△` when it needs your OK, `●` when it finished while you were elsewhere. A notification pops up in the top right corner when a tab in the background finishes or asks for permission; click it to go there ([more](docs/using.md#tabs)).
+
+<p align="center"><img src="assets/tabs.gif" alt="nanocode fixing failing tests in one tab while a second tab writes a README, with notifications when each finishes" width="800"></p>
 
 The terminal tab is named after the chat and shows `✻` while working, `△` when it needs your OK and `✓` when it finished while you were away; you also get a bell and a desktop notification then ([more](docs/using.md#tab-title-and-notifications)).
 

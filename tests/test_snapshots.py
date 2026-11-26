@@ -54,6 +54,20 @@ def test_undo_redo_whole_turn(sandbox):
 
 
 @needs_git
+def test_caches_and_packages_are_not_part_of_checkpoints(sandbox):
+    Path("a.py").write_text("a = 1\n")                        # no .gitignore at all
+    nc.st.backend = "api"
+
+    async def scenario():
+        await turn("change", edit({"a.py": "a = 2\n", "__pycache__/a.cpython-314.pyc": "x",
+                                   "node_modules/pkg/i.js": "y"}))
+        assert "__pycache__" not in plain(nc.st.output) and "node_modules" not in plain(nc.st.output)
+        await snapshots.undo("")
+        assert Path("a.py").read_text() == "a = 1\n" and Path("__pycache__/a.cpython-314.pyc").exists()
+    run(scenario())
+
+
+@needs_git
 def test_rollback_lists_and_restores(sandbox, monkeypatch):
     Path("f.txt").write_text("v0\n")
     asked = []

@@ -118,7 +118,12 @@ def _git(*args, input=None, timeout=GIT_TIMEOUT):
     return done.stdout.decode("utf-8", errors="surrogateescape")
 
 
-BASE_EXCLUDE = "/.nanocode/\n"
+# Never part of a checkpoint, even in a project without a .gitignore: caches, installed packages and build output
+# (big, rebuilt by tools, and noise in "/undo reverted …").
+BASE_EXCLUDE = "".join(f"{p}\n" for p in (
+    "/.nanocode/", "__pycache__/", "*.pyc", "*.pyo", ".mypy_cache/", ".pytest_cache/", ".ruff_cache/", ".tox/",
+    "node_modules/", ".venv/", "venv/", ".next/", ".nuxt/", ".cache/", ".gradle/", ".terraform/", "target/",
+    ".DS_Store", ".hg/", ".svn/"))
 
 
 def _ensure_repo():

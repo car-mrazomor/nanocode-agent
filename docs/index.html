@@ -183,6 +183,7 @@
     <div class="nav">
       <a href="#quickstart">Install</a>
       <a href="#features">Features</a>
+      <a href="#everywhere">Everywhere</a>
       <a href="#models">Models</a>
       <a href="#api">API</a>
       <a href="https://github.com/car-mrazomor/nanocode-agent/tree/master/docs">Docs</a>
@@ -195,9 +196,9 @@
   <canvas id="glow" aria-hidden="true"></canvas>
   <div class="hero-content">
     <svg class="mark" aria-hidden="true"><use href="#logo"/></svg>
-    <p class="eyebrow">Open source (MIT) · One Python file · Fully hackable</p>
-    <h1>The coding agent that <br>fits in <em>one file.</em></h1>
-    <p class="description">Reads, edits and runs your code from the terminal — on your Claude subscription, any OpenRouter model, or local models with Ollama. <br><span class="more">Use it in the terminal or call it over an OpenAI-compatible API. Read it, change anything, make it yours.</span></p>
+    <p class="eyebrow">Open source (MIT) · Small Python core · Fully hackable</p>
+    <h1>The coding agent you can <br><em>read in an afternoon.</em></h1>
+    <p class="description">Reads, edits and runs your code — on your Claude subscription, any OpenRouter model, your own API keys, or local models. <br><span class="more">In the terminal, the browser, your editor, GitHub, or a chat on your phone. Every feature is a small module you can read and change.</span></p>
     <div class="actions">
       <a class="action primary" href="#quickstart">Get started</a>
       <a class="action" href="https://github.com/car-mrazomor/nanocode-agent/tree/master/docs">Read the docs</a>
@@ -253,44 +254,68 @@
   </section>
 
   <section class="block reveal">
-    <div class="head"><div><p class="label">Recorded, not mocked</p><h2>A real session on the Claude subscription.</h2></div></div>
+    <div class="head"><div><p class="label">Recorded, not mocked</p><h2>Plan it, build it, undo it.</h2></div></div>
     <div class="term">
       <div class="bar"><i></i><i></i><i></i><b>nanocode</b></div>
-      <img class="demo" src="https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/assets/demo.gif" alt="nanocode fixes failing tests in one tab while a second tab writes a README, with notifications when each finishes" loading="lazy" width="1200" height="720">
+      <img class="demo" src="https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/assets/demo.gif" alt="nanocode plans a change in plan mode, builds it with a test that passes, then /undo reverts every file of that turn" loading="lazy" width="1200" height="720">
     </div>
-    <p class="note">The tests fail, it finds why, fixes it and runs them again: 21 seconds.</p>
+    <p class="note">A real session on the Claude subscription: <code>/plan</code> only reads and proposes, <code>/build</code> edits two files and runs the tests, <code>/undo</code> puts both back. 43 seconds.</p>
+  </section>
+
+  <section class="block reveal">
+    <div class="head"><div><p class="label">Tabs</p><h2>Two chats, at the same time.</h2></div></div>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><b>nanocode</b></div>
+      <img class="demo" src="https://raw.githubusercontent.com/car-mrazomor/nanocode-agent/master/assets/tabs.gif" alt="nanocode fixes failing tests in one tab while a second tab writes a README, with notifications when each finishes" loading="lazy" width="1200" height="720">
+    </div>
+    <p class="note">One tab fixes the failing tests while another writes a README; a notification says when each is done.</p>
   </section>
 
   <section class="block reveal" id="features">
     <div class="head"><p class="label">What it does</p></div>
     <div class="features">
-      <div class="feature"><span class="ic grad">{ }</span><h3>Hackable, fully editable</h3><p>The whole agent is one Python file. Read it in an afternoon, change any prompt, tool or key, and it's yours.</p></div>
+      <div class="feature"><span class="ic grad">{ }</span><h3>Hackable, fully editable</h3><p>A small core in one Python file, and every feature its own module in <code>nanokit/</code>. Read it in an afternoon, change any prompt, tool or key, and it's yours.</p></div>
       <div class="feature"><span class="ic" style="color:var(--success)">▤</span><h3>Tabs</h3><p><code>Ctrl+T</code> opens another chat that runs alongside the first. The tab bar shows who's working, done or waiting for your OK, and a notification pops up when a tab in the background finishes.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent2)">↺</span><h3>Undo, plan, type checks</h3><p><code>/undo</code> reverts a whole turn, <code>Shift+Tab</code> plans without changing anything, and your language server shows the model what an edit broke.</p></div>
-      <div class="feature"><span class="ic" style="color:var(--cyan)">✆</span><h3>From your phone</h3><p><code>nanocode gateway</code> answers on Telegram, Discord, Slack, WhatsApp and Matrix, voice included. <code>/cron</code> runs prompts on a schedule and sends you the answer.</p></div>
-      <div class="feature"><span class="ic" style="color:var(--pink)">⌘</span><h3>Browser, editor, GitHub</h3><p>A web app you can install, <code>nanocode acp</code> for Zed and other editors, and <code>/nanocode</code> in GitHub issues and pull requests.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--accent)">@</span><h3>Your agents &amp; commands</h3><p>A reviewer agent, a <code>/release</code> command: Markdown files in your project. Shell hooks around every tool, and Python plugins for the rest.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--think)">⌕</span><h3>Every chat, searchable</h3><p><code>/search</code> across all your projects, and the model can look up earlier chats. <code>/fork</code>, <code>/export</code>, <code>/share</code> as a gist, <code>/stats</code>.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--cyan)">▢</span><h3>Docker, SSH, a browser</h3><p><code>/env docker python:3.12</code> runs commands in a container, or over SSH. The model can drive a real browser: open, click, type, screenshot.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent)">⧉</span><h3>Chat &amp; agents</h3><p>Multi-turn chat plus an agent that plans with a checklist, calls tools, and hands side tasks to sub-agents running in parallel.</p></div>
-      <div class="feature"><span class="ic" style="color:var(--accent)">←</span><h3>Asks before it acts</h3><p>Reads, edits and runs commands, with background shells for dev servers. Edits show a diff and wait for your OK. <code>/undo</code> reverts.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--accent)">←</span><h3>Asks before it acts</h3><p>Edits show a diff and wait for your OK. Your own rules allow, ask or deny per command or path, like <code>git status*</code>: allow.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent2)">▣</span><h3>Images &amp; files</h3><p>Drag files and screenshots onto the terminal, or paste with <code>Ctrl+V</code>. Images become <code>[Image #1]</code> chips and long pastes collapse, like Claude Code.</p></div>
-      <div class="feature"><span class="ic" style="color:var(--cyan)">⇄</span><h3>HTTP API</h3><p><code>nanocode serve</code> makes it an OpenAI-compatible API: chat completions, responses, background runs and images. Call it from any app.</p></div>
       <div class="feature"><span class="ic" style="color:var(--cyan)">◎</span><h3>Web search</h3><p>Searches and reads pages through your own browser, for any model and any provider. DuckDuckGo, Bing, Google or OpenRouter.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent2)">◇</span><h3>MCP</h3><p>Any MCP server you connect, on every provider. <code>/mcp import</code> brings yours from Claude Code; toggle per tool.</p></div>
       <div class="feature"><span class="ic" style="color:var(--pink)">▥</span><h3>Compare</h3><p>Send one prompt to several models at once and compare the answers side by side, with time and cost for each.</p></div>
       <div class="feature"><span class="ic" style="color:var(--think)">✉</span><h3>Email assistant</h3><p>Summaries, style-matched draft replies, tagging and spam triage over IMAP/SMTP. Nothing is sent without your OK.</p></div>
-      <div class="feature"><span class="ic" style="color:var(--pink)">◆</span><h3>Memory &amp; skills</h3><p>Notes it always follows (<code># note</code>) and skills it loads when a task matches — Claude Code skills work too.</p></div>
-      <div class="feature"><span class="ic grad">◐</span><h3>Your colors</h3><p>OpenCode's dark theme with nanocode's blue and violet by default. <code>/theme accent #ff79c6</code> changes any color, and it stays.</p></div>
+      <div class="feature"><span class="ic" style="color:var(--pink)">◆</span><h3>Memory &amp; skills</h3><p>Notes it always follows (<code># note</code>) and skills it loads when a task matches. Install community skills from the hub; Claude Code skills work too.</p></div>
+      <div class="feature"><span class="ic grad">◐</span><h3>Your colors and keys</h3><p>Tokyo Night, Catppuccin, Gruvbox, Nord, Dracula and more, or any color of your own. Remap any key; <code>Ctrl+X E</code> writes the prompt in your editor.</p></div>
       <div class="feature"><span class="ic" style="color:var(--cyan)">%</span><h3>Reverse engineering</h3><p>Optional REA tools for binaries, APKs, Electron apps, web bundles and firmware — installed for you.</p></div>
       <div class="feature"><span class="ic" style="color:var(--accent2)">⇅</span><h3>A mouse that works</h3><p>Smooth scrolling, drag to select and copy, and your message pinned on top while you read the answer.</p></div>
       <div class="feature"><span class="ic" style="color:var(--think)">∴</span><h3>Thinking, costs, updates</h3><p><code>/think</code> off to high on every provider. Time, tokens and cost after every reply, <code>/compact</code> when context fills, <code>/update</code> for new versions.</p></div>
     </div>
   </section>
 
+  <section class="block reveal" id="everywhere">
+    <div class="head"><div><p class="label">Everywhere</p><h2>Wherever you are, it's there.</h2></div><a href="https://github.com/car-mrazomor/nanocode-agent/tree/master/docs">How to set each up →</a></div>
+    <div class="features">
+      <div class="feature"><span class="tag">nanocode</span><h3>Terminal</h3><p>Tabs, plan mode, undo, diffs, a mouse that works. The home base.</p></div>
+      <div class="feature"><span class="tag">nanocode web</span><h3>Browser</h3><p>A chat page served from your machine, installable as an app on your desktop or phone.</p></div>
+      <div class="feature"><span class="tag">nanocode acp</span><h3>Your editor</h3><p>Zed and other editors that speak the Agent Client Protocol: chat, edits and permission questions right there.</p></div>
+      <div class="feature"><span class="tag">nanocode github install</span><h3>GitHub</h3><p>Comment <code>/nanocode fix this</code> on an issue or pull request; it answers, or opens a pull request.</p></div>
+      <div class="feature"><span class="tag">nanocode gateway</span><h3>Chat apps</h3><p>Telegram, Discord, Slack, WhatsApp and Matrix, voice messages included. Only people you approve.</p></div>
+      <div class="feature"><span class="tag">/cron</span><h3>On a schedule</h3><p>"Every weekday at 9:00, summarize the open issues": it runs by itself and sends you the answer.</p></div>
+    </div>
+  </section>
+
   <section class="block reveal" id="models">
-    <div class="head"><p class="label">Bring your own model</p><a href="https://github.com/car-mrazomor/nanocode-agent#start">Switch any time →</a></div>
+    <div class="head"><p class="label">Bring your own model</p><a href="https://github.com/car-mrazomor/nanocode-agent/tree/master/docs/providers.md">Switch any time →</a></div>
     <div class="features">
       <div class="feature"><span class="tag">/provider claude</span><h3>Claude subscription</h3><p>The plan you already pay for, through the Claude Agent SDK. No API key.</p></div>
-      <div class="feature"><span class="tag">/provider openrouter</span><h3>OpenRouter &amp; your keys</h3><p>Any model — Claude, GLM, GPT, Gemini, DeepSeek, Kimi — or your own OpenAI, Anthropic, Gemini, Groq or Mistral key. Cost shown per reply.</p></div>
-      <div class="feature"><span class="tag">/provider ollama</span><h3>Ollama</h3><p>Local models on your machine. Free, private and offline.</p></div>
+      <div class="feature"><span class="tag">/provider openrouter</span><h3>OpenRouter</h3><p>Any model — Claude, GLM, GPT, Gemini, DeepSeek, Kimi — or the auto router. Real cost shown per reply.</p></div>
+      <div class="feature"><span class="tag">/provider ollama</span><h3>Ollama &amp; LM Studio</h3><p>Local models on your machine. Free, private and offline.</p></div>
+      <div class="feature"><span class="tag">/provider openai</span><h3>OpenAI, Anthropic, Gemini</h3><p>Your own API key, straight to the source. Thinking level and cost included.</p></div>
+      <div class="feature"><span class="tag">/provider groq</span><h3>Groq, Mistral, DeepSeek, xAI</h3><p>Plus Together and Fireworks: fast and open models with your own keys.</p></div>
+      <div class="feature"><span class="tag">/provider custom</span><h3>Anything OpenAI-compatible</h3><p>Any endpoint and key: a company gateway, vLLM, a self-hosted model.</p></div>
     </div>
   </section>
 
