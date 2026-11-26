@@ -27,6 +27,7 @@ nanokit/keybinds.py
 nanokit/lsp.py
 nanokit/mcp_http.py
 nanokit/modes.py
+nanokit/outbox.py
 nanokit/permissions.py
 nanokit/plugins.py
 nanokit/providers.py

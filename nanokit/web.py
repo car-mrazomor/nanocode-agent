@@ -45,7 +45,7 @@ self.addEventListener("fetch", () => {});
 """
 
 CSP = ("default-src 'none'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline'; connect-src 'self'; "
-       "img-src 'self' data:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; "
+       "img-src 'self' data: blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
 
 

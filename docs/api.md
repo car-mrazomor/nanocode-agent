@@ -50,6 +50,7 @@ print(reply.choices[0].message.content)
 | `POST` | `/v1/sessions/{id}/fork` | A copy of a chat under a new id, to try another direction |
 | `DELETE` | `/v1/sessions/{id}` | Delete a chat (`409` while a reply is being written in it) |
 | `POST` | `/v1/sessions/delete` | Delete several: `{"ids": [...]}`, or every chat in the folder: `{"all": true}` |
+| `GET` | `/v1/files/{id}` | A file the model sent you (`send_file`) |
 | `GET` | `/v1/search?q=words` | This folder's chats that mention the words, best first, with the matching part |
 | `GET` | `/v1/workspace` | The model and the models to pick from, thinking level, mode, themes, and the commands a client may run |
 | `GET` | `/` | The [web app](web-ui.md) (no key needed for the page; it asks for the key) |
@@ -88,6 +89,17 @@ Events: `run.started`, `delta` (reply text), `tool.started`, `tool.completed`, `
 
 - `"mode": "plan"` (or `"build"`) sets the mode before the turn: in plan mode the model only reads and plans.
 - `"command": true` runs `input` as a slash command, as if typed in the terminal: `{"input": "/stats", "command": true}`. What it prints comes as `output` events (with the terminal's colors as ANSI codes); a command that starts a turn (`/compact`, a skill) also streams it as usual. `/undo`, `/redo` and `/rollback <n>` need `"confirmed": true`, meaning you asked the person first. Commands that need a terminal or change the server (`/tab`, `/editor`, `/provider`, `/update`, `/auto`…) are refused with `400`; `GET /v1/workspace` lists the ones you can run. With a read-only API, only commands that change nothing are allowed.
+
+## Files from the model
+
+When nanocode runs as a server, the model has a `send_file` tool: it gives you a file or a picture (a chart it drew, a PDF, a CSV, a zip). The file is copied to the project's `.nanocode/outbox/`, so you get what was sent even if the original changes.
+
+- While the turn runs, a `file` event comes: `{"id", "name", "mime", "size", "caption", "url": "/v1/files/<id>"}`.
+- `GET /v1/files/<id>` returns the file (the key is needed). Pictures come `inline`, other files as an `attachment`.
+- In a saved chat, the tool's result names it: `sent to the user: <name> (<size>) [file:<id>:<type>]`, so an app can show it again.
+- Up to 50 MB per file. It only reads, so it works on a read-only server too.
+
+Links need nothing special: the model writes them in its reply as Markdown.
 
 ## Files
 

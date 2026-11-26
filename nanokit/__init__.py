@@ -32,7 +32,7 @@ import inspect
 MODULES = [
     "snapshots", "formatters", "lsp", "permissions", "modes", "init", "agents", "commands", "hooks", "plugins",
     "sessions", "share", "stats", "providers", "mcp_http", "acp", "github", "web", "editor", "keybinds", "themes",
-    "environments", "browser", "voice", "skillshub", "improve", "trajectories", "cron", "gateway",
+    "environments", "browser", "voice", "skillshub", "improve", "trajectories", "cron", "gateway", "outbox",
 ]
 
 COMMANDS = {}  # "/name" -> {"fn": async fn(arg), "description": str, "anytime": bool}

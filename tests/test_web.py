@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import nanocode as nc  # noqa: E402
 from api import server  # noqa: E402
 from nanokit import web  # noqa: E402
-from test_api import fake_openrouter, request, text_reply, with_server  # noqa: E402
+from test_api import KEY, fake_openrouter, request, text_reply, with_server  # noqa: E402
 from test_nanocode import tool_call_chunk  # noqa: E402
 
 
@@ -398,3 +398,65 @@ def test_delete_chats_over_the_api(sandbox, monkeypatch):
         status, _, _ = await request(port, "POST", "/v1/sessions/delete", {})
         assert status == 400
     with_server(test)
+
+
+# --- Files the model sends the user (send_file) ---
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def test_send_file_is_offered_only_to_the_apps(sandbox):
+    nc.st.serving = False
+    assert "send_file" not in [t["name"] for t in nc.active_tools()]
+    nc.st.serving = True
+    assert "send_file" in [t["name"] for t in nc.active_tools()]
+    assert "send_file" in nc.build_system_prompt()
+
+
+def test_the_model_sends_a_picture_and_the_app_gets_it(sandbox, monkeypatch):
+    Path("chart.png").write_bytes(PNG)
+    fake_openrouter(monkeypatch, [[tool_call_chunk("c1", "send_file", {"path": "chart.png", "caption": "sales"})],
+                                  text_reply("Here's the chart.")])
+    nc.st.auto_approve = False                     # a read-only server can still send files
+
+    async def test(port, api):
+        status, _, body = await request(port, "POST", "/v1/runs", {"input": "draw it"})
+        run = api.runs[json.loads(body)["run_id"]]
+        await run.task
+        sent = [e for e in run.events if e["event"] == "file"]
+        assert len(sent) == 1 and sent[0]["name"] == "chart.png" and sent[0]["mime"] == "image/png"
+        assert sent[0]["caption"] == "sales" and sent[0]["url"] == f"/v1/files/{sent[0]['id']}"
+        Path("chart.png").write_bytes(b"changed")      # the app still gets what was sent
+        raw, _ = await asyncio_open(port, sent[0]["url"])
+        head, _, payload = raw.partition(b"\r\n\r\n")
+        assert b" 200 " in head.split(b"\r\n")[0] and b"Content-Type: image/png" in head and b"inline" in head
+        assert payload == PNG
+        status, _, _ = await request(port, "GET", sent[0]["url"], key=None)
+        assert status == 401
+        status, _, _ = await request(port, "GET", "/v1/files/0000000000000000")
+        assert status == 404
+        status, _, _ = await request(port, "GET", "/v1/files/..%2fsecret")
+        assert status == 404
+        status, _, body = await request(port, "GET", f"/v1/sessions/{run.session_id}")
+        turns = json.loads(body)["turns"]
+        result = next(t for t in turns if t["role"] == "tool_result")["text"]
+        assert result.startswith("sent to the user: chart.png") and f"[file:{sent[0]['id']}:image/png]" in result
+    with_server(test)
+
+
+async def asyncio_open(port, path):
+    """The raw bytes of a GET (the response can be binary)."""
+    import asyncio
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"GET {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {KEY}\r\n\r\n".encode())
+    await writer.drain()
+    data = await reader.read()
+    writer.close()
+    return data, None
+
+
+def test_send_file_refuses_what_isnt_a_file(sandbox):
+    import asyncio
+    nc.st.serving = True
+    text, err = asyncio.run(nc.run_tool("send_file", {"path": "nope.txt"}))
+    assert err and "isn't a file" in text

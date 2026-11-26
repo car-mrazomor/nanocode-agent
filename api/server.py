@@ -333,6 +333,8 @@ class ApiServer:
             async with self.lock:                    # not while a turn is writing that chat
                 fork = api_fork(parts[2])
             return await write_json(writer, 200, fork)
+        if method == "GET" and parts[:2] == ["v1", "files"] and len(parts) == 3:
+            return await self.send_outbox_file(parts[2], writer)
         if method == "GET" and path == "/v1/search":
             return await write_json(writer, 200, await api_search(query.get("q", "")))
         if method == "GET" and path == "/v1/workspace":
@@ -379,6 +381,20 @@ class ApiServer:
                 await self.stop(run)
                 return await write_json(writer, 200, {"run_id": run.id, "status": "stopping"})
         raise ApiError(404, f"{method} {path} isn't an endpoint (GET /v1/capabilities lists them)", "not_found")
+
+    async def send_outbox_file(self, file_id, writer):
+        """A file the model sent the user (send_file): its bytes, shown inline when it's a picture."""
+        from nanokit import outbox
+        found = outbox.find(file_id)
+        if found is None:
+            raise ApiError(404, f"no sent file '{file_id}'", "not_found")
+        path, name, mime = found
+        data = await asyncio.to_thread(path.read_bytes)
+        quoted = urllib.parse.quote(name)
+        disposition = "inline" if mime.startswith("image/") else "attachment"
+        writer.write(http_head(200, mime, {"Content-Disposition": f"{disposition}; filename*=UTF-8''{quoted}",
+                                           "Cache-Control": "private, max-age=86400"}, len(data)) + data)
+        await writer.drain()
 
     async def delete_sessions(self, ids):
         """Deletes saved chats; a chat whose reply is still being written can't be (stop it first)."""
@@ -880,7 +896,7 @@ def api_capabilities():
                          "run_submission": True, "run_status": True, "run_events_sse": True, "run_stop": True,
                          "skills": True, "tools": True, "images": True, "concurrent_runs": 1,
                          "sessions": True, "web_ui": True, "commands": True, "search": True, "fork": True,
-                         "export": True, "workspace": True, "delete": True},
+                         "export": True, "workspace": True, "delete": True, "files_out": True},
             "session_header": "X-Nanocode-Session-Id",
             "endpoints": {"chat_completions": "POST /v1/chat/completions", "responses": "POST /v1/responses",
                           "response": "GET|DELETE /v1/responses/{id}", "runs": "POST /v1/runs",
@@ -891,6 +907,7 @@ def api_capabilities():
                           "export": "GET /v1/sessions/{id}/export?format=md|json",
                           "fork": "POST /v1/sessions/{id}/fork", "search": "GET /v1/search?q=",
                           "delete": "DELETE /v1/sessions/{id}", "delete_many": "POST /v1/sessions/delete",
+                          "file": "GET /v1/files/{id}",
                           "workspace": "GET /v1/workspace", "web": "GET /"}}
 
 

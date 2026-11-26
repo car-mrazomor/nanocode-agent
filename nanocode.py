@@ -3044,7 +3044,8 @@ def active_tools():
     """Tools offered to the model: REA's only when it's installed and enabled (and the model isn't tiny)."""
     has_email = email_config() is not None
     tools = [t for t in TOOLS.values() if (not t["name"].startswith("rea_") or rea_offered())
-             and (not t["name"].startswith("email_") or has_email)] + list(MCP_TOOLS.values())
+             and (not t["name"].startswith("email_") or has_email)
+             and (t["name"] != "send_file" or st.serving)] + list(MCP_TOOLS.values())   # files go to the apps
     allow = TOOL_FILTER.get()
     return [t for t in tools if allow(t)] if allow else tools
 

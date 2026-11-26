@@ -120,6 +120,17 @@ details.tool.ok summary .st { color: var(--success); }
 details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--line); max-height: 320px; overflow: auto;
   white-space: pre-wrap; word-wrap: break-word; color: var(--muted); font-size: 12.5px; }
 .meta { color: var(--faint); font-size: 12px; margin: -6px 0 18px; }
+/* files and pictures the model sent (send_file) */
+.sent img { display: block; max-width: min(100%, 560px); max-height: 420px; border: 1px solid var(--line);
+  border-radius: 6px; cursor: zoom-in; background: var(--panel); }
+.sent .cap { color: var(--muted); font-size: 13px; margin-top: 6px; }
+.filecard { display: flex; align-items: center; gap: 12px; padding: 10px 12px; max-width: 460px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; }
+.filecard svg.i { width: 22px; height: 22px; color: var(--accent2); }
+.filecard .n { flex: 1; min-width: 0; }
+.filecard .n b { display: block; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.filecard .n span { color: var(--faint); font-size: 12px; }
+.sending { color: var(--faint); font-size: 13px; }
 .meta .mark { color: var(--accent2); }
 .error { color: var(--error); }
 .screen, .term { white-space: pre-wrap; word-wrap: break-word; color: var(--muted); }
@@ -501,6 +512,12 @@ function userMsg(raw, images) {
 }
 function toolEl(name, args) {
   $("hero") && $("hero").remove();
+  if (name === "send_file") {          // a file for the user: shown as the picture or a download card
+    const d = add("sent", "");
+    d.dataset.sendfile = "1";
+    d.innerHTML = '<span class="sending">📎 sending ' + esc(String((args && args.path) || "").split("/").pop()) + "…</span>";
+    return d;
+  }
   const d = document.createElement("details");
   d.className = "tool";
   const preview = args && typeof args === "object" ? (args.path || args.command || args.pattern || args.query ||
@@ -510,7 +527,45 @@ function toolEl(name, args) {
   chat.appendChild(d);
   return d;
 }
+// send_file's result: "sent to the user: name (size) [file:<id>:<type>]", then the caption if there's one.
+const SENT_RE = /^sent to the user: (.*) \(([^)]*)\) \[file:([0-9a-f]{16}):([^\]]+)\]\n?([\s\S]*)$/;
+async function fileBlob(id) {
+  const res = await fetch("/v1/files/" + id, { headers: { "Authorization": "Bearer " + state.key } });
+  if (!res.ok) throw new Error(res.status === 404 ? "this file isn't on the server any more" : "can't get the file (" + res.status + ")");
+  return res.blob();
+}
+function showSent(d, output, isError) {
+  const m = String(output || "").match(SENT_RE);
+  if (isError || !m) { d.innerHTML = '<span class="error">⏺ couldn\'t send a file: ' + esc(output || "") + "</span>"; return; }
+  const [, name, size, id, mime, caption] = m;
+  if (mime.startsWith("image/")) {
+    d.innerHTML = '<img alt="">' + (caption ? '<div class="cap"></div>' : "");
+    const img = d.querySelector("img");
+    img.alt = name; img.title = name + " · " + size;
+    fileBlob(id).then((blob) => {
+      const url = URL.createObjectURL(blob);
+      img.src = url;
+      img.onclick = () => window.open(url, "_blank");
+      img.onload = () => { if (stick()) bottom(); };
+    }).catch((e) => { d.innerHTML = '<span class="error">⏺ ' + esc(name) + ": " + esc(e.message) + "</span>"; });
+  } else {
+    d.innerHTML = '<div class="filecard">' + icon("download") + '<div class="n"><b></b><span></span></div><button>Download</button></div>' +
+      (caption ? '<div class="cap"></div>' : "");
+    d.querySelector(".n b").textContent = name;
+    d.querySelector(".n span").textContent = size + " · " + mime;
+    d.querySelector("button").onclick = async () => {
+      try {
+        const url = URL.createObjectURL(await fileBlob(id));
+        const a = document.createElement("a");
+        a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      } catch (e) { toast(e.message, "error"); }
+    };
+  }
+  if (caption) d.querySelector(".cap").textContent = caption;
+}
 function toolDone(d, output, isError) {
+  if (d.dataset.sendfile) return showSent(d, output, isError);
   d.classList.add(isError ? "err" : "ok");
   d.querySelector(".st").textContent = isError ? "✗" : "✓";
   const pre = document.createElement("pre");
