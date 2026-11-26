@@ -85,9 +85,15 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 #hero .sub { margin: 6px 0 22px; }
 #hero .tip { color: var(--faint); font-size: 12px; max-width: 460px; margin: 0 auto; }
 .msg { margin: 0 0 18px; }
-.user { background: var(--panel); border-left: 2px solid var(--accent); padding: 10px 14px; white-space: pre-wrap;
-  word-wrap: break-word; }
-.user img { display: block; max-width: 220px; max-height: 160px; border-radius: 4px; margin-top: 8px; }
+/* Your message, drawn like the terminal app draws it: a panel across the width with the accent bar on the left. */
+.msg.user { margin: 4px 0 18px; display: flex; }
+.user .bar { flex: none; color: var(--accent); background: var(--bg); position: relative; }
+.user .bar::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); }
+.user .body { flex: 1; min-width: 0; background: var(--panel); color: var(--text); padding: 1.55em 2ch;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+.user .imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.user .imgs:empty { display: none; }
+.user img { display: block; max-width: 200px; max-height: 150px; border: 1px solid var(--line); }
 .reply { padding: 0 2px; word-wrap: break-word; position: relative; }
 .reply p { margin: 0 0 10px; }
 .reply h1, .reply h2, .reply h3, .reply h4 { margin: 14px 0 8px; font-size: 15px; color: var(--accent); }
@@ -453,9 +459,10 @@ function add(cls, html) {
   el.className = "msg " + cls; el.innerHTML = html; chat.appendChild(el); return el;
 }
 function userMsg(text, images) {
-  const el = add("user", "");
-  el.textContent = text;
-  for (const src of images || []) { const img = document.createElement("img"); img.src = src; el.appendChild(img); }
+  const el = add("user", '<div class="bar"></div><div class="body"><div class="text"></div><div class="imgs"></div></div>');
+  el.querySelector(".text").textContent = text;
+  for (const src of images || []) { const img = document.createElement("img"); img.src = src; el.querySelector(".imgs").appendChild(img); }
+  if (!text) el.querySelector(".text").remove();
   return el;
 }
 function toolEl(name, args) {
