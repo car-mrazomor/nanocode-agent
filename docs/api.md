@@ -139,7 +139,7 @@ There's nobody to ask, so the API decides up front:
 | `"auto"` (default on `127.0.0.1`) | allowed |
 | `"read-only"` (default with any other `--host`) | denied; the agent can read, search and answer |
 
-Listening beyond this machine, edits and commands stay off until you set `"permissions": "auto"` yourself.
+Listening beyond this machine, edits and commands stay off until you allow them: start it with `nanocode serve --host 0.0.0.0 --yes`, or set `"permissions": "auto"`. When something is refused, the model is told why (so it can tell you), and the web app shows "read-only".
 
 Either way, **dangerous commands** (`rm -rf /`, `git push --force`, …) and **sending email** are always denied over the API.
 

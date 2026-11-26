@@ -1491,6 +1491,7 @@ def answer_permission(key):
 
 
 async def allowed(tool_name, preview):
+    DENIAL.set(None)
     dangerous = (tool_name in ("bash", "shell") and bool(DANGEROUS.search(preview))) or tool_name in ALWAYS_ASK
     decisions = await hook("permission", tool=tool_name, preview=preview)   # the user's permission rules
     if "deny" in decisions:
@@ -1501,8 +1502,9 @@ async def allowed(tool_name, preview):
         return True
     if st.headless:
         reason = f"{tool_name} always asks" if tool_name in ALWAYS_ASK else "looks dangerous" if dangerous else \
-            "run with --yes to allow"
+            "your permission rules say to ask" if forced_ask else "run with --yes to allow"
         out(f"  {DIM}⎿  denied {tool_name} ({reason}){RESET}")
+        DENIAL.set(denial_reason(tool_name, dangerous, forced_ask))
         return False
     if st.permission_lock is None:
         st.permission_lock = asyncio.Lock()
@@ -1510,6 +1512,23 @@ async def allowed(tool_name, preview):
         if not dangerous and not forced_ask and tool_name in st.always_allow:   # answered "always" meanwhile
             return True
         return await ask_permission(tool_name, preview, dangerous)
+
+
+def denial_reason(tool_name, dangerous, forced_ask):
+    """What the model is told when an action was refused because nobody could be asked."""
+    if tool_name in ALWAYS_ASK:
+        why = f"{tool_name} always needs the user's OK, and nobody can answer here"
+    elif dangerous:
+        why = "this command looks destructive, and those are never run without the user's OK, which can't be given here"
+    elif forced_ask:
+        why = f"the user's permission rules say to ask before {tool_name}, and nobody can answer here"
+    elif st.serving:
+        why = ("this nanocode server is read-only: edits and commands are off (that's the default when it listens "
+               "beyond this computer). Saying yes in the chat can't change it. Whoever runs the server can allow them "
+               "with `nanocode serve --yes`, or \"api\": {\"permissions\": \"auto\"} in ~/.nanocode/config.json, then a restart")
+    else:
+        why = "edits and commands aren't allowed in this run (start it with --yes to allow them)"
+    return f"denied: {why}. Tell the user this; don't retry it."
 
 
 async def ask_permission(tool_name, preview, dangerous):
@@ -1569,6 +1588,14 @@ TOOL_PREVIEW = {"rea_search": "query", "rea_schema": "tool", "rea_call": "tool",
                 "web_search": "query", "web_fetch": "url", "agent": "name", "email_list": "folder",
                 "email_search": "query", "email_read": "uid", "email_draft": "to", "email_send": "to", "email_tag": "move_to"}
 DENIED = "error: the user denied this action. Ask what they want instead, or try a different approach."
+# Why the last action was refused when nobody could be asked (headless, the API, a chat app): the model is told the
+# real reason, so it can explain it instead of claiming the user said no.
+DENIAL = contextvars.ContextVar("denial", default=None)
+
+
+def denied():
+    reason = DENIAL.get()
+    return f"error: {reason}" if reason else DENIED
 
 
 def tool(name, description, properties, required=()):
@@ -1832,7 +1859,7 @@ async def tool_write(args):
         check_stamp(path)
         show_diff(old, content, path)
     if not await allowed("write", str(path)):
-        return DENIED
+        return denied()
     record_undo(path, old)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text(path, content)
@@ -1867,7 +1894,7 @@ async def tool_edit(args):
     updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
     show_diff(text, updated, path)
     if not await allowed("edit", str(path)):
-        return DENIED
+        return denied()
     if file_stamp(path) != stamp_before:        # changed while the user was looking at the permission prompt
         raise ToolError(f"{path} changed on disk while waiting for permission. Read it again and redo the edit.")
     record_undo(path, text)
@@ -2055,7 +2082,7 @@ async def tool_bash(args):
     command = args["command"]
     timeout = min(max(int(args.get("timeout") or 120), 1), 600)
     if not await allowed("bash", command):
-        return DENIED
+        return denied()
     env = {**os.environ, "PAGER": "cat", "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0", "NO_COLOR": "1"}
     extra = {"start_new_session": True} if os.name != "nt" else {}
     command = await wrapped_command(command)
@@ -2257,7 +2284,7 @@ async def tool_save_skill(args):
         ensure_project_dir()
     path = root / name / "SKILL.md"
     if not await allowed("save_skill", f"{name} ({'global' if args.get('scope') == 'global' else 'project'})"):
-        return DENIED
+        return denied()
     path.parent.mkdir(parents=True, exist_ok=True)
     previous = read_text(path) if path.exists() else None
     record_undo(path, previous)
@@ -2654,7 +2681,7 @@ async def tool_rea_call(args):
         return await own["fn"](arguments)
     spec = await rea_tool_spec(args["tool"])
     if rea_is_risky(spec) and not await allowed("rea", f"{spec['name']} {json.dumps(arguments)}"):
-        return DENIED
+        return denied()
     timeout = min(max(int(args.get("timeout") or 600), 5), 3600)
     result = await rea().call(spec["name"], arguments, timeout)
     return mcp_result_text(result, spec, "REA")
@@ -2727,7 +2754,7 @@ async def mcp_run(server, spec, arguments, timeout=300):
             raise ToolError("`arguments` must be a JSON object")
     if mcp_is_risky(spec) and not await allowed(mcp_tool_name(server, spec["name"]),
                                                  f"{server}.{spec['name']} {json.dumps(arguments)}"):
-        return DENIED
+        return denied()
     result = await st.mcp[server].call(spec["name"], arguments, timeout)
     return mcp_result_text(result, spec, f"MCP {server}")
 
@@ -7027,7 +7054,7 @@ def main(argv=None):
             print(f"{RED}⏺ the api/ folder is missing next to nanocode.py: run `nanocode update`{RESET}", file=sys.stderr)
             return 1
         try:
-            return asyncio.run(server.serve(sys.modules[__name__], args.host, args.port))
+            return asyncio.run(server.serve(sys.modules[__name__], args.host, args.port, yes=args.yes))
         except KeyboardInterrupt:
             return 0
     try:

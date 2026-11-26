@@ -165,12 +165,12 @@ def test_permissions_in_headless_mode(sandbox):
     nc.st.headless = True
     nc.st.auto_approve = False
     text, _ = call("write", path="x.txt", content="hi")
-    assert text == nc.DENIED and not Path("x.txt").exists()
+    assert "denied" in text and "--yes" in text and not Path("x.txt").exists()   # the model is told why
     nc.st.auto_approve = True
     text, err = call("write", path="x.txt", content="hi")
     assert not err and Path("x.txt").exists()
     text, _ = call("bash", command="rm -rf / --no-preserve-root")
-    assert text == nc.DENIED
+    assert "denied" in text and "destructive" in text
 
 
 def test_tool_input_problems_dont_crash(sandbox):
@@ -513,7 +513,7 @@ def test_rea_risky_tools_ask_and_crashes_recover(sandbox, tmp_path):
             await nc.st.rea.close()
 
     denied, crashed, crash_err, again, again_err = run(scenario())
-    assert denied == nc.DENIED
+    assert denied.startswith("error: denied:") and "Tell the user" in denied
     assert crash_err and "stopped unexpectedly" in crashed
     assert not again_err and "inspect_artifact ok" in again
 

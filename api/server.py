@@ -959,7 +959,7 @@ def say(text):
     nc.headless_write(sys.stderr, text + "\n")
 
 
-async def serve(module, host=None, port=None):
+async def serve(module, host=None, port=None, yes=False):
     global nc
     nc = module
     host, port, key = api_settings(host, port)
@@ -970,7 +970,7 @@ async def serve(module, host=None, port=None):
     # Edits and commands are allowed by default only on this machine; reachable from others, they have to be
     # turned on explicitly with "permissions": "auto".
     default = "auto" if host in LOCAL_HOSTS else "read-only"
-    nc.st.auto_approve = (nc.st.config.get("api") or {}).get("permissions", default) == "auto"
+    nc.st.auto_approve = yes or (nc.st.config.get("api") or {}).get("permissions", default) == "auto"
     nc.new_session()
     if nc.st.backend == "sdk":
         nc.st.client = await nc.make_client()
@@ -984,7 +984,7 @@ async def serve(module, host=None, port=None):
     say(f"{nc.GREEN}⏺ nanocode API{nc.RESET} on http://{host}:{port}/v1  {nc.DIM}·  {nc.pretty_model(nc.st.model)} · "
           f"{nc.provider_label()} · {os.getcwd()}{nc.RESET}\n"
           f"  {nc.DIM}key:{nc.RESET} {shown}  {nc.DIM}(Authorization: Bearer <key>; in ~/.nanocode/config.json under \"api\"){nc.RESET}\n"
-          f"  {nc.DIM}edits and commands: {'allowed' if nc.st.auto_approve else 'denied (read-only)'}; "
+          f"  {nc.DIM}edits and commands: {'allowed' if nc.st.auto_approve else 'off, read-only (--yes allows them)'}; "
           f"dangerous commands and sending email are always denied · Ctrl+C stops{nc.RESET}")
     if host not in LOCAL_HOSTS:
         say(f"  {nc.YELLOW}listening beyond this machine over plain HTTP: put it behind HTTPS"

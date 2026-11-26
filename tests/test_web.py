@@ -330,3 +330,29 @@ def test_files_are_saved_and_given_to_the_model(sandbox, monkeypatch):
             {"type": "input_file", "filename": "x.txt"}]}]})
         assert status == 400
     with_server(test)
+
+
+def test_a_read_only_server_tells_the_model_why_a_command_was_refused(sandbox, monkeypatch):
+    requests = fake_openrouter(monkeypatch, [[tool_call_chunk("c1", "bash", {"command": "touch x"})], text_reply("ok")])
+    nc.st.auto_approve = False                  # nanocode serve --host 0.0.0.0, without --yes
+
+    async def test(port, api):
+        status, _, body = await request(port, "POST", "/v1/runs", {"input": "make a file"})
+        await api.runs[json.loads(body)["run_id"]].task
+        result = requests[1]["messages"][-1]["content"]
+        assert "read-only" in result and "nanocode serve --yes" in result and "user denied" not in result
+        assert not Path("x").exists()
+    with_server(test)
+
+
+def test_serve_yes_allows_edits_even_when_reachable_from_other_devices(sandbox, monkeypatch):
+    import asyncio
+
+    async def no_listen(*a, **k):
+        raise OSError("test")
+    monkeypatch.setattr(server.asyncio, "start_server", no_listen)
+    monkeypatch.setattr(nc, "make_client", None)
+    nc.st.backend = "api"
+    nc.st.config = {"api": {"key": "k" * 16}}
+    assert asyncio.run(server.serve(nc, "0.0.0.0", 1)) == 1 and nc.st.auto_approve is False
+    assert asyncio.run(server.serve(nc, "0.0.0.0", 1, yes=True)) == 1 and nc.st.auto_approve is True
