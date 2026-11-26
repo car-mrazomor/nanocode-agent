@@ -1,4 +1,4 @@
-"""The messaging gateway: talk to nanocode from Telegram, Discord, Slack or WhatsApp (like Hermes Agent's).
+"""The messaging gateway: talk to nanocode from Telegram, Discord, Slack, WhatsApp or Matrix (like Hermes Agent's).
 
 `nanocode gateway run` runs nanocode headless in a folder and answers messages there. Each platform
 conversation is its own nanocode chat (saved, so you can /resume it in the app), in its own tab, so several
@@ -30,7 +30,7 @@ import httpx
 import nanocode as nc
 from nanokit import cli
 
-PLATFORMS = ("telegram", "discord", "slack", "whatsapp")
+PLATFORMS = ("telegram", "discord", "slack", "whatsapp", "matrix")
 GATEWAY_MAX_CHATS = 20  # conversations kept open (each may hold a Claude Code process); idle ones are closed
 GATEWAY_MAX_QUEUED = 10  # messages waiting in one conversation
 GATEWAY_TYPING_EVERY = 4  # seconds
@@ -1005,7 +1005,7 @@ def setup():
 
 
 GATEWAY_USAGE = """usage: nanocode gateway <command>
-  setup              set up Telegram, Discord, Slack or WhatsApp (tokens, who may talk to it)
+  setup              set up Telegram, Discord, Slack, WhatsApp or Matrix (tokens, who may talk to it)
   run                run in this terminal (Ctrl+C stops)
   start | stop       run in the background, or stop it
   status             is it running, platforms, people waiting for approval, last log lines
@@ -1013,7 +1013,7 @@ GATEWAY_USAGE = """usage: nanocode gateway <command>
   logs               the last 50 lines of the log"""
 
 
-@cli("gateway", "chat with nanocode from Telegram, Discord, Slack or WhatsApp")
+@cli("gateway", "chat with nanocode from Telegram, Discord, Slack, WhatsApp or Matrix")
 def gateway_cli(argv):
     command = argv[0] if argv else "help"
     if command == "setup":

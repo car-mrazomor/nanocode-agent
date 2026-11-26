@@ -1,6 +1,6 @@
 # Messaging gateway
 
-The gateway lets you talk to nanocode from **Telegram, Discord, Slack or WhatsApp**, like [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s. It runs nanocode in the background, in one folder, and answers your messages there: ask about the code, start a task, get a scheduled report on your phone.
+The gateway lets you talk to nanocode from **Telegram, Discord, Slack, WhatsApp or Matrix**, like [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s. It runs nanocode in the background, in one folder, and answers your messages there: ask about the code, start a task, get a scheduled report on your phone.
 
 The code is in [`nanokit/gateway/`](../nanokit/gateway/): one file per platform.
 
@@ -97,6 +97,19 @@ cloudflared tunnel --url http://localhost:8770     # or: ngrok http 8770
 4. In **WhatsApp → Configuration**, set the webhook URL to `<your tunnel URL>/webhook` with your verify token, and subscribe to `messages`.
 
 Every message Meta sends is checked against the app secret, so nobody else can post to the webhook. The allow list holds phone numbers (international format, digits only). Meta's temporary access tokens expire after a day: make a permanent one (a system user token) for everyday use.
+
+## Matrix
+
+Any homeserver works: matrix.org, your own Synapse, Conduit or Dendrite. nanocode polls it (`/sync`), so no public URL is needed.
+
+1. Make a separate account for nanocode (a bot account), and log in to it once in Element.
+2. In Element, **Settings → Help & About → Access Token**: copy it (then close that session without logging out, which would end the token).
+3. Run setup: the homeserver URL (e.g. `https://matrix.org`) and the token. The allow list holds Matrix user ids, like `@you:matrix.org`.
+4. Invite the bot to a direct chat with **encryption off**. It joins by itself.
+
+In a direct chat it answers everything; in a bigger room only when it's mentioned or sent a `/command`. Replies to a thread stay in the thread. Images go to the model and voice messages are transcribed.
+
+**Encrypted rooms aren't supported:** reading them needs Olm/Megolm keys, which nanocode doesn't have. In an encrypted room it says so once. Element turns encryption on for new direct chats by default; switch it off when you create the chat (it can't be switched off later).
 
 ## Settings
 

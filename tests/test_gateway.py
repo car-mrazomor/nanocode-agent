@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import nanocode as nc  # noqa: E402
 from nanokit import gateway  # noqa: E402
 from nanokit.gateway import Gateway, Incoming, Platform, split_message  # noqa: E402
-from nanokit.gateway import telegram, discord, slack, whatsapp  # noqa: E402
+from nanokit.gateway import telegram, discord, slack, whatsapp, matrix  # noqa: E402
 from test_api import fake_openrouter, text_reply  # noqa: E402
 from test_nanocode import tool_call_chunk  # noqa: E402
 
@@ -722,3 +722,109 @@ def test_a_stale_pid_is_never_stopped(sandbox, monkeypatch):
         assert gateway.lock_held()
     finally:
         gateway.drop_lock()
+
+
+# --- Matrix ---
+
+def matrix_server(rounds, calls, member_count=2):
+    """A fake homeserver: whoami, profile, then one /sync answer per round (the first is the catch-up sync)."""
+    def handler(request):
+        path = request.url.path
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.method, path, body, dict(request.url.params)))
+        if path.endswith("/account/whoami"):
+            return httpx.Response(200, json={"user_id": "@nano:example.org"})
+        if "/profile/" in path:
+            return httpx.Response(200, json={"displayname": "Nano"})
+        if path.endswith("/sync"):
+            if rounds:
+                return httpx.Response(200, json=rounds.pop(0))
+            raise httpx.ReadTimeout("no more")
+        if "/media/" in path:
+            return httpx.Response(200, content=b"IMG")
+        if path.endswith("/join") or "/send/" in path or "/typing/" in path:
+            return httpx.Response(200, json={"event_id": "$x"})
+        return httpx.Response(404, json={"errcode": "M_NOT_FOUND", "error": "no"})
+    return handler
+
+
+def room(events, members=2, state=()):
+    return {"summary": {"m.joined_member_count": members}, "state": {"events": list(state)},
+            "timeline": {"events": events}}
+
+
+def text_event(body, sender="@iv:example.org", **content):
+    return {"type": "m.room.message", "sender": sender, "content": {"msgtype": "m.text", "body": body, **content}}
+
+
+def test_matrix_syncs_joins_and_answers_in_direct_chats_and_mentions(sandbox):
+    calls = []
+    rounds = [
+        {"next_batch": "s1", "rooms": {"join": {"!dm:x": room([text_event("old message")])}}},   # catch-up: skipped
+        {"next_batch": "s2", "rooms": {
+            "invite": {"!new:x": {"invite_state": {"events": []}}},
+            "join": {
+                "!dm:x": room([text_event("hello"), text_event("from me", sender="@nano:example.org"),
+                               {"type": "m.room.message", "sender": "@iv:example.org",
+                                "content": {"msgtype": "m.image", "body": "a.png", "url": "mxc://example.org/abc",
+                                            "info": {"mimetype": "image/png"}}}]),
+                "!group:x": room([text_event("chatting among ourselves"), text_event("Nano: what's in README?"),
+                                  text_event("in a thread", **{"m.relates_to": {"rel_type": "m.thread",
+                                                                                "event_id": "$root"}})], members=5)}}},
+    ]
+
+    async def main():
+        recorder = Recorder()
+        bot = matrix.Matrix({"homeserver": "https://example.org", "access_token": "SECRET"}, recorder,
+                            http=mock(matrix_server(rounds, calls)))
+        task = asyncio.ensure_future(bot.run())
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if len(recorder.messages) == 3:
+                break
+        task.cancel()
+        texts = {m.text: m for m in recorder.messages}
+        assert set(texts) == {"hello", "", "what's in README?"}           # the old message and chatter ignored
+        assert texts["hello"].chat == "!dm:x" and texts["hello"].user == "@iv:example.org"
+        assert texts[""].images == [("image/png", b"IMG")]
+        assert any(p.endswith("/rooms/!new:x/join") for _, p, _, _ in calls)    # invited: joined
+        assert calls[[c[1] for c in calls].index("/_matrix/client/v3/sync")][3]["timeout"] == "0"   # catch-up first
+        await bot.send_text("!dm:x", "the answer", thread="$root")
+        method, path, body, _ = calls[-1]
+        assert method == "PUT" and "/rooms/!dm:x/send/m.room.message/" in path
+        assert body["body"] == "the answer" and body["m.relates_to"]["event_id"] == "$root"
+        assert "SECRET" not in bot.hide("Bearer SECRET")
+
+    asyncio.run(main())
+
+
+def test_matrix_waits_out_rate_limits_and_says_it_cant_read_encrypted_rooms(sandbox, monkeypatch):
+    sent, tries = [], {"n": 0}
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(matrix.asyncio, "sleep", lambda s: real_sleep(0))
+
+    def handler(request):
+        if "/send/" in request.url.path:
+            tries["n"] += 1
+            if tries["n"] == 1:
+                return httpx.Response(429, json={"errcode": "M_LIMIT_EXCEEDED", "retry_after_ms": 10})
+            sent.append(json.loads(request.content)["body"])
+            return httpx.Response(200, json={"event_id": "$e"})
+        return httpx.Response(200, json={})
+
+    async def main():
+        bot = matrix.Matrix({"homeserver": "https://example.org", "access_token": "t"}, Recorder(), http=mock(handler))
+        bot.me = "@nano:example.org"
+        await bot.send_text("!r:x", "hi")
+        assert sent == ["hi"] and tries["n"] == 2                         # retried after the rate limit
+        await bot.handle_sync({"rooms": {"join": {"!enc:x": room(
+            [{"type": "m.room.encrypted", "sender": "@iv:example.org", "content": {}}] * 2)}}})
+        assert len(sent) == 2 and "encrypted" in sent[1]                  # said once, not per message
+
+    asyncio.run(main())
+
+
+def test_matrix_is_a_gateway_platform():
+    assert "matrix" in gateway.PLATFORMS and gateway.platform_class("matrix") is matrix.Matrix
+    assert matrix.Matrix.configured({"homeserver": "https://m.org", "access_token": "t"})
+    assert not matrix.Matrix.configured({"access_token": "t", "homeserver": ""})

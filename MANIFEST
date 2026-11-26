@@ -15,6 +15,7 @@ nanokit/environments.py
 nanokit/formatters.py
 nanokit/gateway/__init__.py
 nanokit/gateway/discord.py
+nanokit/gateway/matrix.py
 nanokit/gateway/slack.py
 nanokit/gateway/telegram.py
 nanokit/gateway/whatsapp.py

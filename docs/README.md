@@ -19,7 +19,7 @@ nanocode is a small, hackable coding agent for the terminal, in one Python file.
 | [Your chats](chats.md) | Search all chats, fork, export, import, share as a gist, usage stats |
 | [Editors (ACP)](acp.md) | `nanocode acp`: use nanocode in Zed and other ACP editors |
 | [GitHub agent](github.md) | `/nanocode` in issue and pull request comments, through GitHub Actions |
-| [Messaging gateway](gateway.md) | Talk to nanocode from Telegram, Discord, Slack or WhatsApp |
+| [Messaging gateway](gateway.md) | Talk to nanocode from Telegram, Discord, Slack, WhatsApp or Matrix |
 | [Scheduled tasks](cron.md) | Prompts that run by themselves: `/cron`, `nanocode cron` |
 | [Voice](voice.md) | Replies read aloud, and speaking your messages |
 | [Compare](compare.md) | One prompt, several models, side by side |

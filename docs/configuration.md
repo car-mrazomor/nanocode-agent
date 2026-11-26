@@ -49,7 +49,7 @@ Settings live in `~/.nanocode/config.json` (readable only by you). Most are set 
 | `update_check` | `true`, `false` | `true` | Daily check for a new version |
 | `api` | `{"key", "host", "port", "permissions"}` | made on first `nanocode serve` | The HTTP API ([more](api.md)) |
 | `environment` | `{"type": "local"}`, `docker`, `ssh`, `apptainer`, `singularity`, `custom` | `local` | Where shell commands run ([more](environments.md)) |
-| `gateway` | `{"workdir", "permissions", "telegram", "discord", "slack", "whatsapp"}` | made by `nanocode gateway setup` | The messaging gateway: tokens, allow lists, `read-only` or `auto` ([more](gateway.md#settings)) |
+| `gateway` | `{"workdir", "permissions", "telegram", "discord", "slack", "whatsapp", "matrix"}` | made by `nanocode gateway setup` | The messaging gateway: tokens, allow lists, `read-only` or `auto` ([more](gateway.md#settings)) |
 | `cron` | `{"permissions", "timeout", "in_app"}` | `read-only`, `1800`, `true` | Scheduled tasks: may they edit, how long a run may take, run them while the app is open ([more](cron.md)) |
 | `voice` | `{"speak", "tts", "stt_url", ...}` | | Replies read aloud and speech input ([more](voice.md#settings)) |
 
