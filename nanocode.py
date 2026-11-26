@@ -49,7 +49,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -312,10 +312,31 @@ def restart_app(after="restart"):
 def start_task(coro):
     if st.task and not st.task.done():
         coro.close()
-        show_toast("busy: wait for the current task")
+        show_toast("busy: wait for the current task", variant="warning")
         return
     st.task_started = time.time()
-    st.task = asyncio.ensure_future(coro)
+    st.task = in_tab(st.active_tab, coro)
+
+
+def in_tab(tab, coro):
+    """Runs a coroutine as a task of one tab: everything it does (output, history, permissions) is that tab's,
+    even after you switch to another."""
+    context = contextvars.copy_context()
+    context.run(CURRENT_TAB.set, tab)
+    return context.run(asyncio.ensure_future, coro)   # the task copies the context it's created in
+
+
+class for_tab:
+    """`with for_tab(tab):` makes st.<chat field> mean that tab's for a moment (outside its own turns)."""
+    def __init__(self, tab):
+        self.tab = tab
+
+    def __enter__(self):
+        self.token = CURRENT_TAB.set(self.tab)
+        return self.tab
+
+    def __exit__(self, *exc):
+        CURRENT_TAB.reset(self.token)
 
 
 def after_exit():
@@ -482,11 +503,14 @@ def default_num_ctx():
     return 8192 if ram_gb <= 12 else 16384 if ram_gb <= 24 else 32768
 
 
-class State:
-    def __init__(self):
-        self.backend = None  # "sdk" | "api" | "ollama"
-        self.model = None
-        self.config = {}
+# What belongs to one chat. nanocode can have several chats open in tabs, each running on its own; `st.<field>`
+# for these means the field of the tab the code runs for (see State).
+TAB_FIELDS = frozenset(['client_signature', 'activity', 'changed', 'client', 'ctx_budget', 'ctx_tokens', 'file_stamps', 'home', 'interrupt_armed', 'last_error', 'last_reply', 'lines_dropped', 'live', 'live_dirty', 'live_md', 'live_rendered_at', 'messages', 'model', 'output', 'output_started', 'pending_permission', 'permission_lock', 'queue', 'routed_model', 'scroll_top', 'sdk_streaming', 'selection', 'session', 'task', 'task_started', 'thinking_now', 'todos', 'tool_log', 'trim_notice', 'turn_errors', 'undo', 'unseen', 'usage'])
+CURRENT_TAB = contextvars.ContextVar("current_tab", default=None)  # set in each tab's own turns
+
+
+class Tab:
+    def __init__(self, model=None):
         self.client = None
         self.messages = []  # OpenAI-format history for api/ollama; the SDK keeps its own
         self.session = {}
@@ -494,7 +518,6 @@ class State:
         self.task = None
         self.task_started = 0.0
         self.output = ""
-        self.version = 0
         self.live_md = None
         self.live = ""
         self.live_rendered_at = 0.0
@@ -503,46 +526,67 @@ class State:
         self.sdk_streaming = False  # a Claude subscription query is being answered
         self.queue = []  # messages typed while a reply runs; sent one by one when it ends
         self.tool_log = []  # (label, full output) of recent tool calls, for ctrl+o
-        self.exit_armed = 0.0  # ctrl+c / ctrl+d once on an empty prompt: press again to quit
         self.scroll_top = None  # (absolute line, row in it) at the top of the chat when scrolled back; None = follow
         self.lines_dropped = 0  # lines trimmed off the top of the transcript, so positions stay valid
         self.selection = None  # {"anchor": (line, char), "head": (line, char), "dragging": bool}
-        self.view = {"rows": [], "width": 80, "height": 24}
-        self.toast = None  # (text, shown until)
         self.thinking_now = False  # the model is reasoning right now (shown in the footer)
+        self.pending_permission = None
+        self.unseen = False  # a turn finished while you were away: the tab title shows ✓ until you're back
+        self.todos = []  # the agent's current plan (todo tool)
+        self.permission_lock = None  # one permission question at a time (sub-agents run in parallel)
+        self.undo = []
+        self.file_stamps = {}  # path -> (mtime_ns, size) when the model last read or wrote it
+        self.turn_errors = 0
+        self.last_error = None
+        self.routed_model = None
+        self.trim_notice = False
+        self.output_started = False
+        self.ctx_tokens = 0
+        self.ctx_budget = 0
+        self.home = True  # the start screen, until the first message or command
+        self.interrupt_armed = 0.0
+        self.activity = []  # (tool, preview, is_error) this session, for /recap
+        self.changed = {}  # path -> [lines added, lines removed] this session
+        self.model = model
+        self.draft = ""  # what was typed in the prompt when you switched away
+        self.live_cache = {"source": "", "width": 0, "rendered": []}
+        self.attention = None  # "done" or "error": a turn ended while you were in another tab
+        self.client_signature = None  # tools and prompt this tab's Claude client connected with
+
+
+class State:
+    """nanocode's state. Fields of one chat (TAB_FIELDS) live on a Tab: inside a turn they're its tab's,
+    elsewhere (the UI drawing, commands) the active tab's. Everything else is shared by all tabs."""
+
+    def __init__(self):
+        object.__setattr__(self, "tabs", [Tab()])
+        object.__setattr__(self, "active", 0)
+        self.backend = None  # "sdk" | "api" | "ollama"
+        self.config = {}
+        self.version = 0
+        self.exit_armed = 0.0  # ctrl+c / ctrl+d once on an empty prompt: press again to quit
+        self.view = {"rows": [], "width": 80, "height": 24}
+        self.toasts = []  # notifications in the top right corner, newest last (see show_toast)
         self.update_available = None  # newer version on GitHub, if any
         self.update_state = None  # None, "installing", "installed" or "failed" (in-app /update)
         self.after_exit = None  # "restart" (start the new version) or "update" (Windows: update, then restart)
         self.ui = {}  # UI callbacks set by build_app (open_dialog)
         self.no_think = set()  # (backend, model) that rejected the thinking setting; sent without it
-        self.pending_permission = None
         self.focused = None  # is the terminal tab in front? None until the terminal reports focus
-        self.unseen = False  # a turn finished while you were away: the tab title shows ✓ until you're back
         self.shown_title = None
         self.translate_keys = True
         self.attachments = {}  # "[Image #1]" -> ("image", saved name), "[Pasted text #1 +40 lines]" -> ("text", text)
         self.chip_counts = {"image": 0, "text": 0}
         self.last_paste = None  # (text, its chip): pasting the same text again expands the chip
         self.always_allow = set()
-        self.todos = []  # the agent's current plan (todo tool)
-        self.permission_lock = None  # one permission question at a time (sub-agents run in parallel)
         self.auto_approve = False
         self.headless = False
         self.serving = False  # `nanocode serve`: headless, and replies go to API clients instead of stdout
-        self.undo = []
-        self.file_stamps = {}  # path -> (mtime_ns, size) when the model last read or wrote it
-        self.turn_errors = 0
-        self.last_error = None
-        self.routed_model = None
         self.openrouter_key = None
         self.provider = "claude"   # in use now; --provider can differ from the config
         self.ollama_url = OLLAMA_DEFAULT_URL
         self.num_ctx = default_num_ctx()
         self.ollama_models = []
-        self.trim_notice = False
-        self.output_started = False
-        self.ctx_tokens = 0
-        self.ctx_budget = 0
         self.app = None
         self.output_window = None
         self.input_box = None
@@ -550,14 +594,36 @@ class State:
         self.mcp = {}  # name -> McpClient for the MCP servers the user connected
         self.mcp_errors = {}  # name -> why it couldn't start
         self.mcp_retry_at = 0.0  # when to try the servers that failed again
+        self.mcp_lock = None
         self.mcp_loaded = None  # the config the current MCP tools came from
         self.mcp_many = []  # servers with many tools: reached through mcp_search / mcp_call
-        self.home = True  # the start screen, until the first message or command
         self.dialog = None
-        self.interrupt_armed = 0.0
-        self.activity = []  # (tool, preview, is_error) this session, for /recap
-        self.changed = {}  # path -> [lines added, lines removed] this session
         self.shells = {}  # name -> shell info, see Shells
+
+    def current_tab(self):
+        tab = CURRENT_TAB.get()
+        return tab if tab is not None else self.tabs[self.active]
+
+    @property
+    def active_tab(self):
+        return self.tabs[self.active]
+
+    def __getattr__(self, name):
+        if name in TAB_FIELDS:
+            return getattr(self.current_tab(), name)
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if name in TAB_FIELDS:
+            setattr(self.current_tab(), name, value)
+        else:
+            object.__setattr__(self, name, value)
+
+    def __delattr__(self, name):
+        if name in TAB_FIELDS:                 # back to a new chat's value (e.g. a test's monkeypatch undone)
+            setattr(self.current_tab(), name, getattr(Tab(), name))
+        else:
+            object.__delattr__(self, name)
 
 
 st = State()
@@ -627,9 +693,6 @@ def render_markdown(text):
     return buf.getvalue().rstrip("\n")
 
 
-_live_cache = {"source": "", "width": 0, "rendered": []}
-
-
 def finished_blocks(text):
     """Where the finished markdown blocks of a streaming reply end: the last blank line outside a code fence."""
     fence, cut, pos = None, 0, 0
@@ -652,7 +715,7 @@ def render_live(final=False):
         rendered = render_markdown(text)
     else:
         width, cut = messages_width(), finished_blocks(text)
-        cache = _live_cache
+        cache = st.current_tab().live_cache
         if cache["width"] != width or not text.startswith(cache["source"]) or cut < len(cache["source"]):
             cache.update(source="", width=width, rendered=[])
         if cut > len(cache["source"]):
@@ -736,7 +799,7 @@ def stream_end():
         render_live(final=True)
         final = st.live
     st.live_md, st.live, st.live_dirty = None, "", False
-    _live_cache.update(source="", width=0, rendered=[])
+    st.current_tab().live_cache.update(source="", width=0, rendered=[])
     if final:
         out(final)
     else:
@@ -1135,9 +1198,64 @@ def copy_to_clipboard(text):
     return "osc52"
 
 
-def show_toast(text, seconds=2.5):
-    st.toast = (text, time.monotonic() + seconds)
+TOAST_COLORS = {"info": "accent", "success": "success", "warning": "warning", "error": "error"}
+TOAST_WIDTH = 46  # text cells inside a toast
+
+
+def show_toast(text, seconds=2.5, variant="info", title=None, action=None):
+    """A notification like OpenCode's: a panel in the top right corner with a colored edge, an optional bold
+    title and the message. It goes away by itself; a click runs `action` (e.g. switch to that tab)."""
+    if st.headless:
+        return
+    now = time.monotonic()
+    st.toasts = [t for t in st.toasts if t["until"] > now and (t["message"], t["title"]) != (text, title)]
+    st.toasts.append({"message": text, "title": title, "variant": variant if variant in TOAST_COLORS else "info",
+                      "until": now + seconds, "action": action})
+    del st.toasts[:-3]
     invalidate()
+
+
+def live_toasts():
+    now = time.monotonic()
+    if any(t["until"] <= now for t in st.toasts):
+        st.toasts = [t for t in st.toasts if t["until"] > now]
+    return st.toasts
+
+
+def wrap_cells(text, width):
+    """Word-wrapped lines of at most `width` cells."""
+    lines = []
+    for paragraph in text.split("\n"):
+        line = ""
+        for word in paragraph.split(" "):
+            candidate = f"{line} {word}" if line else word
+            if text_cells(candidate) <= width:
+                line = candidate
+                continue
+            if line:
+                lines.append(line)
+            while text_cells(word) > width:
+                piece = clip_cells(word, width, "")
+                lines.append(piece)
+                word = word[len(piece):]
+            line = word
+        lines.append(line)
+    return lines
+
+
+def toast_rows():
+    """[(style, text, toast)] rows to draw, for the toasts on screen now; and their width in cells."""
+    rows, width = [], 0
+    for toast in live_toasts():
+        body = []
+        if toast["title"]:
+            body += [("title", line) for line in wrap_cells(toast["title"], TOAST_WIDTH)]
+        body += [("text", line) for line in wrap_cells(toast["message"], TOAST_WIDTH)][:4]
+        width = max(width, max(text_cells(line) for _, line in body))
+        if rows:
+            rows.append(("gap", "", None))
+        rows += [("pad", "", toast)] + [(kind, line, toast) for kind, line in body] + [("pad", "", toast)]
+    return rows, width
 
 
 _drag_edge = {"direction": 0, "since": 0.0, "task": None}
@@ -1355,6 +1473,11 @@ async def _ask_permission(tool_name, preview, dangerous):
         f"{fg('muted')}{preview[:120]}{RESET}\n     {fg('faint')}{options}{RESET}")
     st.pending_permission = asyncio.get_running_loop().create_future()
     notify(f"Needs your OK: {tool_name} {preview[:80]}")
+    tab = st.current_tab()
+    if tab is not st.active_tab and tab in st.tabs:     # asked in a tab you're not looking at
+        show_toast(f"{tool_name} {clip_cells(' '.join(preview.split()), 40)}", seconds=8, variant="warning",
+                   title=f"Tab {st.tabs.index(tab) + 1} needs your OK",
+                   action=lambda: switch_tab(st.tabs.index(tab)) if tab in st.tabs else None)
     invalidate()
     try:
         answer = await st.pending_permission
@@ -3453,7 +3576,14 @@ async def mcp_run(server, spec, arguments, timeout=300):
 
 async def ensure_mcp():
     """Starts the configured MCP servers and registers their tools; again only when the config changed.
-    Returns True when the tool list changed."""
+    Returns True when the tool list changed. One at a time: two tabs sending at once wait for one load."""
+    if st.mcp_lock is None:
+        st.mcp_lock = asyncio.Lock()
+    async with st.mcp_lock:
+        return await _ensure_mcp()
+
+
+async def _ensure_mcp():
     servers = {n: s for n, s in mcp_servers().items() if s.get("enabled", True) is not False}
     disabled = mcp_disabled()
     signature = json.dumps([servers, sorted(disabled)], sort_keys=True)
@@ -3807,7 +3937,14 @@ def sdk_tools():
             for t in active_tools()]
 
 
+def sdk_signature():
+    """What a Claude subscription client is fixed to when it connects: the tools and the system prompt."""
+    text = json.dumps(sorted(t["name"] for t in active_tools())) + build_system_prompt()
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 async def make_client(resume=None):
+    st.client_signature = sdk_signature()
     if sdk is None:
         raise RuntimeError("claude-agent-sdk isn't installed, so the Claude provider can't run. "
                            "Reinstall nanocode, or switch provider: nanocode setup")
@@ -3851,6 +3988,8 @@ async def make_client(resume=None):
 
 
 async def sdk_query(text, images=None):
+    if st.client is None:                      # a new tab connects on its first message
+        st.client = await make_client(resume=st.session.get("sdk_session_id"))
     st.sdk_streaming = True       # Esc lets the SDK stop this itself (cancelling would leave its reply half read)
     try:
         return await _sdk_query(text, images)
@@ -4549,6 +4688,11 @@ async def resume_session(arg):
     if st.backend == "sdk" and not match.get("sdk_session_id"):
         out(f"{RED}⏺ that chat has no Claude session id, so it can't be resumed{RESET}\n")
         return
+    here = st.current_tab()
+    other = next((t for t in st.tabs if t is not here and (t.session or {}).get("id") == match.get("id")), None)
+    if other is not None:                      # open in another tab: go there (two copies would overwrite each other)
+        switch_tab(st.tabs.index(other))
+        return
     if match.get("id") != st.session.get("id"):
         leave_current_chat()
     await open_session(match)
@@ -4618,7 +4762,8 @@ COMMANDS = {
     "/copy": "copy the last reply to the clipboard (/copy code: its last code block)",
     "/config": "show settings (change: nanocode setup)",
     "/terminal-setup": "make Shift+Enter, Cmd+Backspace and Cmd+arrows work in this terminal",
-    "/c": "new chat (old one stays saved)",
+    "/c": "new chat in this tab (old one stays saved)",
+    "/tab": "tabs: /tab new [message], /tab close, /tab <n>, or /tab to list them",
     "/q": "quit",
 }
 ALIASES = {"/clear": "/c", "/new": "/c", "/exit": "/q", "/quit": "/q"}
@@ -4628,7 +4773,9 @@ KEYS_HELP = [("Enter", "send"), ("Shift+Enter / Alt+Enter / Ctrl+J", "new line")
              ("Esc", "stop the reply"), ("Ctrl+C", "stop the reply, clear the input, or quit"),
              ("↑ / ↓", "input history (↑ on an empty prompt edits queued messages)"),
              ("PageUp / PageDown, wheel", "scroll the chat"), ("Ctrl+Home / Ctrl+End", "top / bottom of the chat"),
-             ("Ctrl+O", "full output of a recent tool call"), ("Drag / double-click", "select and copy"),
+             ("Ctrl+O", "full output of a recent tool call"),
+             ("Ctrl+T / Ctrl+X T", "new tab (its own chat; the others keep working)"),
+             ("Alt+1…9, Ctrl+X ← →, Ctrl+PgUp/PgDn", "switch tab"), ("Ctrl+X W", "close tab"), ("Drag / double-click", "select and copy"),
              ("Tab", "complete commands, models, @files"),
              ("Enter while a reply runs", "queue the message; it's sent when the reply finishes")]
 
@@ -4688,6 +4835,10 @@ async def cmd_provider(arg):
         return
     if name == current:
         out(f"{DIM}already using {PROVIDERS[name][1]}{RESET}\n")
+        return
+    if len(st.tabs) > 1:                       # the provider is shared by every tab
+        out(f"{YELLOW}⏺ the provider applies to every tab:{RESET} close the other tabs first "
+            f"{DIM}(ctrl+x w; their chats stay saved for /resume){RESET}\n")
         return
     problem = provider_status(name)
     if problem:
@@ -5479,8 +5630,11 @@ async def send(text, display=None, images=None):
     if not st.session.get("title"):
         st.session["title"] = short_title(display or text)
     st.turn_errors = 0
-    if mcp_servers() and await ensure_mcp() and st.backend == "sdk" and st.client:
-        await refresh_sdk_prompt()
+    if mcp_servers():
+        await ensure_mcp()
+    if st.backend == "sdk" and st.client and st.client_signature != sdk_signature():
+        await refresh_sdk_prompt()             # tools or memory changed since this tab connected (maybe in another)
+
     try:
         if st.backend == "sdk":
             await sdk_query(text, images)
@@ -5639,18 +5793,127 @@ PLACEHOLDERS = ["Fix a TODO in the codebase", "What is the tech stack of this pr
 LOGO_HEX = ["#6fb6c6", "#6aa9cc", "#6f9ccb", "#7a92c8", "#8a8cc4", "#9b88bf", "#ad87b6", "#bf89ae"]
 
 
-def start_input(text):
-    """Runs a prompt line (message or /command) in the background, like pressing Enter."""
-    if st.task and not st.task.done():
-        out(f"   {fg('muted')}still working; press Esc twice to stop{RESET}")
-        return False
-    st.home = False
-    st.scroll_top = st.selection = None
-    st.task_started = time.time()
-    st.unseen = False
-    st.task = asyncio.ensure_future(run_input(text))
-    st.task.add_done_callback(turn_finished)
+def start_input(text, tab=None):
+    """Runs a prompt line (message or /command) in the background, like pressing Enter: in the active tab,
+    or in `tab` (a queued message of a tab in the background)."""
+    tab = tab or st.active_tab
+    with for_tab(tab):
+        if st.task and not st.task.done():
+            out(f"   {fg('muted')}still working; press Esc twice to stop{RESET}")
+            return False
+        st.home = False
+        st.scroll_top = st.selection = None
+        st.task_started = time.time()
+        st.unseen = False
+        tab.attention = None
+        st.task = in_tab(tab, run_input(text))
+        st.task.add_done_callback(lambda task: turn_finished(task, tab))
     return True
+
+
+# --- Tabs: several chats open at once, each with its own history, model and running turn (like OpenCode's
+#     desktop app). A chat in a tab you're not looking at keeps working; its tab shows how it's doing. ---
+
+MAX_TABS = 9
+
+
+def tab_title(tab, limit=22):
+    title = " ".join(CONTROL_RE.sub("", (tab.session or {}).get("title") or "").split()) or "new chat"
+    return clip_cells(title, limit)
+
+
+def tab_status(tab):
+    """"permission", "working", "error", "done" (finished while you were in another tab) or None."""
+    if tab.pending_permission is not None:
+        return "permission"
+    if tab.task and not tab.task.done():
+        return "working"
+    return tab.attention
+
+
+def new_tab(announce=True):
+    """Opens a new chat in a new tab and switches to it (same provider and model as the current one)."""
+    if len(st.tabs) >= MAX_TABS:
+        show_toast(f"{MAX_TABS} tabs are open; close one first (ctrl+x w)", variant="warning")
+        return None
+    tab = Tab(model=st.active_tab.model)
+    with for_tab(tab):
+        new_session()
+        st.home = False
+        if announce:
+            out(f"{fg('muted')}New tab · its own chat; the others keep working. "
+                f"{fg('faint')}alt+1…9 or ctrl+x ←/→ switch · ctrl+x w closes{RESET}\n")
+    for other in st.tabs:
+        other.home = False                     # the tab bar lives in the chat view
+    st.tabs.append(tab)
+    switch_tab(len(st.tabs) - 1)
+    return tab
+
+
+def switch_tab(index):
+    if not 0 <= index < len(st.tabs) or index == st.active:
+        return
+    if st.input_box is not None:               # each tab keeps what you were typing
+        st.active_tab.draft = st.input_box.text
+    st.dialog = None
+    object.__setattr__(st, "active", index)
+    _wheel["pending"] = 0                      # a scroll under way belonged to the other tab
+    tab = st.active_tab
+    tab.attention = None if tab.attention == "done" else tab.attention
+    tab.unseen = False
+    if st.input_box is not None:
+        st.input_box.text, tab.draft = tab.draft, ""
+        st.input_box.buffer.cursor_position = len(st.input_box.text)
+        if st.app is not None:
+            st.app.layout.focus(st.input_box)
+    if tab.live_md is not None:
+        with for_tab(tab):
+            render_live()
+    invalidate()
+
+
+async def close_tab(index=None):
+    """Closes a tab: stops what it's doing and saves its chat (/resume opens it again). The last tab can't be
+    closed; /c starts a new chat in it instead."""
+    index = st.active if index is None else index
+    if len(st.tabs) <= 1 or not 0 <= index < len(st.tabs):
+        show_toast("this is the only tab", variant="warning")
+        return
+    tab = st.tabs[index]
+    # Out of the tab list at once (before anything is awaited), so it can't be closed twice or get new input.
+    closing_active = index == st.active
+    current = st.active_tab
+    st.tabs.remove(tab)
+    if closing_active:
+        object.__setattr__(st, "active", min(index, len(st.tabs) - 1))
+        now = st.active_tab
+        st.dialog = None
+        if st.input_box is not None:
+            st.input_box.text, now.draft = now.draft, ""
+            st.input_box.buffer.cursor_position = len(st.input_box.text)
+        now.attention = None if now.attention == "done" else now.attention
+        if now.live_md is not None:
+            with for_tab(now):
+                render_live()
+    else:
+        object.__setattr__(st, "active", st.tabs.index(current))
+    invalidate()
+    with for_tab(tab):
+        if st.pending_permission is not None and not st.pending_permission.done():
+            st.pending_permission.set_result("n")
+        task = st.task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), 5)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+        save_session()
+        if st.client:
+            try:
+                await asyncio.wait_for(st.client.disconnect(), 5)
+            except Exception as e:
+                log_error(e)
 
 
 # --- Tab title and "it's done" notifications ---
@@ -5672,7 +5935,7 @@ def titles_enabled():
 def terminal_title():
     name = " ".join(CONTROL_RE.sub("", st.session.get("title") or "").split()) or "nanocode"
     name = name if len(name) <= TITLE_MAX else name[:TITLE_MAX - 3].rstrip() + "..."
-    if st.pending_permission is not None:
+    if any(tab.pending_permission is not None for tab in st.tabs):
         return "△ " + name
     if st.task and not st.task.done() and not st.home:
         return "✻ " + name
@@ -5730,21 +5993,43 @@ def notify(message):
     st.app.output.flush()
 
 
-def send_next_queued():
-    if st.queue and not (st.task and not st.task.done()):
-        start_input(st.queue.pop(0))
+def tab_command(arg):
+    """/tab (or /tabs) lists the tabs; /tab new [message], /tab close, /tab <n>."""
+    word, _, rest = arg.partition(" ")
+    if word == "new":
+        if new_tab() and rest.strip():
+            start_input(rest.strip())
+    elif word == "close":
+        asyncio.ensure_future(close_tab())
+    elif word.isdigit():
+        switch_tab(int(word) - 1)
+    elif "tabs_dialog" in st.ui:
+        st.ui["tabs_dialog"]()
 
 
-def turn_finished(task):
-    if task.cancelled():
+def send_next_queued(tab=None):
+    tab = tab or st.active_tab
+    if tab in st.tabs and tab.queue and not (tab.task and not tab.task.done()):
+        start_input(tab.queue.pop(0), tab)
+
+
+def turn_finished(task, tab=None):
+    tab = tab or st.active_tab
+    if task.cancelled() or tab not in st.tabs:
         return
-    if st.queue and not st.headless:          # next queued message
-        asyncio.get_running_loop().call_soon(send_next_queued)
+    if tab.queue and not st.headless:          # next queued message
+        asyncio.get_running_loop().call_soon(send_next_queued, tab)
         return
+    name = (tab.session or {}).get("title") or "nanocode"
+    if tab is not st.active_tab:               # finished in a tab you're not looking at
+        tab.attention = "error" if tab.last_error else "done"
+        number = st.tabs.index(tab) + 1
+        show_toast(clip_cells(name, 40), title=f"Tab {number} {'failed' if tab.last_error else 'finished'}",
+                   variant="error" if tab.last_error else "success", seconds=5,
+                   action=lambda: switch_tab(st.tabs.index(tab)) if tab in st.tabs else None)
     if away():
-        st.unseen = True
-        name = st.session.get("title") or "nanocode"
-        notify(f"Failed: {name}" if st.last_error else f"Done: {name}")
+        tab.unseen = True
+        notify(f"Failed: {name}" if tab.last_error else f"Done: {name}")
     invalidate()
 
 
@@ -6070,8 +6355,6 @@ def build_app():
 
     def footer_right():
         parts = []
-        if st.toast and time.monotonic() < st.toast[1]:
-            parts.append(("class:success", f"{st.toast[0]}  "))
         notice = update_notice()
         if notice:
             parts += notice + [("", "  ")]
@@ -6161,7 +6444,52 @@ def build_app():
         VSplit([Window(width=2), Window(FormattedTextControl(queued_lines), dont_extend_height=True)]),
         filter=Condition(lambda: bool(st.queue)))
 
+    def tab_bar():
+        """Like OpenCode's desktop tabs: number, status, title; click one to switch, × closes, + opens one."""
+        frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 10) % 10]
+        marks = {"working": ("class:tabmark.working", frame + " "), "permission": ("class:tabmark.warning", "△ "),
+                 "done": ("class:tabmark.done", "● "), "error": ("class:tabmark.error", "✗ ")}
+        fragments = [("class:tabbar", " ")]
+        for i, tab in enumerate(st.tabs):
+            active = i == st.active
+
+            def click(event, i=i):
+                if event.event_type == MouseEventType.MOUSE_UP:
+                    switch_tab(i)
+                    return None
+                return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
+
+            base = "class:tab.active" if active else "class:tab"
+            fragments.append((base, f" {i + 1} ", click))
+            status = tab_status(tab)
+            if status:
+                fragments.append((f"{base} {marks[status][0]}", marks[status][1], click))
+            fragments.append((base, tab_title(tab, 22 if len(st.tabs) < 5 else 14) + " ", click))
+            if active:
+                def close(event, i=i):
+                    if event.event_type == MouseEventType.MOUSE_UP:
+                        asyncio.ensure_future(close_tab(i))
+                        return None
+                    return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
+                fragments.append((f"{base} class:tabmark.close", "× ", close))
+            fragments.append(("class:tabbar", " "))
+
+        def plus(event):
+            if event.event_type == MouseEventType.MOUSE_UP:
+                new_tab()
+                return None
+            return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
+        if len(st.tabs) < MAX_TABS:
+            fragments.append(("class:tab.new", " + ", plus))
+        return fragments
+
+    tabs_row = ConditionalContainer(
+        HSplit([VSplit([Window(width=2), Window(FormattedTextControl(tab_bar), height=1, style="class:tabbar")]),
+                Window(height=1)]),
+        filter=Condition(lambda: len(st.tabs) > 1))
+
     session = HSplit([
+        tabs_row,
         VSplit([Window(width=2), st.output_window, Window(width=2)]),
         queued,
         Window(height=1),
@@ -6271,8 +6599,22 @@ def build_app():
             items.append((label, current + (provider_status(name) or desc)[:30], run_command(f"/provider {name}")))
         open_dialog("Switch provider", items)
 
+    def tabs_dialog():
+        items = []
+        for i, tab in enumerate(st.tabs):
+            status = {"working": "working", "permission": "needs your OK", "done": "finished",
+                      "error": "failed"}.get(tab_status(tab), "")
+            items.append((f"{i + 1}  {tab_title(tab, 40)}", ("● " if i == st.active else "") + status,
+                          lambda i=i: switch_tab(i)))
+        open_dialog("Tabs", items)
+
+    st.ui["tabs_dialog"] = tabs_dialog
+
     def palette():
         actions = [
+            ("New tab", "ctrl+t", new_tab),
+            ("Switch tab", "alt+1…9", tabs_dialog),
+            ("Close tab", "ctrl+x w", lambda: asyncio.ensure_future(close_tab())),
             ("New session", "ctrl+x n", run_command("/c")),
             ("Switch session", "ctrl+x l", sessions_dialog),
             ("Switch model", "ctrl+x m", models_dialog),
@@ -6304,8 +6646,9 @@ def build_app():
         if st.backend == "sdk" and st.client:
             asyncio.ensure_future(st.client.interrupt())
             # The SDK stops its query by itself; anything else (/compare, MCP startup, a hung call) is cancelled.
+            tab = st.active_tab
             asyncio.get_running_loop().call_later(
-                4, lambda: task and not task.done() and not st.sdk_streaming and task.cancel())
+                4, lambda: task and not task.done() and not tab.sdk_streaming and task.cancel())
         elif task:
             task.cancel()
         stream_end()
@@ -6357,7 +6700,12 @@ def build_app():
             event.app.exit()
             return
         st.exit_armed = time.time()
-        show_toast(f"press {key} again to exit", 2)
+        working = sum(1 for tab in st.tabs if tab.task and not tab.task.done())
+        if working:
+            show_toast(f"press {key} again to quit and stop {'it' if working == 1 else 'them'}", 3,
+                       variant="warning", title=f"{working} tab{'s' * (working > 1)} still working")
+        else:
+            show_toast(f"press {key} again to exit", 2)
 
     @kb.add("c-c", filter=no_dialog)
     def _(event):
@@ -6546,9 +6894,29 @@ def build_app():
     def _(event):
         scroll_transcript(10 ** 9)
 
+    def cycle_tab(step):
+        if len(st.tabs) > 1:
+            switch_tab((st.active + step) % len(st.tabs))
+
     leader = {"n": run_command("/c"), "l": sessions_dialog, "m": models_dialog,
               "c": run_command("/compact"), "u": run_command("/undo"), "h": run_command("/help"),
-              "q": lambda: st.app.exit()}
+              "q": lambda: st.app.exit(), "t": new_tab, "w": lambda: asyncio.ensure_future(close_tab()),
+              "right": lambda: cycle_tab(1), "left": lambda: cycle_tab(-1)}
+
+    @kb.add("c-t", filter=no_dialog)
+    def _(event):
+        new_tab()
+
+    @kb.add("c-pagedown", filter=no_dialog)
+    def _(event):
+        cycle_tab(1)
+
+    @kb.add("c-pageup", filter=no_dialog)
+    def _(event):
+        cycle_tab(-1)
+
+    for digit in range(1, 10):
+        kb.add("escape", str(digit), filter=no_dialog)(lambda event, i=digit - 1: switch_tab(i))
     for key, action in leader.items():
         kb.add("c-x", key, filter=no_dialog)(lambda event, action=action: action())
 
@@ -6575,6 +6943,34 @@ def build_app():
     def _(event):
         close_dialog()
 
+    def toast_fragments():
+        rows, width = toast_rows()
+        fragments = []
+        for kind, text, toast in rows:
+            if kind == "gap":
+                fragments.append(("", " " * (width + 4) + "\n"))
+                continue
+            edge = f"class:toast.edge.{toast['variant']}"
+
+            def click(event, toast=toast):
+                if event.event_type == MouseEventType.MOUSE_UP:
+                    if toast in st.toasts:
+                        st.toasts.remove(toast)
+                    if toast["action"]:
+                        toast["action"]()
+                    invalidate()
+                    return None
+                return None if event.event_type == MouseEventType.MOUSE_DOWN else NotImplemented
+            style = "class:toast.title" if kind == "title" else "class:toast"
+            fragments += [(edge, "┃", click), ("class:toast", " ", click),
+                          (style, text + " " * (width - text_cells(text)), click), ("class:toast", "  ", click),
+                          ("", "\n")]
+        return fragments[:-1] if fragments else []
+
+    toasts = ConditionalContainer(
+        Window(FormattedTextControl(toast_fragments), dont_extend_height=True, dont_extend_width=True),
+        filter=Condition(lambda: bool(live_toasts())))
+
     style = tui_style()
 
     app = Application(
@@ -6582,7 +6978,8 @@ def build_app():
             FloatContainer(
                 content=HSplit([DynamicContainer(lambda: home if st.home else session)], style="class:root"),
                 floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=8, scroll_offset=1)),
-                        Float(content=dialog, top=3)],
+                        Float(content=dialog, top=3),
+                        Float(content=toasts, top=1, right=2)],
             ),
             focused_element=st.input_box,
         ),
@@ -6600,7 +6997,7 @@ def build_app():
             now = time.time()
             if st.live_dirty and st.live_md is not None and time.monotonic() - st.live_rendered_at > 0.05:
                 render_live()
-            if ((st.task and not st.task.done()) or (st.toast and time.monotonic() < st.toast[1] + 0.2)
+            if (any(tab.task and not tab.task.done() for tab in st.tabs) or st.toasts
                     or (st.interrupt_armed and now - st.interrupt_armed < 2.2)
                     or (st.exit_armed and now - st.exit_armed < 2.2)):
                 app.invalidate()
@@ -6633,6 +7030,13 @@ def tui_style():
         "bar.busy": f"bg:{T['bg']} fg:{T['accent2']}",
         "bar.warning": f"bg:{T['bg']} fg:{T['warning']}",
         "text": f"fg:{T['text']}", "muted": f"fg:{T['muted']}", "faint": f"fg:{T['faint']}",
+        "tabbar": f"bg:{T['bg']}",
+        "tab": f"bg:{T['bg']} fg:{T['muted']}", "tab.active": f"bg:{T['panel2']} fg:{T['text']} bold",
+        "tabmark.working": f"fg:{T['accent2']} nobold", "tabmark.warning": f"fg:{T['warning']} nobold",
+        "tabmark.done": f"fg:{T['success']} nobold", "tabmark.error": f"fg:{T['error']} nobold",
+        "tabmark.close": f"fg:{T['muted']} nobold", "tab.new": f"bg:{T['bg']} fg:{T['faint']}",
+        "toast": f"bg:{T['panel2']} fg:{T['text']}", "toast.title": f"bg:{T['panel2']} fg:{T['text']} bold",
+        **{f"toast.edge.{variant}": f"bg:{T['panel2']} fg:{T[color]}" for variant, color in TOAST_COLORS.items()},
         "accent": f"fg:{T['accent']}", "warning": f"fg:{T['warning']}",
         "success": f"fg:{T['success']}", "error": f"fg:{T['error']}",
         "dialog": f"bg:{T['panel2']}",
@@ -6710,6 +7114,10 @@ def git_branch():
 def on_enter(buff):
     text = buff.text.strip()
     if not text:
+        return False
+    word, _, rest = text.partition(" ")
+    if word in ("/tab", "/tabs"):
+        tab_command(rest.strip())
         return False
     if ALIASES.get(text, text) == "/q":
         restart_app() if st.update_state == "installed" else st.app.exit()  # like OpenCode: /exit to restart
@@ -7086,23 +7494,30 @@ async def run_interactive(resume_last=False):
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(lambda _loop, ctx: log_error(ctx.get("exception") or RuntimeError(ctx.get("message"))))
     st.task_started = time.time()
-    st.task = asyncio.ensure_future(startup())
+    st.task = in_tab(st.active_tab, startup())
     try:
         await app.run_async()
     finally:
         sys.stdout.write((KEYS_OFF if keys else "") + FOCUS_OFF + (TITLE_RESET if st.shown_title else ""))
         sys.stdout.flush()
-        if st.task and not st.task.done():
-            st.task.cancel()
+        running = [tab.task for tab in st.tabs if tab.task and not tab.task.done()]
+        for task in running:
+            task.cancel()
+        if running:                            # let them tidy their history (and save it) first
+            await asyncio.wait(running, timeout=3)
+        for tab in list(st.tabs):
+            with for_tab(tab):
+                save_session()
         await stop_all_shells()
         if st.rea:
             await st.rea.close()
         await close_mcp()
-        if st.client:
-            try:
-                await asyncio.wait_for(st.client.disconnect(), 5)
-            except Exception:
-                pass
+        for tab in list(st.tabs):
+            if tab.client:
+                try:
+                    await asyncio.wait_for(tab.client.disconnect(), 5)
+                except Exception:
+                    pass
 
 
 def read_piped_stdin():

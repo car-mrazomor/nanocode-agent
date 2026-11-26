@@ -17,9 +17,9 @@ It runs on:
 - **any OpenRouter model**: Claude, GLM, GPT, Gemini, DeepSeek, Kimi, or OpenRouter's auto router
 - **local models through Ollama**: free, private and offline
 
-With tools to read, edit and run code, plan and hand work to sub-agents, search the web through your own browser, use any MCP server, compare models side by side, and handle your email.
+With tabs to run several chats at once, and tools to read, edit and run code, plan and hand work to sub-agents, search the web through your own browser, use any MCP server, compare models side by side, and handle your email.
 
-<p align="center"><img src="assets/demo.gif" alt="nanocode finding and fixing a failing test" width="900"></p>
+<p align="center"><img src="assets/demo.gif" alt="nanocode fixing failing tests in one tab while a second tab writes a README" width="900"></p>
 
 > Inspired by [1rgs/nanocode](https://github.com/1rgs/nanocode), a minimal Claude Code alternative in ~250 lines. This project started from it and grew into a full agent.
 
@@ -110,6 +110,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/terminal-setup` | Make Shift+Enter, Cmd+Backspace and Cmd+arrows work in your terminal |
 | `/copy` | Copy the last reply to the clipboard (`/copy code`: its last code block) |
 | `/cost`, `/config`, `/help` | Usage, settings, help |
+| `/tab` | Tabs: `/tab new [message]`, `/tab close`, `/tab <n>`, or `/tab` to list them |
 | `/c`, `/q` | New chat, quit |
 | `# note` | Save a note to project memory |
 | `@path` | Attach a file to your message. Or drag files onto the terminal: images become `[Image #1]` chips, like Claude Code; Ctrl+V pastes a screenshot |
@@ -132,6 +133,9 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | Esc Esc | Stop the reply (press twice); Esc at a permission question denies it and stops |
 | Ctrl+C | Stop the reply, clear the input, or quit (press twice on an empty prompt) |
 | Enter while a reply runs | Queue the message: it's sent when the reply finishes (↑ edits it, Esc Esc puts it back) |
+| Ctrl+T (or Ctrl+X T) | New tab: another chat that runs alongside this one |
+| Alt+1…9, Ctrl+X ← →, Ctrl+PgUp / PgDn | Switch tab |
+| Ctrl+X W | Close tab (its chat stays saved for `/resume`) |
 | Ctrl+O | The full output of a recent tool call |
 | Ctrl+Home / Ctrl+End | Top / bottom of the chat |
 | Ctrl+U (Cmd+Backspace on macOS) | Delete everything before the cursor |
@@ -142,6 +146,8 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | Tab | Complete |
 
 While you scroll through a long answer, your message stays pinned at the top; click it to jump back to it.
+
+**Tabs:** `ctrl+t` opens another chat in a new tab, like OpenCode's desktop app. Each tab has its own history, model and prompt draft, and keeps working while you're in another one. The tab bar at the top shows each tab's state: a spinner while it works, `△` when it needs your OK, `●` when it finished while you were elsewhere. A notification pops up in the top right corner when a tab in the background finishes or asks for permission; click it to go there ([more](docs/using.md#tabs)).
 
 The terminal tab is named after the chat and shows `✻` while working, `△` when it needs your OK and `✓` when it finished while you were away; you also get a bell and a desktop notification then ([more](docs/using.md#tab-title-and-notifications)).
 

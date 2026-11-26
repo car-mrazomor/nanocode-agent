@@ -22,7 +22,6 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.chdir(project)
     nc.st.__init__()
     nc._config_base = {}
-    nc._live_cache.update(source="", width=0, rendered=[])
     nc.st.auto_approve = True
     nc.apply_theme({})
     yield project

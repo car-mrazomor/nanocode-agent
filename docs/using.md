@@ -32,7 +32,8 @@ The cost is OpenRouter's real price, "free (local)" on Ollama, and on the Claude
 | `/terminal-setup` | Make Shift+Enter and Cmd shortcuts work |
 | `/copy` | Copy the last reply (`/copy code`: its last code block) |
 | `/cost`, `/config`, `/help` | Usage, settings, help |
-| `/c` (`/new`, `/clear`) | New chat |
+| `/tab` | Tabs: `/tab new [message]`, `/tab close`, `/tab <n>`, or `/tab` to list them |
+| `/c` (`/new`, `/clear`) | New chat in this tab |
 | `/q` (`/exit`, `/quit`) | Quit |
 | `# note` | Save a note to project memory |
 | `@path` | Attach a file; images are sent as images. `@"my file.png"` for names with spaces |
@@ -46,6 +47,16 @@ nanocode opens on a start screen with the logo and the prompt in the middle. Whe
 - **Prompt panel.** At the bottom: mode (Ask or Auto), model, provider and thinking level. Below it the folder and git branch, context used and cost, and while a reply runs, a spinner and `esc interrupt`.
 - **Pinned message.** While you scroll through a long answer, your message stays pinned at the top. Click it to jump back.
 - **Command palette.** `ctrl+p` lists every command and action, searchable.
+
+## Tabs
+
+Press `ctrl+t` (or `/tab new`, or `ctrl+p → New tab`) to open another chat next to the current one, like the tabs in OpenCode's desktop app. Up to 9 can be open.
+
+- **They run at the same time.** Start a long task in one tab, switch, and keep working in another. Each tab has its own history, model, plan, undo and prompt draft.
+- **The tab bar** at the top shows a number and title per tab, with a spinner while it works, `△` when it needs your OK, `●` when it finished while you were in another tab and `✗` when it failed. Click a tab to switch, `×` to close it, `+` to open one.
+- **Notifications.** When a tab in the background finishes or asks for permission, a notification pops up in the top right corner (in OpenCode's style). Click it to go to that tab. Permission questions are answered in their own tab.
+- **Keys:** `alt+1`…`alt+9` jump to a tab, `ctrl+x ←/→` (or `ctrl+pgup/pgdn`) go to the previous/next one, `ctrl+x w` closes the current one. Closing stops what it's doing and saves its chat, so `/resume` opens it again.
+- Tabs share the provider: to switch provider, close the other tabs first. Files edited in one tab and changed by another are re-read before they're edited again.
 
 ## Tab title and notifications
 
@@ -101,6 +112,9 @@ Colors: `bg`, `panel` (your messages and the input), `panel2` (menus, dialogs), 
 | Esc Esc | Stop the reply; Esc at a permission question denies it and stops |
 | Ctrl+C | Stop the reply, clear the input, or quit (press twice on an empty prompt) |
 | Enter while a reply runs | Queue the message: it's sent when the reply finishes (↑ edits it, Esc Esc puts it back) |
+| Ctrl+T (or Ctrl+X T) | New tab: another chat that runs alongside this one |
+| Alt+1…9, Ctrl+X ← →, Ctrl+PgUp / PgDn | Switch tab |
+| Ctrl+X W | Close tab (its chat stays saved for `/resume`) |
 | Ctrl+O | The full output of a recent tool call |
 | Ctrl+Home / Ctrl+End | Top / bottom of the chat |
 | Ctrl+U (Cmd+Backspace on macOS) | Delete to the start of the line |
