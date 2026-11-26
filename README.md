@@ -227,7 +227,7 @@ Each of these has its own page in [docs/](docs/README.md):
 - **Every chat, searchable.** `/search` across all projects, `/fork`, `/export`, `/share` (a secret gist), `/stats`, and the model can look up earlier chats itself.
 - **Commands anywhere.** `/env docker python:3.12` runs commands in a container; SSH and Apptainer work too, or any wrapper (Modal, Daytona).
 - **A real browser.** The model can open pages, click, type and take screenshots, through Chrome's DevTools protocol.
-- **In your browser, your editor, and GitHub.** `nanocode web` is a chat page you can install as an app; `nanocode acp` plugs into Zed and other ACP editors; `nanocode github install` answers `/nanocode` comments on issues and pull requests.
+- **In your browser, your editor, and GitHub.** `nanocode web` is a workspace in your browser (chats, search, memory, skills, tasks, checkpoints, stats, themes, the model picker and Plan/Build) that you can install as an app; `nanocode acp` plugs into Zed and other ACP editors; `nanocode github install` answers `/nanocode` comments on issues and pull requests.
 - **From your phone.** `nanocode gateway` lets you talk to it from Telegram, Discord, Slack, WhatsApp or Matrix, including voice messages.
 - **Scheduled tasks.** `/cron add every weekday at 9:00 | …` runs a prompt on its own and sends you the answer.
 - **Voice.** `/voice on` reads replies aloud; `/listen` turns your speech into the message.

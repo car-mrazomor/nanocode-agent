@@ -13,13 +13,39 @@ nanocode web --no-open        # don't open the browser
 
 ## What it does
 
-- Lists this project's saved chats; click one to continue it, or **+ New** for a new chat.
-- Streams the reply as it's written, with simple Markdown (code blocks, lists, tables, links).
-- Shows each tool call as a line you can click open for its arguments and output.
-- **Stop** (or Esc) stops the turn.
-- Tokens and cost after each reply.
+A sidebar with every nanocode feature, and the chat next to it:
 
-The page is one file (`nanokit/web/index.html`), with no outside scripts or fonts. It uses the HTTP API like any other client: `GET /v1/sessions`, `POST /v1/runs` and the run's event stream (see [HTTP API](api.md)).
+- **Chats:** this project's saved chats; click one to continue it. The `⋯` menu (or a right-click) forks a chat or downloads it as Markdown or JSON. **New chat** is `Ctrl+Shift+O`.
+- **Search** (`Ctrl+K`): every chat in this folder that mentions your words, with the matching part.
+- **Tools**, each a page with its terminal output and buttons for the usual actions:
+
+| Page | What you can do there |
+|---|---|
+| Memory | See what nanocode remembers; add a note |
+| Skills | List skills, search the skills hub, install one |
+| Agents | List custom agents, create one |
+| Commands | Your custom slash commands and every built-in one |
+| Tasks | Scheduled prompts: add, pause, resume, remove, run now |
+| Checkpoints | Every turn's file changes: undo, redo, restore to before a turn |
+| Stats | Usage for this project, all projects, or this chat |
+| MCP | Servers and their tools; add one, turn tools on or off |
+| Permissions | Allow, ask or deny rules |
+| Environment | Where commands run: here, Docker, SSH, Apptainer |
+| Hooks, Plugins | What's set up; trust this project's plugins |
+| Theme | Every nanocode theme, for this page (kept in this browser) |
+| Help | Every command |
+
+In the message box:
+
+- **`/` opens the command menu**: the same commands as in the terminal (`/compact`, `/init`, `/recap`, `/undo`, `/rollback`, `/think`, your skills and custom commands…), with ↑ ↓ and Tab. Their output shows in the chat, colored as in the terminal. `# note` saves to memory.
+- **Model picker** and **thinking level**, at the bottom right.
+- **Build / Plan**: in plan mode the model only reads and plans (`Shift+Tab` switches, as in the terminal).
+- **Images:** attach, paste or drop them.
+- The reply streams with Markdown (code blocks have a copy button); each tool call is a line you can click open; **Stop** (or Esc) stops the turn. Tokens and cost after each reply, and a browser notification when a reply finishes in a background tab.
+
+`/undo`, `/redo` and `/rollback` ask you first in the page. Commands that need a terminal (tabs, the editor, `/terminal-setup`) or change the server itself (`/provider`, `/update`, `/auto`) aren't offered.
+
+The page is one file (`nanokit/web/index.html`), with no outside scripts or fonts. It uses the HTTP API like any other client (see [HTTP API](api.md)).
 
 ## Install it as an app
 
@@ -27,4 +53,4 @@ The page is a Progressive Web App. In Chrome or Edge, click the install icon in 
 
 ## Safety
 
-On `127.0.0.1` (the default) edits and commands are allowed, as with `nanocode serve`; dangerous commands are always refused. Anyone who has the key can use nanocode as you, so don't share it. To reach it from another device, see the [HTTP API's security notes](api.md).
+On `127.0.0.1` (the default) edits and commands are allowed, as with `nanocode serve`; dangerous commands are always refused. Anyone who has the key can use nanocode as you, so don't share it. With `"api": {"permissions": "read-only"}` the page can still chat, search, and show every page, but commands that change things (undo, memory notes, installing skills, permission rules…) are refused. To reach it from another device, see the [HTTP API's security notes](api.md).

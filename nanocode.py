@@ -658,6 +658,8 @@ def out(text="", end="\n"):
     if buffer is not None:                   # a tool running in parallel: shown in order once it's done
         buffer.append((text, end))
         return
+    if COMMAND_OUTPUT.get():
+        emit("output", text=text + end)
     if st.headless:
         headless_write(sys.stderr, text + end)
         return
@@ -761,6 +763,10 @@ def api_endpoint():
 
 # Set while an API request runs (nanocode serve): gets the reply text, tool calls and usage as they happen.
 EVENTS = contextvars.ContextVar("events", default=None)
+# Set while an API client runs a slash command: what the command prints goes to the client too ("output" events).
+COMMAND_OUTPUT = contextvars.ContextVar("command_output", default=False)
+# Set when the person already said yes in their app (the web page asks before /undo or /rollback).
+CONFIRMED = contextvars.ContextVar("confirmed", default=False)
 
 
 def emit(kind, **data):
@@ -4683,6 +4689,17 @@ def short_title(text, limit=60):
 
 async def send(text, display=None, images=None):
     """Sends a user message (with images: names from save_image) to the model and runs the turn."""
+    # A command that starts a turn (/compact, a skill): the turn streams as usual, and a yes given for the command
+    # isn't one for what the model does.
+    tokens = COMMAND_OUTPUT.set(False), CONFIRMED.set(False)
+    try:
+        await _send(text, display, images)
+    finally:
+        COMMAND_OUTPUT.reset(tokens[0])
+        CONFIRMED.reset(tokens[1])
+
+
+async def _send(text, display=None, images=None):
     if display is not None and not st.headless:
         out(user_block(display))
     if not st.session.get("title"):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import hmac
 import json
 import os
@@ -18,6 +19,7 @@ import re
 import secrets
 import sys
 import time
+import urllib.parse
 
 nc = None  # the nanocode module, set by serve()
 
@@ -45,8 +47,9 @@ class ApiError(Exception):
 class ApiRun:
     """One agent turn requested over the API: its events, so clients can stream, poll or attach later."""
 
-    def __init__(self, prompt, session_id=None, images=None):
+    def __init__(self, prompt, session_id=None, images=None, command=False, confirmed=False, mode=None):
         self.images = images or []  # [(mime, bytes)] sent with the prompt
+        self.command, self.confirmed, self.mode = command, confirmed, mode   # a slash command (see web_command)
         self.id = "run_" + os.urandom(8).hex()
         self.prompt, self.session_id = prompt, session_id
         self.status = "queued"  # queued, running, completed, failed, cancelled
@@ -123,6 +126,7 @@ class ApiServer:
         self.lock = asyncio.Lock()
         self.runs = {}
         self.responses, self.conversations = self.load()
+        self.fork_notes = {}  # forked Claude subscription chat -> the earlier chat, sent with its first message
 
     # Stored responses (previous_response_id) survive restarts: .nanocode/api.json in the project
     def store_path(self):
@@ -149,10 +153,11 @@ class ApiServer:
 
     # --- running turns ---
 
-    def start(self, prompt, session_id=None, instructions=None, images=None):
+    def start(self, prompt, session_id=None, instructions=None, images=None, command=False, confirmed=False,
+              mode=None):
         if sum(r.status == "queued" for r in self.runs.values()) >= API_MAX_QUEUED:
             raise ApiError(429, f"{API_MAX_QUEUED} turns are already waiting; try again later", "rate_limit_error")
-        run = ApiRun(prompt, session_id, images)
+        run = ApiRun(prompt, session_id, images, command, confirmed, mode)
         self.runs[run.id] = run
         while len(self.runs) > 200:  # forget the oldest finished runs
             old = next((r for r in self.runs.values() if r.done), None)
@@ -163,24 +168,44 @@ class ApiServer:
         return run
 
     async def execute(self, run, instructions):
+        # Listing commands (/memory, /stats...) only print, so they don't wait for a reply that's running.
+        lock_free = run.command and run.prompt.strip() in LOCK_FREE_COMMANDS
         try:
-            async with self.lock:
+            async with contextlib.nullcontext() if lock_free else self.lock:
                 run.status, run.started = "running", True
-                await api_switch_session(run.session_id)
+                if not run.command or (run.session_id and not lock_free):
+                    await api_switch_session(run.session_id)
+                if run.mode and not lock_free:
+                    from nanokit import modes
+                    modes.set_mode(run.mode)
                 run.session_id = nc.st.session["id"]
                 run.emit("run.started", {"session_id": run.session_id, "model": nc.st.model})
                 text = run.prompt if not instructions else \
                     f"Extra instructions from the app calling nanocode's API:\n{instructions}\n\n---\n\n{run.prompt}"
+                note = None if run.command else self.fork_notes.pop(run.session_id, None)
+                if note:
+                    text = ("This chat continues an earlier conversation (a fork of it). This is what was on screen "
+                            f"there, most recent last:\n\n<earlier_chat>\n{note}\n</earlier_chat>\n\n---\n\n{text}")
                 token = nc.EVENTS.set(run.emit)
                 try:
                     nc.st.last_error = None
                     nc.out(f"{nc.DIM}API {run.id} · session {run.session_id}{nc.RESET}")
-                    images = [nc.save_image(data, mime) for mime, data in run.images]
-                    display = run.prompt + (f"\n[{len(images)} image{'s' * (len(images) > 1)}]" if images else "")
-                    await nc.send(nc.expand_mentions(text, images), display=display, images=images)
+                    if run.command:
+                        tokens = nc.COMMAND_OUTPUT.set(True), nc.CONFIRMED.set(run.confirmed)
+                        try:
+                            await nc.run_input(run.prompt)
+                        finally:
+                            nc.COMMAND_OUTPUT.reset(tokens[0])
+                            nc.CONFIRMED.reset(tokens[1])
+                        run.session_id = nc.st.session["id"]
+                    else:
+                        images = [nc.save_image(data, mime) for mime, data in run.images]
+                        display = run.prompt + (f"\n[{len(images)} image{'s' * (len(images) > 1)}]" if images else "")
+                        await nc.send(nc.expand_mentions(text, images), display=display, images=images)
                 finally:
                     nc.EVENTS.reset(token)
-                    nc.stream_end()
+                    if not lock_free:
+                        nc.stream_end()
             run.finish("completed")
         except asyncio.CancelledError:
             nc.stream_end()
@@ -260,7 +285,9 @@ class ApiServer:
             raise ApiError(401, "missing or wrong API key (send: Authorization: Bearer <key>)", "authentication_error")
 
     async def route(self, method, path, headers, body, writer, reader=None):
-        path = path.split("?", 1)[0].rstrip("/") or "/"
+        path, _, query = path.partition("?")
+        path = path.rstrip("/") or "/"
+        query = dict(urllib.parse.parse_qsl(query))
         if path in ("/health", "/v1/health"):
             return await write_json(writer, 200, {"status": "ok", "version": nc.__version__})
         page = web_page(path) if method == "GET" else None
@@ -289,6 +316,16 @@ class ApiServer:
                  "model": c.get("model")} for c in chats]})
         if method == "GET" and parts[:2] == ["v1", "sessions"] and len(parts) == 3:
             return await write_json(writer, 200, api_session(parts[2]))
+        if method == "GET" and parts[:2] == ["v1", "sessions"] and parts[3:] == ["export"]:
+            return await write_json(writer, 200, api_export(parts[2], query.get("format", "md")))
+        if method == "POST" and parts[:2] == ["v1", "sessions"] and parts[3:] == ["fork"]:
+            async with self.lock:                    # not while a turn is writing that chat
+                fork = api_fork(parts[2], self.fork_notes)
+            return await write_json(writer, 200, fork)
+        if method == "GET" and path == "/v1/search":
+            return await write_json(writer, 200, await api_search(query.get("q", "")))
+        if method == "GET" and path == "/v1/workspace":
+            return await write_json(writer, 200, api_workspace())
         if method == "POST" and path == "/v1/chat/completions":
             return await self.chat_completions(parse_json(body), headers, writer, reader)
         if method == "POST" and path == "/v1/responses":
@@ -305,9 +342,16 @@ class ApiServer:
                 return await write_json(writer, 200, {"id": parts[2], "object": "response", "deleted": True})
         if method == "POST" and path == "/v1/runs":
             data = parse_json(body)
+            session_id = api_session_id(data.get("session_id") or data.get("conversation"))
+            mode = data.get("mode")
+            if mode not in (None, "plan", "build"):
+                raise ApiError(400, "mode is plan or build")
+            if data.get("command"):                  # a slash command, like typing it in the terminal
+                text = web_command(data.get("input"))
+                run = self.start(text, session_id, command=True, confirmed=bool(data.get("confirmed")), mode=mode)
+                return await write_json(writer, 202, {"run_id": run.id, "status": "started"})
             prompt, history, instructions, images = api_prompt(data.get("input"), data.get("instructions"))
-            run = self.start(api_with_history(prompt, history),
-                             api_session_id(data.get("session_id") or data.get("conversation")), instructions, images)
+            run = self.start(api_with_history(prompt, history), session_id, instructions, images, mode=mode)
             return await write_json(writer, 202, {"run_id": run.id, "status": "started"})
         if parts[:2] == ["v1", "runs"] and len(parts) >= 3:
             run = self.runs.get(parts[2])
@@ -490,12 +534,7 @@ def web_page(path):
 
 def api_session(session_id):
     """A saved chat of this folder: its title and turns (user and assistant text, tool calls and results)."""
-    if not SESSION_ID_RE.match(session_id):
-        raise ApiError(400, "a session id must be 1-64 letters, digits, '.', '_' or '-'")
-    try:
-        data = json.loads((nc.sessions_dir() / f"{session_id}.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        raise ApiError(404, f"no saved session '{session_id}'", "not_found")
+    data = read_session_file(session_id)
     try:
         from nanokit.web import session_turns
         turns = session_turns(data)
@@ -513,6 +552,146 @@ def api_session_id(value):
     if not SESSION_ID_RE.match(str(value)):
         raise ApiError(400, "a session id must be 1-64 letters, digits, '.', '_' or '-'")
     return str(value)
+
+
+# --- What the web page (and other apps) can do besides chatting ---
+
+# Slash commands an API client may run. The rest need a terminal (/tab, /editor, /terminal-setup...), change the
+# server itself (/provider, /update, /auto), or the page does them its own way (new chat, search, fork, export).
+API_COMMANDS = {"/help", "/model", "/think", "/plan", "/build", "/undo", "/redo", "/rollback", "/compact", "/init",
+                "/learn", "/recap", "/memory", "/skills", "/stats", "/cost", "/cron", "/permissions", "/agents",
+                "/commands", "/hooks", "/plugins", "/mcp", "/env", "/keybinds"}
+# Read-only API: these change nothing (or only the model, how hard it thinks, the mode).
+READ_ONLY_COMMANDS = {"/help", "/model", "/think", "/plan", "/build", "/compact", "/recap", "/memory", "/skills",
+                      "/stats", "/cost", "/cron", "/permissions", "/agents", "/commands", "/hooks", "/plugins",
+                      "/mcp", "/env", "/keybinds", "/rollback"}
+READ_ONLY_ARGS = {"/model": None, "/think": None, "/plan": None, "/build": None, "/stats": None,
+                  "/skills": ("hub",), "/cron": ("list",), "/mcp": ("tools",)}  # None: any argument
+LOCK_FREE_COMMANDS = {"/help", "/memory", "/skills", "/stats", "/stats all", "/cost", "/cron", "/cron list",
+                      "/permissions", "/agents", "/commands", "/hooks", "/plugins", "/mcp", "/env", "/keybinds",
+                      "/rollback", "/think", "/model"}
+
+
+def custom_prompt_command(word):
+    """A skill or a custom command (.nanocode/commands/*.md): both are a prompt for the model, like a message."""
+    import nanokit
+    if word[1:] in nc.list_skills() and word not in nc.COMMANDS and word not in nanokit.COMMANDS:
+        return True
+    from nanokit import commands
+    return word in commands.OURS          # their !`shell` lines ask, like the bash tool
+
+
+def web_command(value, read_only=None):
+    """The command, if an API client may run it; else ApiError (400) saying why."""
+    if not isinstance(value, str) or not value.strip():
+        raise ApiError(400, "input must be a command, like /memory")
+    text = value.strip()
+    read_only = (not nc.st.auto_approve) if read_only is None else read_only
+    if text.startswith("#"):
+        if read_only:
+            raise ApiError(400, "saving to memory needs edits allowed (\"api\": {\"permissions\": \"auto\"})")
+        return text
+    word, _, arg = text.partition(" ")
+    word, arg = nc.ALIASES.get(word, word), arg.strip()
+    if word in ("/plan", "/build") and arg[:1] in ("/", "#"):
+        web_command(arg, read_only)               # what runs after switching has to be allowed too
+        return text
+    if custom_prompt_command(word):
+        return text
+    if word not in API_COMMANDS:
+        raise ApiError(400, f"{word} isn't available here (it needs the terminal)")
+    if read_only:
+        allowed = READ_ONLY_ARGS.get(word, ())
+        if word not in READ_ONLY_COMMANDS or (arg and allowed is not None and arg.split()[0] not in allowed):
+            raise ApiError(400, f"{text} changes things, and this API is read-only "
+                                "(\"api\": {\"permissions\": \"auto\"} allows it)")
+    return text
+
+
+def api_commands():
+    """Commands the client may run, with what they do (for the page's / menu)."""
+    import nanokit
+    out = []
+    for name, description in {**nc.COMMANDS, **{n: c["description"] for n, c in nanokit.COMMANDS.items()}}.items():
+        try:
+            web_command(name)
+        except ApiError:
+            continue
+        out.append({"name": name, "description": description})
+    for name, skill in nc.list_skills().items():
+        if not any(c["name"] == "/" + name for c in out):
+            out.append({"name": "/" + name, "description": skill["description"], "skill": True})
+    return sorted(out, key=lambda c: c["name"])
+
+
+def api_workspace():
+    """Everything the page shows around the chat: model and choices, mode, thinking, themes, commands."""
+    from nanokit import modes
+    theme = nc.st.config.get("theme")
+    theme = theme if isinstance(theme, str) and theme in nc.THEMES else "opencode"
+    return {"object": "nanocode.workspace", "version": nc.__version__, "folder": nc.tilde(os.getcwd()),
+            "provider": nc.st.provider, "provider_label": nc.provider_label(), "model": nc.st.model,
+            "models": [{"id": k, "description": v} for k, v in nc.model_choices().items()],
+            "think": nc.think_level(), "think_levels": list(nc.THINK_LEVELS), "mode": modes.current_mode(),
+            "permissions": "auto" if nc.st.auto_approve else "read-only", "theme": theme, "themes": nc.THEMES,
+            "commands": api_commands()}
+
+
+def read_session_file(session_id):
+    if not SESSION_ID_RE.match(session_id):
+        raise ApiError(400, "a session id must be 1-64 letters, digits, '.', '_' or '-'")
+    try:
+        return json.loads((nc.sessions_dir() / f"{session_id}.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise ApiError(404, f"no saved session '{session_id}'", "not_found")
+
+
+def api_export(session_id, kind):
+    """A chat as Markdown or as its JSON file, for the page to download."""
+    from nanokit import share
+    if kind not in ("md", "json"):
+        raise ApiError(400, "format is md or json")
+    data = read_session_file(session_id)
+    content = json.dumps(data, indent=1, ensure_ascii=False) if kind == "json" else share.to_markdown(data)
+    return {"filename": f"{share.slug(data.get('title'))}.{kind}", "content": content}
+
+
+def api_fork(session_id, fork_notes):
+    """A copy of a chat under a new id, to try another direction (like /fork)."""
+    from nanokit import sessions
+    data = read_session_file(session_id)
+    title = data.get("title") or "chat"
+    now = time.time()
+    fork = {**data, "id": nc.make_session_id(), "title": nc.short_title(f"fork of {title}"), "created": now,
+            "updated": now, "sdk_session_id": None, "usage": {"input": 0, "output": 0, "cost": 0.0}}
+    path = nc.sessions_dir() / f"{fork['id']}.json"
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(fork), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:
+        raise ApiError(500, f"can't save the fork: {e}", "server_error")
+    if data.get("backend") == "sdk":   # Claude Code's conversation can't be copied: its next message gets the screen
+        fork_notes[fork["id"]] = sessions.screen_text(data.get("screen") or "")[-sessions.FORK_NOTE_LIMIT:]
+    return {"object": "nanocode.session", "id": fork["id"], "title": fork["title"]}
+
+
+async def api_search(query):
+    """This folder's chats that mention the words, best first."""
+    from nanokit import sessions
+    if not query.strip():
+        return {"object": "list", "data": []}
+    here = str(os.getcwd())
+
+    def find():
+        sessions.update_index(everywhere=False)
+        return sessions.search(query, 30, project=here)
+    try:
+        found = await asyncio.to_thread(find)
+    except Exception as e:                 # sqlite3.Error, OSError: the search index can't be read
+        raise ApiError(500, f"search failed: {e}", "server_error")
+    return {"object": "list", "data": [{"id": r["id"], "title": r["title"], "updated": r["updated"],
+                                        "snippet": r["snippet"]} for r in found]}
 
 
 IMAGE_PARTS = ("image_url", "input_image", "image")
@@ -627,14 +806,18 @@ def api_capabilities():
                          "responses_streaming": True, "previous_response_id": True, "conversations": True,
                          "run_submission": True, "run_status": True, "run_events_sse": True, "run_stop": True,
                          "skills": True, "tools": True, "images": True, "concurrent_runs": 1,
-                         "sessions": True, "web_ui": True},
+                         "sessions": True, "web_ui": True, "commands": True, "search": True, "fork": True,
+                         "export": True, "workspace": True},
             "session_header": "X-Nanocode-Session-Id",
             "endpoints": {"chat_completions": "POST /v1/chat/completions", "responses": "POST /v1/responses",
                           "response": "GET|DELETE /v1/responses/{id}", "runs": "POST /v1/runs",
                           "run": "GET /v1/runs/{id}", "run_events": "GET /v1/runs/{id}/events",
                           "run_stop": "POST /v1/runs/{id}/stop", "models": "GET /v1/models",
                           "skills": "GET /v1/skills", "tools": "GET /v1/tools", "health": "GET /health",
-                          "sessions": "GET /v1/sessions", "session": "GET /v1/sessions/{id}", "web": "GET /"}}
+                          "sessions": "GET /v1/sessions", "session": "GET /v1/sessions/{id}",
+                          "export": "GET /v1/sessions/{id}/export?format=md|json",
+                          "fork": "POST /v1/sessions/{id}/fork", "search": "GET /v1/search?q=",
+                          "workspace": "GET /v1/workspace", "web": "GET /"}}
 
 
 def parse_json(body):

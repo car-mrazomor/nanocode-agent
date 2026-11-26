@@ -46,6 +46,10 @@ print(reply.choices[0].message.content)
 | `GET` | `/v1/tools`, `/v1/skills` | nanocode's tools and your skills |
 | `GET` | `/v1/sessions` | This folder's saved chats (id, title, dates, model), newest first |
 | `GET` | `/v1/sessions/{id}` | One saved chat: its turns (your messages, replies, tool calls and results) |
+| `GET` | `/v1/sessions/{id}/export?format=md` | A chat as Markdown (or `json`): `{"filename", "content"}` |
+| `POST` | `/v1/sessions/{id}/fork` | A copy of a chat under a new id, to try another direction |
+| `GET` | `/v1/search?q=words` | This folder's chats that mention the words, best first, with the matching part |
+| `GET` | `/v1/workspace` | The model and the models to pick from, thinking level, mode, themes, and the commands a client may run |
 | `GET` | `/` | The [web app](web-ui.md) (no key needed for the page; it asks for the key) |
 | `GET` | `/health`, `/v1/health` | Liveness check (no key needed) |
 
@@ -79,6 +83,9 @@ curl .../v1/runs/run_…                                                        
 ```
 
 Events: `run.started`, `delta` (reply text), `tool.started`, `tool.completed`, `usage`, then `run.completed`, `run.failed` or `run.cancelled`.
+
+- `"mode": "plan"` (or `"build"`) sets the mode before the turn: in plan mode the model only reads and plans.
+- `"command": true` runs `input` as a slash command, as if typed in the terminal: `{"input": "/stats", "command": true}`. What it prints comes as `output` events (with the terminal's colors as ANSI codes); a command that starts a turn (`/compact`, a skill) also streams it as usual. `/undo`, `/redo` and `/rollback <n>` need `"confirmed": true`, meaning you asked the person first. Commands that need a terminal or change the server (`/tab`, `/editor`, `/provider`, `/update`, `/auto`…) are refused with `400`; `GET /v1/workspace` lists the ones you can run. With a read-only API, only commands that change nothing are allowed.
 
 ## Images
 

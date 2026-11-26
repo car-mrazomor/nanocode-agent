@@ -402,6 +402,8 @@ async def turn_end(text, error):
 
 async def _confirm(what, preview, dangerous=True):
     """Asks every time, even with /auto (and says no when there's nobody to ask)."""
+    if nc.CONFIRMED.get():                      # already asked in the person's app (the web page)
+        return True
     if nc.st.headless:
         nc.out(f"  {nc.DIM}⎿  {what} not done: it needs your OK, and nobody can answer here{nc.RESET}")
         return False
