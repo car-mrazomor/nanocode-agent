@@ -828,3 +828,16 @@ def test_matrix_is_a_gateway_platform():
     assert "matrix" in gateway.PLATFORMS and gateway.platform_class("matrix") is matrix.Matrix
     assert matrix.Matrix.configured({"homeserver": "https://m.org", "access_token": "t"})
     assert not matrix.Matrix.configured({"access_token": "t", "homeserver": ""})
+
+
+def test_setup_only_accepts_a_folder_that_exists(sandbox, monkeypatch):
+    answers = iter(["y", "", str(sandbox)])                     # "y" by mistake, then Enter, then a real path
+    monkeypatch.setattr(nc, "ask", lambda prompt, default="": next(answers) or default)
+    assert gateway.ask_folder(None) == os.path.abspath(os.getcwd())          # Enter: the folder shown
+    assert gateway.ask_folder("y") == str(sandbox)                            # a bad saved value isn't offered
+
+
+def test_start_explains_a_missing_folder_instead_of_crashing(sandbox, capsys):
+    nc.st.config = {"gateway": {"workdir": "y", "matrix": {"homeserver": "https://m.org", "access_token": "t"}}}
+    assert gateway.start_daemon() == 1
+    assert "folder doesn't exist" in capsys.readouterr().out

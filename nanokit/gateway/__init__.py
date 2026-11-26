@@ -780,6 +780,18 @@ def running_pid():
     return pid if lock_held() or looks_like_gateway(pid) else None
 
 
+def ask_folder(current):
+    """The folder the gateway works in: asked until it's one that exists; saved as a full path."""
+    default = current if current and os.path.isdir(os.path.expanduser(current)) else os.getcwd()
+    while True:
+        answer = nc.ask("Folder it works in (a path; Enter keeps the one shown)", default).strip()
+        folder = os.path.abspath(os.path.expanduser(answer or default))
+        if os.path.isdir(folder):
+            return folder
+        print(f"  {nc.YELLOW}{folder} isn't a folder; type the path of your project (or press Enter for "
+              f"{nc.tilde(Path(default))}){nc.RESET}")
+
+
 def workdir():
     folder = settings().get("workdir")
     return str(Path(folder).expanduser()) if folder else os.getcwd()
@@ -798,6 +810,10 @@ def start_daemon():
     if log.is_file() and log.stat().st_size > GATEWAY_LOG_MAX:
         log.replace(log.with_suffix(".log.old"))
     folder = workdir()
+    if not os.path.isdir(folder):
+        print(f"  {nc.RED}the gateway's folder doesn't exist:{nc.RESET} {folder}\n"
+              f"  {nc.DIM}set the right one with: nanocode gateway setup (the last question){nc.RESET}")
+        return 1
     argv = [sys.executable, str(Path(nc.__file__).resolve()), "gateway", "run"]
     options = {"start_new_session": True} if os.name != "nt" else \
         {"creationflags": 0x00000008 | 0x00000200 | 0x08000000}   # detached, own group, no window
@@ -992,7 +1008,7 @@ def setup():
     auto = yes("\n  Allow edits and commands from chats? (no: read-only, it can only look and answer)",
                gateway.get("permissions") == "auto")
     gateway["permissions"] = "auto" if auto else "read-only"
-    gateway["workdir"] = nc.ask("Folder it works in", gateway.get("workdir") or os.getcwd())
+    gateway["workdir"] = ask_folder(gateway.get("workdir"))
     nc.st.config["gateway"] = gateway
     nc.save_config()
     names = [n for n in PLATFORMS if (gateway.get(n) or {}).get("enabled") and
