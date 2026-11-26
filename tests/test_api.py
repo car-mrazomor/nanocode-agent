@@ -292,3 +292,46 @@ def test_saved_images_are_not_committed(sandbox):
     nc.save_image(PNG, "image/png")
     ignored = (nc.project_dir() / ".gitignore").read_text().splitlines()
     assert "images/" in ignored and "api.json" in ignored
+
+
+def test_run_stops_when_the_client_disconnects():
+    async def main():
+        server.nc = nc
+        nc.st.backend = "api"
+        api = server.ApiServer(KEY)
+        run = server.ApiRun("hi")
+        run.started = True
+
+        async def forever():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                run.finish("cancelled")
+                raise
+        run.task = asyncio.ensure_future(forever())
+        await asyncio.sleep(0)                        # the turn is running
+        reader = asyncio.StreamReader()
+        reader.feed_eof()                             # the client closed the connection
+        await api.stop_on_disconnect(reader, run)
+        await asyncio.sleep(0)
+        return run.status
+    assert asyncio.run(main()) == "cancelled"
+
+
+def test_slow_clients_and_too_many_queued_runs_are_refused(monkeypatch):
+    monkeypatch.setattr(server, "API_HEADER_TIMEOUT", 0.2)
+
+    async def test(port, api):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"POST /v1/runs HTTP/1.1\r\n")      # ...and never finishes the headers
+        await writer.drain()
+        closed = await asyncio.wait_for(reader.read(), 3)
+        writer.close()
+        for _ in range(server.API_MAX_QUEUED):
+            run = server.ApiRun("x")
+            api.runs[run.id] = run
+        status, _, body = await request(port, "POST", "/v1/runs", {"input": "hi"})
+        return closed, status, body
+    closed, status, body = with_server(test)
+    assert closed == b""
+    assert status == 429 and "already waiting" in body

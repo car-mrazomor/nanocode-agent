@@ -517,6 +517,15 @@ def test_rea_risky_tools_ask_and_crashes_recover(sandbox, tmp_path):
     assert not again_err and "inspect_artifact ok" in again
 
 
+def test_rea_tools_not_known_to_be_safe_ask():
+    assert nc.rea_is_risky({"name": "pull_adb_file"})
+    assert nc.rea_is_risky({"name": "extract_firmware"})
+    assert nc.rea_is_risky({"name": "export_evidence_bundle"})
+    assert not nc.rea_is_risky({"name": "inspect_macho"})
+    assert not nc.rea_is_risky({"name": "trace_call_path"})
+    assert not nc.rea_is_risky({"name": "anything", "annotations": {"readOnlyHint": True}})
+
+
 def test_rea_can_be_turned_off(sandbox, tmp_path):
     install_fake_rea(tmp_path)
     nc.st.config = {"rea": False}
@@ -1413,6 +1422,9 @@ class FakeIMAP:
     def logout(self):
         pass
 
+    def capability(self):
+        return "OK", [" ".join(self.capabilities).encode()]
+
     def list(self):
         return "OK", [b'(\\HasNoChildren) "/" "INBOX"', b'(\\HasNoChildren \\Sent) "/" "Sent"',
                       b'(\\HasNoChildren \\Drafts) "/" "Drafts"', b'(\\HasNoChildren \\Junk) "/" "Junk"']
@@ -1425,8 +1437,10 @@ class FakeIMAP:
         box = self.boxes[self.selected]
         if cmd == "SEARCH":
             uids = [u for u in box if args[0] != "UNSEEN" or "\\Seen" not in self.flags.get(u, "")]
+            literal, self.literal = getattr(self, "literal", None), None
             if "TEXT" in args:
-                uids = [u for u in uids if args[-1].strip('"').encode() in box[u]]
+                needle = literal if args[-1] == "TEXT" else args[-1].strip('"').encode()
+                uids = [u for u in uids if needle in box[u]]
             return "OK", [" ".join(map(str, uids)).encode()]
         if cmd == "FETCH":
             data = []
@@ -1485,6 +1499,11 @@ def test_email_assistant(sandbox, monkeypatch):
     assert "1 unread" in listed and "[2] ●" in listed and "Lunch" not in listed
     read = run(nc.TOOLS["email_read"]["fn"]({"uid": 2}))
     assert "Subject: You WON" in read and "<email-content untrusted>" in read and "send me money" in read
+
+    FakeIMAP.boxes["INBOX"][3] = mail(3, "Zoë <zoe@x.com>", "Café", "Kaffee im Café?", "c3@x")
+    found = run(nc.TOOLS["email_search"]["fn"]({"query": "Café"}))   # non-ASCII goes as a UTF-8 literal
+    assert "1 found" in found
+    del FakeIMAP.boxes["INBOX"][3]
 
     draft = run(nc.TOOLS["email_draft"]["fn"]({"to": "ana@x.com", "body": "Friday works!", "reply_to_uid": 1}))
     assert "draft saved in Drafts" in draft and "Re: Lunch?" in draft
@@ -1611,10 +1630,11 @@ def test_selecting_in_the_prompt_and_at_the_chat_edge(sandbox, monkeypatch):
             seen["arrow"] = (box.text, box.buffer.selection_state)
 
             chat = app.renderer._last_screen.visible_windows_to_write_positions[nc.st.output_window]
-            top = nc.st.scroll_top
             row = chat.ypos + 1
             monkeypatch.setattr(nc, "EDGE_PAUSE", 30)        # moving along the edge: no scrolling (whatever the speed)
             await keys(f"\x1b[<0;{chat.xpos + 3};{row}M", 0.05)
+            top = nc.st.scroll_top                           # pressing holds the view where it is
+            seen["pinned"] = top is not None
             for dx in range(3, 30, 2):                       # selecting along the first row: no scrolling
                 inp.send_text(f"\x1b[<32;{chat.xpos + dx};{row}M")
                 await asyncio.sleep(0.01)
@@ -1631,5 +1651,5 @@ def test_selecting_in_the_prompt_and_at_the_chat_edge(sandbox, monkeypatch):
     assert seen["selected"] and seen["typed"] == "hello X new world"
     assert seen["deleted"] == " X new world"
     assert seen["arrow"] == (" X new world", None)
-    assert seen["no_jump"]
+    assert seen["pinned"] and seen["no_jump"]
     assert seen["slow"] is not None and 1 <= 300 - nc.st.view["height"] - seen["slow"][0] <= 9   # ~12 rows a second

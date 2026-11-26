@@ -11,7 +11,7 @@ Memory is plain markdown, loaded into every chat:
 | `NANOCODE.md`, `CLAUDE.md`, `AGENTS.md` | Team instructions in the project root | your choice; nanocode only reads them |
 
 - `# use pnpm, not npm` in the prompt saves a note to project memory.
-- The model calls `remember` when you correct it or state a preference. Lessons that apply everywhere go to the global file.
+- The model calls `remember` when you correct it or state a preference. Lessons that apply everywhere go to the global file; that one asks you first (in Ask mode), since it goes into every future chat. Saving a skill asks too.
 - `/memory` shows everything nanocode currently knows.
 
 ## Skills

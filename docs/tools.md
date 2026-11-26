@@ -16,6 +16,11 @@ These are the tools the model can call. They work the same on every provider and
 
 `read`, `glob` and `grep` skip `.git`, `node_modules` and binary files.
 
+- **Several read-only calls at once** (`read`, `grep`, `glob`, web, read-only MCP tools) run in parallel; their output is shown in order.
+- **Stale edits are refused.** If a file changed on disk after the model last read it (you edited it, a formatter or a command rewrote it), `edit` and `write` refuse and the model reads it again first, so your change isn't undone.
+- **Stuck models are stopped.** The same call with the same arguments a third time, with nothing changed in between, isn't run; the model is told to try something else.
+- **Long turns fit.** When one task's tool output grows past the context, older results are shortened (the newest stay whole), and before a new message a chat near the limit is summarized (`auto_compact`).
+
 ## Planning and agents
 
 | Tool | What it does |
@@ -27,9 +32,9 @@ These are the tools the model can call. They work the same on every provider and
 
 | Tool | What it does |
 |---|---|
-| `remember` | Save a lasting fact or lesson to memory |
+| `remember` | Save a lasting fact or lesson to memory (global memory asks first) |
 | `skill` | Load a skill's full instructions |
-| `save_skill` | Save a reusable procedure as a skill |
+| `save_skill` | Save a reusable procedure as a skill (asks first) |
 
 See [Memory, skills and learning](memory-and-skills.md).
 

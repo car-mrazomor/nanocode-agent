@@ -108,7 +108,7 @@ curl http://127.0.0.1:8765/v1/chat/completions -H "Authorization: Bearer $KEY" \
 
 Every API conversation is a normal saved nanocode chat in `.nanocode/sessions/`, so you can open it later in the app with `/resume`. A `session_id` you choose (runs, or the `X-Nanocode-Session-Id` header) names it, and later requests with the same id continue it.
 
-nanocode works on one chat at a time, so requests run **one after another**: a second request waits until the first one is done.
+nanocode works on one chat at a time, so requests run **one after another**: a second request waits until the first one is done. Up to 20 can wait; more get `429`. If a client disconnects (or times out) before its turn is done, the turn is stopped, so a retry doesn't run the same edits twice. (A client that closes its sending side right after the request counts as disconnected, so keep the connection open until the answer arrives; all common HTTP clients do.)
 
 ## Permissions
 
@@ -116,8 +116,10 @@ There's nobody to ask, so the API decides up front:
 
 | `"api": {"permissions": ...}` | Edits and commands |
 |---|---|
-| `"auto"` (default) | allowed |
-| `"read-only"` | denied; the agent can read, search and answer |
+| `"auto"` (default on `127.0.0.1`) | allowed |
+| `"read-only"` (default with any other `--host`) | denied; the agent can read, search and answer |
+
+Listening beyond this machine, edits and commands stay off until you set `"permissions": "auto"` yourself.
 
 Either way, **dangerous commands** (`rm -rf /`, `git push --force`, …) and **sending email** are always denied over the API.
 

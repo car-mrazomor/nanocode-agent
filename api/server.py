@@ -26,8 +26,14 @@ API_MAX_BODY = 40 * 1024 * 1024  # room for a few base64 images
 API_MAX_IMAGE = 20 * 1024 * 1024
 API_MAX_STORED = 100  # responses kept for previous_response_id
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+API_MAX_QUEUED = 20  # turns waiting for the one before them; more get 429
+API_HEADER_TIMEOUT = 30  # seconds to send the request line and headers
+API_BODY_TIMEOUT = 120  # seconds to send the body (room for big images on a slow link)
+API_MAX_HEADERS = 100
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 HTTP_REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
-                405: "Method Not Allowed", 413: "Payload Too Large", 500: "Internal Server Error"}
+                405: "Method Not Allowed", 408: "Request Timeout", 413: "Payload Too Large",
+                429: "Too Many Requests", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}
 
 
 class ApiError(Exception):
@@ -100,8 +106,7 @@ class ApiRun:
                 event = await queue.get()
                 if event is None:
                     break
-                if event not in backlog:
-                    yield event
+                yield event
         finally:
             if queue in self.listeners:
                 self.listeners.remove(queue)
@@ -145,6 +150,8 @@ class ApiServer:
     # --- running turns ---
 
     def start(self, prompt, session_id=None, instructions=None, images=None):
+        if sum(r.status == "queued" for r in self.runs.values()) >= API_MAX_QUEUED:
+            raise ApiError(429, f"{API_MAX_QUEUED} turns are already waiting; try again later", "rate_limit_error")
         run = ApiRun(prompt, session_id, images)
         self.runs[run.id] = run
         while len(self.runs) > 200:  # forget the oldest finished runs
@@ -195,13 +202,43 @@ class ApiServer:
 
     # --- HTTP ---
 
+    async def stop_on_disconnect(self, reader, run):
+        """A client that gives up (closes the connection, or times out and retries) shouldn't leave its turn
+        running: its edits and commands would happen twice."""
+        try:
+            while await reader.read(65536):
+                pass
+        except (ConnectionError, OSError):
+            pass
+        if not run.done:
+            nc.out(f"{nc.DIM}API {run.id}: the client disconnected; stopping it{nc.RESET}")
+            await self.stop(run)
+
+    async def streaming(self, reader, run, stream):
+        watcher = asyncio.ensure_future(self.stop_on_disconnect(reader, run)) if reader else None
+        try:
+            await stream
+        except (ConnectionError, OSError):
+            await self.stop(run)                     # the client went away mid-stream
+            raise
+        finally:
+            if watcher:
+                watcher.cancel()
+
+    async def wait_for_run(self, reader, run):
+        watcher = asyncio.ensure_future(self.stop_on_disconnect(reader, run))
+        try:
+            await asyncio.shield(run.task)
+        finally:
+            watcher.cancel()
+
     async def handle(self, reader, writer):
         try:
             method, path, headers, body = await read_http_request(reader)
-            await self.route(method, path, headers, body, writer)
+            await self.route(method, path, headers, body, writer, reader)
         except ApiError as e:
             await write_json(writer, e.status, {"error": {"message": str(e), "type": e.code}})
-        except (ConnectionError, asyncio.IncompleteReadError):
+        except (ConnectionError, asyncio.IncompleteReadError, asyncio.TimeoutError):
             pass
         except Exception as e:
             nc.log_error(e)
@@ -222,7 +259,7 @@ class ApiServer:
         if not token or not hmac.compare_digest(token, self.key):
             raise ApiError(401, "missing or wrong API key (send: Authorization: Bearer <key>)", "authentication_error")
 
-    async def route(self, method, path, headers, body, writer):
+    async def route(self, method, path, headers, body, writer, reader=None):
         path = path.split("?", 1)[0].rstrip("/") or "/"
         if path in ("/health", "/v1/health"):
             return await write_json(writer, 200, {"status": "ok", "version": nc.__version__})
@@ -241,9 +278,9 @@ class ApiServer:
             return await write_json(writer, 200, [{"name": t["name"], "description": t["description"],
                                                    "read_only": nc.tool_is_read_only(t)} for t in nc.active_tools()])
         if method == "POST" and path == "/v1/chat/completions":
-            return await self.chat_completions(parse_json(body), headers, writer)
+            return await self.chat_completions(parse_json(body), headers, writer, reader)
         if method == "POST" and path == "/v1/responses":
-            return await self.create_response(parse_json(body), writer)
+            return await self.create_response(parse_json(body), writer, reader)
         if parts[:2] == ["v1", "responses"] and len(parts) == 3:
             stored = self.responses.get(parts[2])
             if stored is None:
@@ -278,7 +315,7 @@ class ApiServer:
 
     # --- POST /v1/chat/completions ---
 
-    async def chat_completions(self, data, headers, writer):
+    async def chat_completions(self, data, headers, writer, reader=None):
         messages = data.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ApiError(400, "'messages' must be a non-empty list")
@@ -298,25 +335,9 @@ class ApiServer:
                     "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **extra}
 
         if data.get("stream"):
-            await start_sse(writer, {"X-Nanocode-Run-Id": run.id})
-            await write_sse(writer, chunk({"role": "assistant", "content": ""}))
-            async for event in run.follow():
-                if event["event"] == "run.started":
-                    await write_sse(writer, {"run_id": run.id, "session_id": event["session_id"]}, "nanocode.session")
-                elif event["event"] == "delta":
-                    await write_sse(writer, chunk({"content": event["text"]}))
-                elif event["event"] == "text_end" or event["event"] == "tool.started":
-                    if event["event"] == "tool.started":
-                        await write_sse(writer, {"tool": event["name"], "arguments": event["arguments"],
-                                                 "call_id": event["id"]}, "nanocode.tool.progress")
-                        await write_sse(writer, chunk({"content": "\n\n"}))
-            if run.status == "failed":
-                await write_sse(writer, {"error": {"message": run.error, "type": "server_error"}})
-            else:
-                await write_sse(writer, chunk({}, "stop", usage=openai_usage(run.usage)))
-            await write_sse(writer, "[DONE]")
+            await self.streaming(reader, run, self.stream_chat(writer, run, chunk))
             return
-        await asyncio.shield(run.task)
+        await self.wait_for_run(reader, run) if reader else await asyncio.shield(run.task)
         if run.status == "failed":
             raise ApiError(500, run.error or "the turn failed", "server_error")
         await write_json(writer, 200, {
@@ -326,9 +347,28 @@ class ApiServer:
             "usage": openai_usage(run.usage), "session_id": run.session_id},
             {"X-Nanocode-Session-Id": run.session_id or ""})
 
+    async def stream_chat(self, writer, run, chunk):
+        await start_sse(writer, {"X-Nanocode-Run-Id": run.id})
+        await write_sse(writer, chunk({"role": "assistant", "content": ""}))
+        async for event in run.follow():
+            if event["event"] == "run.started":
+                await write_sse(writer, {"run_id": run.id, "session_id": event["session_id"]}, "nanocode.session")
+            elif event["event"] == "delta":
+                await write_sse(writer, chunk({"content": event["text"]}))
+            elif event["event"] == "text_end" or event["event"] == "tool.started":
+                if event["event"] == "tool.started":
+                    await write_sse(writer, {"tool": event["name"], "arguments": event["arguments"],
+                                             "call_id": event["id"]}, "nanocode.tool.progress")
+                    await write_sse(writer, chunk({"content": "\n\n"}))
+        if run.status == "failed":
+            await write_sse(writer, {"error": {"message": run.error, "type": "server_error"}})
+        else:
+            await write_sse(writer, chunk({}, "stop", usage=openai_usage(run.usage)))
+        await write_sse(writer, "[DONE]")
+
     # --- POST /v1/responses ---
 
-    async def create_response(self, data, writer):
+    async def create_response(self, data, writer, reader=None):
         prompt, history, instructions, images = api_prompt(data.get("input"), data.get("instructions"))
         previous, conversation = data.get("previous_response_id"), data.get("conversation")
         if isinstance(conversation, dict):
@@ -373,7 +413,7 @@ class ApiServer:
                     self.conversations[conversation] = rid
                 self.save()
 
-        if data.get("stream"):
+        async def stream():
             await start_sse(writer)
             await write_sse(writer, {"type": "response.created", "response": response("in_progress")}, "response.created")
             async for event in run.follow():
@@ -394,8 +434,11 @@ class ApiServer:
             final = response(status)
             remember(final)
             await write_sse(writer, {"type": f"response.{status}", "response": final}, f"response.{status}")
+
+        if data.get("stream"):
+            await self.streaming(reader, run, stream())
             return
-        await asyncio.shield(run.task)
+        await self.wait_for_run(reader, run) if reader else await asyncio.shield(run.task)
         status = "completed" if run.status == "completed" else "failed" if run.status == "failed" else "cancelled"
         final = response(status)
         remember(final)
@@ -563,6 +606,16 @@ def parse_json(body):
 
 
 async def read_http_request(reader):
+    """Reads one request; a client that sends too slowly or too many headers is cut off."""
+    method, path, headers = await asyncio.wait_for(read_http_head(reader), API_HEADER_TIMEOUT)
+    length = int(headers.get("content-length") or 0)
+    if length > API_MAX_BODY:
+        raise ApiError(413, "request body too large")
+    body = await asyncio.wait_for(reader.readexactly(length), API_BODY_TIMEOUT) if length else b""
+    return method.upper(), path, headers, body
+
+
+async def read_http_head(reader):
     line = await reader.readline()
     if not line:
         raise ConnectionError("closed")
@@ -577,11 +630,13 @@ async def read_http_request(reader):
             break
         name, _, value = line.decode("latin-1").partition(":")
         headers[name.strip().lower()] = value.strip()
-    length = int(headers.get("content-length") or 0)
-    if length > API_MAX_BODY:
-        raise ApiError(413, "request body too large")
-    body = await reader.readexactly(length) if length else b""
-    return method.upper(), path, headers, body
+        if len(headers) > API_MAX_HEADERS:
+            raise ApiError(431, "too many headers")
+    try:
+        int(headers.get("content-length") or 0)
+    except ValueError:
+        raise ApiError(400, "bad Content-Length")
+    return method, path, headers
 
 
 def http_head(status, content_type, extra=None, length=None):
@@ -636,7 +691,10 @@ async def serve(module, host=None, port=None):
         say(f"{nc.RED}⏺ the API key must be at least 8 characters{nc.RESET}")
         return 1
     nc.st.headless = nc.st.serving = True
-    nc.st.auto_approve = (nc.st.config.get("api") or {}).get("permissions", "auto") != "read-only"
+    # Edits and commands are allowed by default only on this machine; reachable from others, they have to be
+    # turned on explicitly with "permissions": "auto".
+    default = "auto" if host in LOCAL_HOSTS else "read-only"
+    nc.st.auto_approve = (nc.st.config.get("api") or {}).get("permissions", default) == "auto"
     nc.new_session()
     if nc.st.backend == "sdk":
         nc.st.client = await nc.make_client()
@@ -652,8 +710,9 @@ async def serve(module, host=None, port=None):
           f"  {nc.DIM}key:{nc.RESET} {shown}  {nc.DIM}(Authorization: Bearer <key>; in ~/.nanocode/config.json under \"api\"){nc.RESET}\n"
           f"  {nc.DIM}edits and commands: {'allowed' if nc.st.auto_approve else 'denied (read-only)'}; "
           f"dangerous commands and sending email are always denied · Ctrl+C stops{nc.RESET}")
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        say(f"  {nc.YELLOW}listening beyond this machine: anyone with the key can run commands here{nc.RESET}")
+    if host not in LOCAL_HOSTS:
+        say(f"  {nc.YELLOW}listening beyond this machine over plain HTTP: put it behind HTTPS"
+            f"{'; anyone with the key can run commands here' if nc.st.auto_approve else ''}{nc.RESET}")
     try:
         async with server:
             await server.serve_forever()

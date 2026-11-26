@@ -18,10 +18,10 @@ You can see and stop them with `/shells` and `/shells stop <name>`.
 
 | Backend | When | Watch it live |
 |---|---|---|
-| tmux | installed | `tmux attach -t nanocode-<name>` |
-| screen | installed and no tmux | `screen -r nanocode-<name>` |
+| tmux | installed | `tmux attach -t nanocode-<pid>-<name>` (the exact name is shown when it starts) |
+| screen | installed and no tmux | `screen -r nanocode-<pid>-<name>` |
 | builtin | otherwise; works everywhere, including Windows | `/shells` |
 
 Pick one with `"shell_backend": "tmux"`, `"screen"`, `"builtin"` or `"auto"` (default).
 
-Shells stop when nanocode exits. Their output is kept in `.nanocode/shells/`, which stays out of git.
+Each nanocode names its shells with its process id, so two nanocodes (other projects or terminals) can both have a `dev` shell without stopping each other's. Shells stop when nanocode exits; tmux shells left by a nanocode that crashed are cleaned up the next time one starts a shell. Their output is kept in `.nanocode/shells/`, which stays out of git.

@@ -49,7 +49,7 @@ try:
 except ImportError:  # e.g. no build for this device; OpenRouter and Ollama still work
     sdk = None
 
-__version__ = "0.7.7"
+__version__ = "0.8.0"
 REPO = "car-mrazomor/nanocode-agent"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/master"
 
@@ -498,6 +498,12 @@ class State:
         self.live_md = None
         self.live = ""
         self.live_rendered_at = 0.0
+        self.live_dirty = False  # streamed text not rendered yet
+        self.last_reply = ""  # the last reply's markdown, for /copy
+        self.sdk_streaming = False  # a Claude subscription query is being answered
+        self.queue = []  # messages typed while a reply runs; sent one by one when it ends
+        self.tool_log = []  # (label, full output) of recent tool calls, for ctrl+o
+        self.exit_armed = 0.0  # ctrl+c / ctrl+d once on an empty prompt: press again to quit
         self.scroll_top = None  # (absolute line, row in it) at the top of the chat when scrolled back; None = follow
         self.lines_dropped = 0  # lines trimmed off the top of the transcript, so positions stay valid
         self.selection = None  # {"anchor": (line, char), "head": (line, char), "dragging": bool}
@@ -524,6 +530,7 @@ class State:
         self.headless = False
         self.serving = False  # `nanocode serve`: headless, and replies go to API clients instead of stdout
         self.undo = []
+        self.file_stamps = {}  # path -> (mtime_ns, size) when the model last read or wrote it
         self.turn_errors = 0
         self.last_error = None
         self.routed_model = None
@@ -542,6 +549,7 @@ class State:
         self.rea = None
         self.mcp = {}  # name -> McpClient for the MCP servers the user connected
         self.mcp_errors = {}  # name -> why it couldn't start
+        self.mcp_retry_at = 0.0  # when to try the servers that failed again
         self.mcp_loaded = None  # the config the current MCP tools came from
         self.mcp_many = []  # servers with many tools: reached through mcp_search / mcp_call
         self.home = True  # the start screen, until the first message or command
@@ -569,6 +577,10 @@ def invalidate():
 
 
 def out(text="", end="\n"):
+    buffer = OUT_BUFFER.get()
+    if buffer is not None:                   # a tool running in parallel: shown in order once it's done
+        buffer.append((text, end))
+        return
     if st.headless:
         headless_write(sys.stderr, text + end)
         return
@@ -615,9 +627,44 @@ def render_markdown(text):
     return buf.getvalue().rstrip("\n")
 
 
-def render_live():
-    st.live = "\n" + "\n".join("   " + line for line in render_markdown(st.live_md).split("\n"))
+_live_cache = {"source": "", "width": 0, "rendered": []}
+
+
+def finished_blocks(text):
+    """Where the finished markdown blocks of a streaming reply end: the last blank line outside a code fence."""
+    fence, cut, pos = None, 0, 0
+    for line in text.split("\n")[:-1]:
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            mark = stripped[:3]
+            fence = None if fence == mark else (fence or mark)
+        pos += len(line) + 1
+        if fence is None and not stripped:
+            cut = pos
+    return cut
+
+
+def render_live(final=False):
+    """Renders the streaming reply. While it streams, finished blocks are rendered once and kept, and only the
+    block still being written is rendered again, so long replies stay fast; the final render is of the whole."""
+    text = st.live_md or ""
+    if final:
+        rendered = render_markdown(text)
+    else:
+        width, cut = messages_width(), finished_blocks(text)
+        cache = _live_cache
+        if cache["width"] != width or not text.startswith(cache["source"]) or cut < len(cache["source"]):
+            cache.update(source="", width=width, rendered=[])
+        if cut > len(cache["source"]):
+            block = text[len(cache["source"]):cut].strip("\n")
+            if block.strip():
+                cache["rendered"].append(render_markdown(block))
+            cache["source"] = text[:cut]
+        tail = text[cut:]
+        rendered = "\n".join(cache["rendered"] + ([render_markdown(tail)] if tail.strip() else []))
+    st.live = "\n" + "\n".join("   " + line for line in rendered.split("\n"))
     st.live_rendered_at = time.monotonic()
+    st.live_dirty = False
     invalidate()
 
 
@@ -625,6 +672,7 @@ def render_live():
 # set per asyncio task, so the chat's own streaming is never affected.
 CALL_MODEL = contextvars.ContextVar("call_model", default=None)
 QUIET = contextvars.ContextVar("quiet", default=False)
+OUT_BUFFER = contextvars.ContextVar("out_buffer", default=None)
 
 
 def call_model():
@@ -657,6 +705,8 @@ def stream_text(chunk):
         st.output_started = True
     elif time.monotonic() - st.live_rendered_at > 0.05:  # re-rendering markdown on every token is slow
         render_live()
+    else:
+        st.live_dirty = True                   # the ticker shows it soon, even if no more text comes
 
 
 
@@ -682,9 +732,11 @@ def stream_end():
         return
     final = ""
     if st.live_md.strip():
-        render_live()
+        st.last_reply = clean_reply(st.live_md).strip()
+        render_live(final=True)
         final = st.live
-    st.live_md, st.live = None, ""
+    st.live_md, st.live, st.live_dirty = None, "", False
+    _live_cache.update(source="", width=0, rendered=[])
     if final:
         out(final)
     else:
@@ -811,8 +863,8 @@ def view_top(lines, width, height):
         index = line - st.lines_dropped
         top = (0, 0) if index < 0 else (min(index, len(lines) - 1), row)
         top = (top[0], min(top[1], len(wrap_line(lines[top[0]], width)) - 1))
-        if step_rows(lines, width, top, height - 1) != last:
-            return top
+        if step_rows(lines, width, top, height - 1) != last or (st.selection and st.selection["dragging"]):
+            return top                     # (while you drag a selection, the view stays put)
         st.scroll_top = None  # scrolled back down to the newest output
     return step_rows(lines, width, last, -(height - 1))
 
@@ -901,12 +953,12 @@ def sticky_prompt(lines, top_line, width, height):
     shown = text[:2]
     cut = len(text) > 2
     for k, t in enumerate(shown):
-        if len(t) > inner:
-            shown[k], cut = t[:inner - 1], True
+        if text_cells(t) > inner:
+            shown[k], cut = clip_cells(t, inner - 1, ""), True
     if cut:
-        shown[-1] = shown[-1][:inner - 1] + "…"
+        shown[-1] = clip_cells(shown[-1], inner - 1, "") + "…"
     bar, panel = f"fg:{THEME['accent']} bg:{THEME['bg']}", f"bg:{THEME['panel']} fg:{THEME['text']}"
-    rows = [[(bar, "┃"), (panel, "  " + t.ljust(inner) + " ")] for t in shown]
+    rows = [[(bar, "┃"), (panel, "  " + t + " " * max(0, inner - text_cells(t)) + " ")] for t in shown]
     rows.append([(f"fg:{THEME['panel']} bg:{THEME['bg']}", "▀" * width)])
     return first + st.lines_dropped, rows
 
@@ -1152,6 +1204,11 @@ def transcript_mouse(event_type, button, x, y):
         return False
     sel = st.selection
     if event_type == MouseEventType.MOUSE_DOWN and button == MouseButton.LEFT:
+        if st.scroll_top is None:          # hold the view still while selecting, even as a reply streams in
+            lines = transcript_lines()
+            top = view_top(lines, st.view["width"], st.view["height"])
+            st.scroll_top = (top[0] + st.lines_dropped, top[1])
+            st.view["pinned_by_click"] = True
         st.selection = {"anchor": point, "head": point, "dragging": True}
         invalidate()
         return True
@@ -1172,6 +1229,8 @@ def transcript_mouse(event_type, button, x, y):
                 st.selection = {"anchor": (point[0], start), "head": (point[0], end - 1), "dragging": False}
         if st.selection:
             finish_selection()
+        if st.view.pop("pinned_by_click", False) and selection_range() is None:
+            st.scroll_top = None           # just a click: keep following the newest output
         return True
     return False
 
@@ -1272,11 +1331,27 @@ async def allowed(tool_name, preview):
 
 
 async def ask_permission(tool_name, preview, dangerous):
+    # A tool running in parallel holds its output until the batch is done; the question can't wait for that.
+    buffered = OUT_BUFFER.get()
+    token = OUT_BUFFER.set(None)
+    try:
+        for text, end in buffered or []:
+            out(text, end)
+        if buffered:
+            buffered.clear()
+        return await _ask_permission(tool_name, preview, dangerous)
+    finally:
+        OUT_BUFFER.reset(token)
+
+
+async def _ask_permission(tool_name, preview, dangerous):
     stream_end()
     warn = f"   {fg('warning')}{BOLD}✉ this sends an email{RESET}\n" if tool_name in ALWAYS_ASK else \
         f"   {fg('error')}{BOLD}⚠ this looks destructive{RESET}\n" if dangerous else ""
     options = "y allow · n deny" if dangerous else "y allow · a always · n deny"
-    out(f"\n{warn}   {fg('warning')}△ Permission{RESET} {fg('text')}{tool_name}{RESET} "
+    agent = AGENT_LABEL.get()
+    who = f"{fg('muted')}sub-agent {agent[:30]} · {RESET}" if agent else ""
+    out(f"\n{warn}   {fg('warning')}△ Permission{RESET} {who}{fg('text')}{tool_name}{RESET} "
         f"{fg('muted')}{preview[:120]}{RESET}\n     {fg('faint')}{options}{RESET}")
     st.pending_permission = asyncio.get_running_loop().create_future()
     notify(f"Needs your OK: {tool_name} {preview[:80]}")
@@ -1358,7 +1433,7 @@ def show_tool_result(text, is_error):
     if AGENT_LABEL.get() is not None:
         return
     lines = text.strip().split("\n") if text.strip() else ["(no output)"]
-    first = lines[0][:90]
+    first = CONTROL_RE.sub("", lines[0].replace("\r", " ").replace("\t", " "))[:90]
     more = f" … +{len(lines) - 1} lines" if len(lines) > 1 else ""
     color = fg("error") if is_error else fg("faint")
     out(f"     {color}{first}{more}{RESET}")
@@ -1397,6 +1472,10 @@ async def run_tool(name, args):
     st.activity.append((name, str(args.get(key, "")) if key else "", is_error))
     text = cap(text)
     show_tool_result(text, is_error)
+    if top and not QUIET.get():
+        preview = str(args.get(key, "")) if key else ""
+        st.tool_log.append((f"{name} {preview}".strip().replace("\n", " ")[:70], text, is_error))
+        del st.tool_log[:-40]
     if top:
         emit("tool.completed", id=call_id, name=name, output=text, is_error=is_error)
     return text, is_error
@@ -1451,6 +1530,26 @@ def track_change(path, old, new):
     total[1] += removed
 
 
+def file_stamp(path):
+    try:
+        info = os.stat(path)
+        return info.st_mtime_ns, info.st_size
+    except OSError:
+        return None
+
+
+def remember_stamp(path):
+    st.file_stamps[os.path.abspath(path)] = file_stamp(path)
+
+
+def check_stamp(path):
+    """Refuses to change a file that changed on disk after the model last saw it (you edited it, a formatter or
+    a command rewrote it): the model's copy is stale and its edit could undo that change."""
+    seen = st.file_stamps.get(os.path.abspath(path))
+    if seen is not None and file_stamp(path) not in (seen, None):
+        raise ToolError(f"{path} changed on disk since you last read it. Read it again before changing it.")
+
+
 def record_undo(path, previous):
     st.undo.append({"path": str(path), "content": previous})
     del st.undo[:-50]
@@ -1502,6 +1601,7 @@ async def tool_read(args):
         for total, line in enumerate(f, 1):
             if offset <= total < offset + limit:
                 chosen.append(line.rstrip("\r\n"))
+    remember_stamp(path)
     if not chosen:
         return f"{path} is empty." if total == 0 else f"{path} has {total} lines; nothing at offset {offset}."
     body = "\n".join(f"{n}│{line[:2000]}" for n, line in enumerate(chosen, offset))
@@ -1519,12 +1619,14 @@ async def tool_write(args):
         raise ToolError(f"{path} is a directory")
     old = read_text(path) if path.is_file() else None
     if old is not None:
+        check_stamp(path)
         show_diff(old, content, path)
     if not await allowed("write", str(path)):
         return DENIED
     record_undo(path, old)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text(path, content)
+    remember_stamp(path)
     track_change(path, old, content)
     added, removed = diff_stats(old or "", content)
     verb = "created" if old is None else "wrote"
@@ -1540,6 +1642,8 @@ async def tool_edit(args):
     path, old, new = resolve(args["path"]), args["old"], args.get("new") or ""
     if not path.is_file():
         raise not_found(path)
+    check_stamp(path)
+    stamp_before = file_stamp(path)
     text = read_text(path)
     old, new = match_edit(text, old, new)
     count = text.count(old)
@@ -1554,8 +1658,11 @@ async def tool_edit(args):
     show_diff(text, updated, path)
     if not await allowed("edit", str(path)):
         return DENIED
+    if file_stamp(path) != stamp_before:        # changed while the user was looking at the permission prompt
+        raise ToolError(f"{path} changed on disk while waiting for permission. Read it again and redo the edit.")
     record_undo(path, text)
     write_text(path, updated)
+    remember_stamp(path)
     track_change(path, text, updated)
     return f"edited {path} ({count if replace_all else 1} replacement{'s' if replace_all and count > 1 else ''})"
 
@@ -1845,15 +1952,19 @@ async def shell_start(name, command):
     log = project_dir() / "shells" / f"{name}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text("")
-    info = {"name": name, "command": command, "backend": backend, "log": str(log), "started": time.time()}
-    session = f"nanocode-{name}"
+    # The session name includes this nanocode's PID: two nanocodes (other projects or terminals) can both have
+    # a shell called "dev" without stopping each other's.
+    session = f"nanocode-{os.getpid()}-{name}"
+    info = {"name": name, "command": command, "backend": backend, "log": str(log), "started": time.time(),
+            "session": session}
     if backend == "tmux":
-        await run_cmd("tmux", "kill-session", "-t", session)
+        await sweep_orphan_shells()
+        await run_cmd("tmux", "kill-session", "-t", f"={session}")
         rc, output = await run_cmd("tmux", "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", cwd)
         if rc != 0:
             raise ToolError(f"tmux couldn't start: {output.strip()}")
-        await run_cmd("tmux", "send-keys", "-t", session, "-l", command)
-        await run_cmd("tmux", "send-keys", "-t", session, "Enter")
+        await run_cmd("tmux", "send-keys", "-t", f"={session}:", "-l", command)
+        await run_cmd("tmux", "send-keys", "-t", f"={session}:", "Enter")
         info["attach"] = f"tmux attach -t {session}"
     elif backend == "screen":
         # Logging set in a config file at startup and plain `sh` inside: works the same on screen 4.0 (macOS) to 5.x.
@@ -1877,21 +1988,50 @@ async def shell_start(name, command):
     return info
 
 
+async def sweep_orphan_shells():
+    """Stops tmux shells left by a nanocode that crashed or was killed (its PID is gone)."""
+    try:
+        rc, output = await run_cmd("tmux", "list-sessions", "-F", "#{session_name}", timeout=5)
+    except ToolError:
+        return
+    for session in output.split() if rc == 0 else []:
+        found = re.match(r"nanocode-(\d+)-", session)
+        if found and int(found.group(1)) != os.getpid() and not pid_alive(int(found.group(1))):
+            try:
+                await run_cmd("tmux", "kill-session", "-t", f"={session}", timeout=5)
+            except ToolError:
+                pass
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def shell_session(info):
+    return info.get("session") or f"nanocode-{info['name']}"
+
+
 async def shell_alive(info):
-    session = f"nanocode-{info['name']}"
+    session = shell_session(info)
     if info["backend"] == "tmux":
-        rc, output = await run_cmd("tmux", "list-panes", "-t", session, "-F", "#{pane_current_command}")
+        rc, output = await run_cmd("tmux", "list-panes", "-t", f"={session}:", "-F", "#{pane_current_command}")
         shell_names = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh"}
         return rc == 0 and output.strip().split("\n")[0] not in shell_names
     if info["backend"] == "screen":
         rc, output = await run_cmd("screen", "-ls")
-        return session in output
+        return re.search(rf"\.{re.escape(session)}\s", output) is not None
     return info["proc"].returncode is None
 
 
 async def shell_output(info, lines):
     if info["backend"] == "tmux":
-        rc, output = await run_cmd("tmux", "capture-pane", "-p", "-J", "-t", f"nanocode-{info['name']}",
+        rc, output = await run_cmd("tmux", "capture-pane", "-p", "-J", "-t", f"={shell_session(info)}:",
                                    "-S", f"-{max(lines, 50)}")
         if rc == 0:
             return "\n".join(clean_terminal_text(output).split("\n")[-lines:])
@@ -1900,10 +2040,10 @@ async def shell_output(info, lines):
 
 
 async def shell_stop(info):
-    session = f"nanocode-{info['name']}"
+    session = shell_session(info)
     try:
         if info["backend"] == "tmux":
-            await run_cmd("tmux", "kill-session", "-t", session)
+            await run_cmd("tmux", "kill-session", "-t", f"={session}")
         elif info["backend"] == "screen":
             await run_cmd("screen", "-S", session, "-X", "quit")
         else:
@@ -1974,12 +2114,12 @@ async def tool_shell(args):
         if text and not await allowed("shell", f"{name} ← {text}"):
             return DENIED
         tmux_key, raw = SHELL_KEYS[key]
-        session = f"nanocode-{name}"
+        session = shell_session(info)
         if info["backend"] == "tmux":
             if text:
-                await run_cmd("tmux", "send-keys", "-t", session, "-l", text)
+                await run_cmd("tmux", "send-keys", "-t", f"={session}:", "-l", text)
             if tmux_key:
-                await run_cmd("tmux", "send-keys", "-t", session, tmux_key)
+                await run_cmd("tmux", "send-keys", "-t", f"={session}:", tmux_key)
         elif info["backend"] == "screen":
             await run_cmd("screen", "-S", session, "-p", "0", "-X", "stuff", text + raw)
         else:
@@ -2048,15 +2188,16 @@ async def browser_dom(url, timeout=45):
             browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", "--mute-audio", f"--user-data-dir={profile}", f"--user-agent={WEB_UA}",
             "--virtual-time-budget=7000", "--window-size=1280,2000", "--dump-dom", url,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            **({"start_new_session": True} if os.name != "nt" else {}))   # so its helper processes stop with it
         data, _ = await asyncio.wait_for(proc.communicate(), timeout)
         html = data.decode("utf-8", errors="replace")
         return html if "<" in html else None
     except (OSError, asyncio.TimeoutError):
-        if proc is not None:
-            await reap(proc)
         return None
     finally:
+        if proc is not None and proc.returncode is None:      # timed out, or Esc stopped the turn
+            await asyncio.shield(reap(proc))
         shutil.rmtree(profile, ignore_errors=True)
 
 
@@ -2289,6 +2430,10 @@ async def tool_web_fetch(args):
       "scope: project (default) or global (all projects).",
       {"fact": {"type": "string"}, "scope": {"type": "string", "enum": ["project", "global"]}}, ["fact"])
 async def tool_remember(args):
+    # Global memory goes into every future chat's instructions: ask first, so text from a web page or an email
+    # can't quietly plant lasting instructions.
+    if args.get("scope") == "global" and not await allowed("remember", f"(global) {args['fact']}"):
+        return DENIED
     return f"saved to {tilde(add_memory(args['fact'], args.get('scope') or 'project'))}"
 
 
@@ -2332,6 +2477,12 @@ class Mailbox:
             self.m.login(cfg["user"], cfg["password"])
         except (OSError, imaplib.IMAP4.error) as e:
             raise ToolError(f"couldn't log in to {cfg['imap_host']}: {e}") from e
+        try:   # servers (Gmail, Dovecot) list MOVE and UIDPLUS only once you're logged in
+            typ, data = self.m.capability()
+            if typ == "OK" and data and data[0]:
+                self.m.capabilities = tuple(data[0].decode(errors="replace").upper().split())
+        except (OSError, imaplib.IMAP4.error):
+            pass
         return self
 
     def __exit__(self, *exc):
@@ -2461,7 +2612,12 @@ async def tool_email_search(args):
         with Mailbox() as box:
             name = box.select(args.get("folder") or "inbox")
             query = args["query"].replace('"', "")
-            uids = box.search("X-GM-RAW", f'"{query}"') if is_gmail() else box.search("CHARSET", "UTF-8", "TEXT", f'"{query}"')
+            key = "X-GM-RAW" if is_gmail() else "TEXT"
+            if query.isascii():
+                uids = box.search(key, f'"{query}"') if is_gmail() else box.search("CHARSET", "UTF-8", key, f'"{query}"')
+            else:                     # imaplib only sends ASCII: other text goes as a UTF-8 literal
+                box.m.literal = query.encode("utf-8")
+                uids = box.search("CHARSET", "UTF-8", key)
             limit = min(max(int(args.get("limit") or 20), 1), 100)
             return f"{name} · {len(uids)} found for '{query}'\n" + email_rows(box.headers(uids[-limit:]))
     return await asyncio.to_thread(work)
@@ -2624,7 +2780,10 @@ async def tool_email_tag(args):
                 else:
                     box.uid("COPY", ids, f'"{target}"')
                     box.uid("STORE", ids, "+FLAGS", "(\\Deleted)")
-                    box.m.expunge()
+                    if "UIDPLUS" in box.m.capabilities:
+                        box.uid("EXPUNGE", ids)      # only these, not other mail flagged deleted elsewhere
+                    else:
+                        box.m.expunge()
             return f"done: {len(uids)} message{'s' if len(uids) != 1 else ''} ({what})"
     return await asyncio.to_thread(work)
 
@@ -2761,7 +2920,7 @@ async def run_subagent(task, label):
                     if msg.is_error:
                         raise ToolError(f"sub-agent failed: {msg.result or msg.subtype}")
         else:
-            messages, report = [{"role": "user", "content": task}], ""
+            messages, report, guard = [{"role": "user", "content": task}], "", RepeatGuard()
             for _ in range(40):
                 history, _ = fit_history(messages, context_budget(system))
                 message, usage = await model_call(system, history)
@@ -2773,11 +2932,7 @@ async def run_subagent(task, label):
                 if not calls:
                     report = message.get("content") or ""
                     break
-                for call in calls:
-                    try:
-                        result, _ = await run_tool(call["function"]["name"], json.loads(call["function"]["arguments"] or "{}"))
-                    except json.JSONDecodeError:
-                        result = "error: tool arguments were not valid JSON"
+                for call, result in zip(calls, await run_tool_calls(calls, guard)):
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
             else:
                 report = (messages[-1].get("content") if messages[-1]["role"] == "assistant" else "") or \
@@ -2829,6 +2984,8 @@ async def tool_save_skill(args):
     if root == project_dir() / "skills":
         ensure_project_dir()
     path = root / name / "SKILL.md"
+    if not await allowed("save_skill", f"{name} ({'global' if args.get('scope') == 'global' else 'project'})"):
+        return DENIED
     path.parent.mkdir(parents=True, exist_ok=True)
     previous = read_text(path) if path.exists() else None
     record_undo(path, previous)
@@ -2965,11 +3122,19 @@ REA_SAFE_PREFIXES = ("open_", "close_", "list_", "get_", "inspect_", "read_", "s
                      "analyze_", "compare_", "decompile_", "demangle_", "current_", "procedure_", "xrefs")
 
 
+REA_SAFE_EXTRA = re.compile(r"(trace_|verify_|evaluate_|correlate_|build_call_path|binary_overview|address_|"
+                            r"next_address|prev_address|goto_address|batch_decompile|discover_)")
+
+
 def rea_is_risky(spec):
     annotations = spec.get("annotations") or {}
     if annotations.get("readOnlyHint") or spec["name"].startswith(REA_SAFE_PREFIXES):
         return False
-    return bool(annotations.get("destructiveHint")) or bool(REA_RISKY.search(spec["name"]))
+    if annotations.get("destructiveHint") or REA_RISKY.search(spec["name"]):
+        return True
+    # Anything else that isn't known to be read-only asks too: tools that write files or touch a device
+    # (pull_adb_file, extract_firmware, export_*) don't always have a telling name.
+    return not REA_SAFE_EXTRA.match(spec["name"])
 
 
 class McpClient:
@@ -2986,6 +3151,7 @@ class McpClient:
         self.tools = None
         self.lock = asyncio.Lock()
         self.log = None
+        self.ready = False  # the initialize handshake finished
 
     def alive(self):
         # The reader ends when REA's output closes; on Windows that happens before returncode is set.
@@ -2994,7 +3160,7 @@ class McpClient:
 
     async def ensure(self):
         async with self.lock:
-            if self.alive():
+            if self.alive() and self.ready:
                 return
             await self.close()
             argv, env = self.spawn()
@@ -3002,17 +3168,27 @@ class McpClient:
             self.log = open(self.log_path(), "ab")
             if os.name == "nt" and argv and not Path(argv[0]).suffix:
                 argv = [shutil.which(argv[0]) or argv[0]] + list(argv[1:])  # npx → npx.cmd on Windows
+            # Own process group: wrappers like npx, uvx or docker start the real server as a child, and stopping
+            # the group stops it too.
+            extra = {"start_new_session": True} if os.name != "nt" else {}
             try:
                 self.proc = await asyncio.create_subprocess_exec(
                     *argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=self.log, env=env, limit=256 * 1024 * 1024)
+                    stderr=self.log, env=env, limit=256 * 1024 * 1024, **extra)
             except OSError as e:
                 raise ToolError(f"couldn't start {self.label}: {e}") from e
             self.reader = asyncio.ensure_future(self._read())
             await asyncio.sleep(0)
-            await self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
-                                              "clientInfo": {"name": "nanocode", "version": __version__}}, 120)
-            await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            try:
+                await self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                                  "clientInfo": {"name": "nanocode", "version": __version__}}, 120)
+                await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            except BaseException:
+                # Cancelled or failed half way: don't leave a running server that never finished its handshake
+                # (the next call would skip it, and strict servers reject everything after).
+                await asyncio.shield(self.close())
+                raise
+            self.ready = True
 
     def log_path(self):
         return log_file().parent / f"{re.sub(r'[^a-z0-9_-]+', '-', self.label.lower())}.log"
@@ -3096,6 +3272,7 @@ class McpClient:
         return await self.request("tools/call", {"name": name, "arguments": arguments}, timeout)
 
     async def close(self):
+        self.ready = False
         if self.reader:
             self.reader.cancel()
             self.reader = None
@@ -3104,10 +3281,18 @@ class McpClient:
                 self.proc.stdin.close()
             if self.proc.returncode is None:
                 try:
-                    self.proc.terminate()
+                    if os.name != "nt":
+                        os.killpg(self.proc.pid, signal.SIGTERM)
+                    else:
+                        self.proc.terminate()
                     await asyncio.wait_for(self.proc.wait(), 3)
-                except (asyncio.TimeoutError, ProcessLookupError):
+                except (asyncio.TimeoutError, ProcessLookupError, PermissionError, OSError):
                     await reap(self.proc)
+            elif os.name != "nt":
+                try:
+                    os.killpg(self.proc.pid, signal.SIGTERM)   # children left behind by a wrapper that exited
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
         self.proc = None
         if self.log:
             self.log.close()
@@ -3272,22 +3457,27 @@ async def ensure_mcp():
     servers = {n: s for n, s in mcp_servers().items() if s.get("enabled", True) is not False}
     disabled = mcp_disabled()
     signature = json.dumps([servers, sorted(disabled)], sort_keys=True)
-    if signature == st.mcp_loaded:
+    retry = st.mcp_errors and time.time() > st.mcp_retry_at    # servers that failed: try again now and then
+    if signature == st.mcp_loaded and not retry:
         return False
     before = sorted(MCP_TOOLS)
+    only_retrying = signature == st.mcp_loaded
     st.mcp_loaded = signature
     for name in list(st.mcp):
         if name not in servers or st.mcp[name].spec != json.dumps(servers[name], sort_keys=True):
             await st.mcp.pop(name).close()
+
+    previous_errors = dict(st.mcp_errors)
+    wait = 10 if only_retrying else 45   # a retry of a server that failed: don't hold up long
 
     async def load(name, spec):
         if name not in st.mcp:
             st.mcp[name] = McpClient(f"MCP {name}", mcp_spawn_for(name, spec))
             st.mcp[name].spec = json.dumps(spec, sort_keys=True)
         try:
-            return name, await asyncio.wait_for(st.mcp[name].list_tools(), 45)
+            return name, await asyncio.wait_for(st.mcp[name].list_tools(), wait)
         except (ToolError, OSError, asyncio.TimeoutError) as e:
-            st.mcp_errors[name] = str(e) or "didn't answer within 45s"
+            st.mcp_errors[name] = str(e) or f"didn't answer within {wait}s"
             return name, {}
 
     st.mcp_errors = {}
@@ -3311,7 +3501,9 @@ async def ensure_mcp():
         for entry in MCP_GENERIC.values():
             MCP_TOOLS[entry["name"]] = entry
     for name, error in st.mcp_errors.items():
-        out(f"  {YELLOW}⎿  MCP {name} didn't start: {error}{RESET}")
+        if previous_errors.get(name) != error:
+            out(f"  {YELLOW}⎿  MCP {name} didn't start: {error}{RESET}")
+    st.mcp_retry_at = time.time() + 600
     return sorted(MCP_TOOLS) != before
 
 
@@ -3659,6 +3851,14 @@ async def make_client(resume=None):
 
 
 async def sdk_query(text, images=None):
+    st.sdk_streaming = True       # Esc lets the SDK stop this itself (cancelling would leave its reply half read)
+    try:
+        return await _sdk_query(text, images)
+    finally:
+        st.sdk_streaming = False
+
+
+async def _sdk_query(text, images=None):
     started = time.time()
     if images:
         blocks = [{"type": "text", "text": text}] + [
@@ -3765,6 +3965,18 @@ def fit_history(messages, budget):
         dropped = True
     if dropped and msgs and msgs[0]["role"] == "user" and isinstance(msgs[0].get("content"), str):
         msgs[0]["content"] = "[Earlier messages were trimmed to fit the context window.]\n\n" + msgs[0]["content"]
+    # One long turn (many tool calls after one message) can still be too big: shrink its tool output too,
+    # oldest first, keeping the newest results whole, then harder if that isn't enough.
+    tools = [m for m in msgs if m["role"] == "tool"]
+    total = estimate_tokens(msgs)
+    for keep, size in ((4, 400), (1, 120)):
+        for m in tools[:max(0, len(tools) - keep)]:
+            if total <= budget:
+                break
+            content = m.get("content") or ""
+            if len(content) > size:
+                m["content"] = content[:size - 100] + "\n… [output trimmed to save context]"
+                total -= (len(content) - len(m["content"])) // 4
     return msgs, True
 
 
@@ -3817,7 +4029,7 @@ async def openrouter_stream(system_prompt, messages, use_tools=True):
 async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
     text, tool_calls, usage = "", {}, {}
     payload = {"model": call_model(), "max_tokens": 16000, "stream": True, "usage": {"include": True},
-               "messages": [{"role": "system", "content": system_prompt}] + with_images(messages)}
+               "messages": with_cache_marks([{"role": "system", "content": system_prompt}] + with_images(messages))}
     if use_tools:
         payload["tools"] = api_tools()
     if reasoning:
@@ -3833,6 +4045,10 @@ async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
                     message = api_error(resp.status_code, body)
                     if reasoning and rejects_thinking(resp.status_code, message):
                         raise ThinkingUnsupported(message)
+                    if resp.status_code == 400 and "cache" in message.lower() and \
+                            ("cache", call_model()) not in st.no_think and call_model().startswith("anthropic/"):
+                        st.no_think.add(("cache", call_model()))   # sent without cache marks from now on
+                        raise RetryableError(message, 0)
                     if resp.status_code in (408, 429, 500, 502, 503, 504):
                         retry_after = resp.headers.get("retry-after")
                         raise RetryableError(message, float(retry_after) if retry_after and
@@ -3884,6 +4100,27 @@ async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
         ]
     return message, {"input": usage.get("prompt_tokens") or 0, "output": usage.get("completion_tokens") or 0,
                      "cost": usage.get("cost") or 0}
+
+
+def with_cache_marks(messages):
+    """Claude models on OpenRouter only cache prompts that ask for it: mark the system prompt and the newest
+    message, so each step re-reads the long shared prefix at a tenth of the price (and faster). Other providers
+    (OpenAI, Gemini, DeepSeek, …) cache on their own."""
+    if not call_model().startswith("anthropic/") or st.config.get("prompt_cache") is False or \
+            ("cache", call_model()) in st.no_think:
+        return messages
+    messages = list(messages)
+    for i in {0, len(messages) - 1}:
+        msg = dict(messages[i])
+        content = msg.get("content")
+        if isinstance(content, str) and content:
+            content = [{"type": "text", "text": content}]
+        if isinstance(content, list) and content and msg["role"] != "assistant":
+            content = [dict(part) for part in content]
+            content[-1]["cache_control"] = {"type": "ephemeral"}
+            msg["content"] = content
+            messages[i] = msg
+    return messages
 
 
 def with_images(messages):
@@ -4026,15 +4263,131 @@ async def model_call(system_prompt, messages, use_tools=True):
         except RetryableError as e:
             if attempt == 3:
                 raise RuntimeError(f"{e} (gave up after 4 tries)") from e
-            wait = min(e.retry_after or 2 ** (attempt + 1), 30)
-            out(f"  {DIM}⎿  {e}; retrying in {wait:.0f}s{RESET}")
-            await asyncio.sleep(wait)
+            wait = min(e.retry_after if e.retry_after is not None else 2 ** (attempt + 1), 30)
+            if wait:
+                out(f"  {DIM}⎿  {e}; retrying in {wait:.0f}s{RESET}")
+                await asyncio.sleep(wait)
+
+
+class RepeatGuard:
+    """Stops a model that's stuck sending the exact same tool call again and again (a common failure of smaller
+    models): after the same call gave the same result twice, with nothing else changed in between, a third isn't
+    run. Polling whose result changes (a CI status, a health check) is fine, and so is anything after a change."""
+    LIMIT = 2
+
+    def __init__(self):
+        self.results = {}  # call -> (its last result, how many times in a row it gave that)
+
+    @staticmethod
+    def key(name, args):
+        return name + json.dumps(args, sort_keys=True, default=str)
+
+    def check(self, name, args):
+        if name in ("shell", "todo", "agent"):
+            return None
+        _, same = self.results.get(self.key(name, args), (None, 0))
+        if same >= self.LIMIT:
+            return (f"error: you already made this exact {name} call {same} times and got the same result each "
+                    "time, with nothing changed in between. Don't repeat it: try a different approach, or tell the "
+                    "user what's blocking you.")
+        return None
+
+    def record(self, name, args, result):
+        key = self.key(name, args)
+        last, same = self.results.get(key, (None, 0))
+        if not tool_runs_in_parallel(name):      # it may have changed things: earlier results may be stale
+            self.results = {k: v for k, v in self.results.items() if k == key}
+        self.results[key] = (result, same + 1 if result == last else 1)
+
+
+def tool_runs_in_parallel(name):
+    """Read-only tools (read, grep, web_fetch, read-only MCP tools…) can run at the same time."""
+    entry = TOOLS.get(name) or MCP_TOOLS.get(name)
+    return bool(entry) and name not in ("agent", "todo") and tool_is_read_only(entry)
+
+
+async def run_tool_calls(calls, guard=None):
+    """Runs one model step's tool calls and returns their results in order. Several sub-agents run at once
+    (each shows its own progress), and so does each run of consecutive read-only calls; their output is held
+    and shown in order, so it never interleaves."""
+    async def run_call(call, buffered=False):
+        if buffered:
+            OUT_BUFFER.set([])
+        name = call["function"]["name"]
+        try:
+            args = json.loads(call["function"]["arguments"] or "{}")
+        except json.JSONDecodeError:
+            st.turn_errors += 1
+            show_tool_call(name, {})
+            show_tool_result("invalid JSON arguments", True)
+            result = "error: tool arguments were not valid JSON; send the call again with valid JSON"
+        else:
+            blocked = guard.check(name, args if isinstance(args, dict) else {}) if guard else None
+            if blocked:
+                st.turn_errors += 1
+                show_tool_call(name, args if isinstance(args, dict) else {})
+                show_tool_result("skipped: the same call again", True)
+                result = blocked
+            else:
+                result = (await run_tool(name, args))[0]
+                if guard:
+                    guard.record(name, args if isinstance(args, dict) else {}, result)
+        return result, (OUT_BUFFER.get() or []) if buffered else []
+
+    def flush(shown):
+        for text, end in shown:
+            out(text, end)
+
+    results = {}
+    agents = [c for c in calls if c["function"]["name"] == "agent"]
+    if len(agents) > 1:
+        for call, (result, _) in zip(agents, await asyncio.gather(*(run_call(c) for c in agents))):
+            results[call["id"]] = result
+    i = 0
+    while i < len(calls):
+        call = calls[i]
+        if call["id"] in results:
+            i += 1
+            continue
+        batch = [call]
+        while (tool_runs_in_parallel(call["function"]["name"]) and i + len(batch) < len(calls)
+               and tool_runs_in_parallel(calls[i + len(batch)]["function"]["name"])
+               and calls[i + len(batch)]["id"] not in results):
+            batch.append(calls[i + len(batch)])
+        if len(batch) > 1:
+            for c, (result, shown) in zip(batch, await asyncio.gather(*(run_call(c, True) for c in batch))):
+                flush(shown)
+                results[c["id"]] = result
+        else:
+            results[call["id"]] = (await run_call(call))[0]
+        i += len(batch)
+    return [results[c["id"]] for c in calls]
+
+
+async def auto_compact():
+    """Summarizes the chat before a new message when it's close to the context limit, instead of letting the
+    oldest messages fall off. Turn it off with "auto_compact": false in the config."""
+    if not st.messages or st.config.get("auto_compact") is False:
+        return
+    budget = context_budget(build_system_prompt())
+    if estimate_tokens(st.messages) < budget * 0.8 or sum(m["role"] == "user" for m in st.messages) < 2:
+        return
+    out(f"  {DIM}⎿  the chat is near the context limit; summarizing it first (turn off: \"auto_compact\": false){RESET}")
+    try:
+        await compact()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log_error(e)
+        out(f"  {DIM}⎿  couldn't summarize ({e}); older messages will be trimmed instead{RESET}")
 
 
 async def api_query(text, images=None):
     """One user turn: call the model, run its tools, repeat until it answers without tools."""
     started = time.time()
     totals = {"input": 0, "output": 0, "cost": 0.0}
+    await auto_compact()
+    guard = RepeatGuard()
     st.messages.append({"role": "user", "content": text, **({"images": list(images)} if images else {})})
     try:
         for _ in range(100):
@@ -4053,20 +4406,7 @@ async def api_query(text, images=None):
             calls = message.get("tool_calls") or []
             if not calls:
                 break
-            async def run_call(call):
-                try:
-                    args = json.loads(call["function"]["arguments"] or "{}")
-                    return (await run_tool(call["function"]["name"], args))[0]
-                except json.JSONDecodeError:
-                    st.turn_errors += 1
-                    return "error: tool arguments were not valid JSON; send the call again with valid JSON"
-
-            agents = [c for c in calls if c["function"]["name"] == "agent"]
-            early = {}
-            if len(agents) > 1:                     # several sub-agents: run them at the same time
-                early = dict(zip([c["id"] for c in agents], await asyncio.gather(*(run_call(c) for c in agents))))
-            for call in calls:
-                result = early[call["id"]] if call["id"] in early else await run_call(call)
+            for call, result in zip(calls, await run_tool_calls(calls, guard)):
                 st.messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
         else:
             out(f"  {YELLOW}⎿  stopped after 100 steps in one turn{RESET}")
@@ -4158,8 +4498,12 @@ def save_session():
                 "usage": st.usage, "activity": st.activity[-500:], "changed": st.changed,
                 "screen": st.output[-200_000:]}
         path = sessions_dir() / f"{st.session['id']}.json"
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")       # own temp file: two nanocodes never mix writes
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)   # chats can hold private things
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
         tmp.replace(path)
     except OSError as e:
         log_error(e)
@@ -4271,6 +4615,7 @@ COMMANDS = {
     "/recap": "what happened this session, and what's next",
     "/shells": "background shells: list, or /shells stop <name>",
     "/cost": "tokens and cost this session",
+    "/copy": "copy the last reply to the clipboard (/copy code: its last code block)",
     "/config": "show settings (change: nanocode setup)",
     "/terminal-setup": "make Shift+Enter, Cmd+Backspace and Cmd+arrows work in this terminal",
     "/c": "new chat (old one stays saved)",
@@ -4281,7 +4626,11 @@ KEYS_HELP = [("Enter", "send"), ("Shift+Enter / Alt+Enter / Ctrl+J", "new line")
              ("Ctrl+U (Cmd+Backspace)", "delete everything before the cursor"),
              ("Ctrl/Alt+← →", "jump by word"), ("Home/End, Ctrl+A/E", "start/end of line"),
              ("Esc", "stop the reply"), ("Ctrl+C", "stop the reply, clear the input, or quit"),
-             ("↑ / ↓", "input history"), ("PageUp / PageDown, wheel", "scroll the chat"), ("Drag / double-click", "select and copy"), ("Tab", "complete commands, models, @files")]
+             ("↑ / ↓", "input history (↑ on an empty prompt edits queued messages)"),
+             ("PageUp / PageDown, wheel", "scroll the chat"), ("Ctrl+Home / Ctrl+End", "top / bottom of the chat"),
+             ("Ctrl+O", "full output of a recent tool call"), ("Drag / double-click", "select and copy"),
+             ("Tab", "complete commands, models, @files"),
+             ("Enter while a reply runs", "queue the message; it's sent when the reply finishes")]
 
 
 def show_help():
@@ -4616,11 +4965,45 @@ def show_skills():
     out("\n".join(lines) + "\n")
 
 
+CODE_BLOCK_RE = re.compile(r"^(```|~~~)[^\n]*\n(.*?)^\1\s*$", re.M | re.S)
+
+
+def cmd_copy(arg):
+    """/copy puts the last reply on the clipboard; /copy code its last code block."""
+    text = st.last_reply
+    if not text and st.backend != "sdk":
+        text = next((m.get("content") or "" for m in reversed(st.messages)
+                     if m["role"] == "assistant" and m.get("content")), "")
+    if arg.strip() == "code":
+        blocks = CODE_BLOCK_RE.findall(text or "")
+        text = blocks[-1][1].rstrip("\n") if blocks else ""
+        if not text:
+            out(f"{DIM}no code block in the last reply{RESET}\n")
+            return
+    if not text:
+        out(f"{DIM}nothing to copy yet{RESET}\n")
+        return
+    how = copy_to_clipboard(text)
+    out(f"{GREEN}⏺ Copied{RESET} {DIM}{len(text)} characters{' via OSC 52' if how == 'osc52' else ''}{RESET}\n")
+
+
+SECRET_WORDS = ("key", "token", "password", "secret", "auth", "pass", "cookie", "credential")
+
+
+def redact(value, name=""):
+    """A copy of a config value with secrets masked, at any depth (email password, MCP env tokens, API keys)."""
+    if isinstance(value, dict):
+        return {k: redact(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(v, name) for v in value]
+    if isinstance(value, str) and value and any(w in name.lower() for w in SECRET_WORDS):
+        return f"{value[:4]}…{value[-2:]}" if len(value) > 12 else "••••"
+    return value
+
+
 def show_config():
     lines = [f"{BOLD}Config{RESET} {DIM}{tilde(config_file())}{RESET}"]
-    for key, value in st.config.items():
-        if "key" in key and isinstance(value, str) and value:
-            value = f"{value[:8]}…{value[-4:]}"
+    for key, value in redact(st.config).items():
         lines.append(f"  {CYAN}{key:<18}{RESET} {value}")
     lines.append(f"\n  {DIM}change provider / key / model: nanocode setup · switch model now: /model{RESET}")
     return "\n".join(lines)
@@ -4773,6 +5156,17 @@ def expand_chips(text, images):
     return CHIP_RE.sub(expand, text)
 
 
+def history_entry(text):
+    def expand(match):
+        kind, value = st.attachments.get(match.group(0), (None, None))
+        if kind == "text":
+            return value
+        if kind == "image":
+            return mention(project_dir() / "images" / value)
+        return match.group(0)
+    return CHIP_RE.sub(expand, text)
+
+
 def clipboard_image():
     """(mime, bytes) of an image on the clipboard, or None. macOS: a screenshot or a copied image file;
     Linux: wl-paste or xclip; Windows: PowerShell."""
@@ -4811,6 +5205,26 @@ def clipboard_image():
     return "image/png", data
 
 
+def clipboard_text():
+    """The clipboard's text, or "" (for Ctrl+V when there's no image on it)."""
+    if sys.platform == "darwin":
+        commands = [["pbpaste"]]
+    elif os.name == "nt":
+        commands = [["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"]]
+    else:
+        commands = [["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"],
+                    ["xsel", "--clipboard", "--output"]]
+    for command in commands:
+        if shutil.which(command[0]):
+            try:
+                r = subprocess.run(command, capture_output=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if r.returncode == 0 and r.stdout:
+                return r.stdout.decode("utf-8", errors="replace")
+    return ""
+
+
 def insert_chip(buffer, text):
     before = buffer.document.text_before_cursor
     buffer.insert_text((" " if before and not before[-1].isspace() else "") + text)
@@ -4822,9 +5236,13 @@ def paste_into(buffer, data):
     a picture, the clipboard image."""
     data = data.replace("\r\n", "\n").replace("\r", "\n")
     if not data.strip():
-        image = clipboard_image()
-        if image:
-            insert_chip(buffer, add_image_chip(image[1], image[0]) + " ")
+        async def grab():                      # off the UI thread: osascript/PowerShell can take seconds
+            image = await asyncio.to_thread(clipboard_image)
+            if image:
+                insert_chip(buffer, add_image_chip(image[1], image[0]) + " ")
+                invalidate()
+        if st.app is not None and st.app.is_running:
+            st.app.create_background_task(grab())
         return
     last = st.last_paste
     if last and data == last[0] and last[1] in buffer.text:
@@ -5136,6 +5554,8 @@ async def run_input(text):
             await terminal_setup()
         elif word == "/config":
             out(show_config() + "\n")
+        elif word == "/copy":
+            cmd_copy(arg)
         elif word == "/c":
             leave_current_chat()
             await new_chat()
@@ -5310,8 +5730,16 @@ def notify(message):
     st.app.output.flush()
 
 
+def send_next_queued():
+    if st.queue and not (st.task and not st.task.done()):
+        start_input(st.queue.pop(0))
+
+
 def turn_finished(task):
     if task.cancelled():
+        return
+    if st.queue and not st.headless:          # next queued message
+        asyncio.get_running_loop().call_soon(send_next_queued)
         return
     if away():
         st.unseen = True
@@ -5532,9 +5960,15 @@ def build_app():
 
             return Transformation(result, source_to_display=to_display, display_to_source=to_source)
 
+    class ChipHistory(FileHistory):
+        """Chips only mean something while nanocode runs, so the history saves what they stand for: the pasted
+        text itself, and images as @mentions of their saved copy. Recalled after a restart, they still work."""
+        def store_string(self, string):
+            super().store_string(history_entry(string))
+
     try:
         history_file().parent.mkdir(parents=True, exist_ok=True)
-        history = FileHistory(str(history_file()))
+        history = ChipHistory(str(history_file()))
     except OSError:
         history = InMemoryHistory()
 
@@ -5713,8 +6147,23 @@ def build_app():
                        align=WindowAlign.RIGHT)]),
     ])
 
+    def queued_lines():
+        fragments = []
+        for text in st.queue[-3:]:
+            fragments += [("class:faint", "  ↳ queued  "), ("class:muted", fit_left(" ".join(text.split()), 70)),
+                          ("", "\n")]
+        if len(st.queue) > 3:
+            fragments.append(("class:faint", f"  … {len(st.queue) - 3} more\n"))
+        fragments.append(("class:faint", "  sent when the reply finishes · ↑ to edit · esc esc stops and keeps them"))
+        return fragments
+
+    queued = ConditionalContainer(
+        VSplit([Window(width=2), Window(FormattedTextControl(queued_lines), dont_extend_height=True)]),
+        filter=Condition(lambda: bool(st.queue)))
+
     session = HSplit([
         VSplit([Window(width=2), st.output_window, Window(width=2)]),
+        queued,
         Window(height=1),
         VSplit([Window(width=2), HSplit([prompt_panel, footer]), Window(width=2)]),
         Window(height=1),  # a little room under the prompt
@@ -5730,6 +6179,11 @@ def build_app():
     dialog_filter = TextArea(height=1, multiline=False, style="class:dialog.input", prompt="  ",
                              input_processors=[SearchHint()])
     dialog_open = Condition(lambda: st.dialog is not None)
+
+    def filter_changed(_):
+        if st.dialog is not None:
+            st.dialog["index"] = 0                # the best match is selected as you type
+    dialog_filter.buffer.on_text_changed += filter_changed
 
     def dialog_items():
         if st.dialog is None:
@@ -5750,8 +6204,9 @@ def build_app():
             selected = i == st.dialog["index"]
             style = "class:dialog.selected" if selected else "class:dialog.text"
             width = 56
-            text = f"  {label}"
-            gap = max(1, width - len(text) - len(meta) - 2)
+            meta = clip_cells(meta, 24)
+            text = clip_cells(f"  {label}", width - text_cells(meta) - 3)
+            gap = max(1, width - text_cells(text) - text_cells(meta) - 2)
             fragments += [(style, text + " " * gap), (style + (" class:dialog.meta" if not selected else ""), meta + "  "),
                           ("", "\n")]
         return fragments
@@ -5840,14 +6295,27 @@ def build_app():
     no_dialog = ~dialog_open
 
     def interrupt():
+        """Stops the running turn (Esc twice, Ctrl+C, or Esc at a permission question, which also denies it).
+        Messages queued meanwhile go back into the prompt instead of being sent."""
         st.interrupt_armed = 0
+        task = st.task
         if st.pending_permission is not None:
             answer_permission("n")
-        elif st.backend == "sdk" and st.client:
+        if st.backend == "sdk" and st.client:
             asyncio.ensure_future(st.client.interrupt())
-        elif st.task:
-            st.task.cancel()
+            # The SDK stops its query by itself; anything else (/compare, MCP startup, a hung call) is cancelled.
+            asyncio.get_running_loop().call_later(
+                4, lambda: task and not task.done() and not st.sdk_streaming and task.cancel())
+        elif task:
+            task.cancel()
+        stream_end()
         out(f"   {fg('error')}interrupted{RESET}")
+        if st.queue:
+            queued = "\n\n".join(st.queue)
+            st.queue.clear()
+            buffer = st.input_box.buffer
+            buffer.text = queued + ("\n\n" + buffer.text if buffer.text else "")
+            buffer.cursor_position = len(queued)
 
     @kb.add(Keys.BracketedPaste, filter=no_dialog)
     def _(event):
@@ -5856,12 +6324,21 @@ def build_app():
     @kb.add("c-v", filter=no_dialog)
     @kb.add("escape", "v", filter=no_dialog)
     def _(event):
-        """Ctrl+V (Alt+V on Windows, where the terminal takes Ctrl+V): paste the clipboard image."""
-        image = clipboard_image()
-        if image:
-            insert_chip(event.current_buffer, add_image_chip(image[1], image[0]) + " ")
-        else:
-            show_toast("no image on the clipboard")
+        """Ctrl+V (Alt+V on Windows, where the terminal takes Ctrl+V): paste the clipboard image, or its text."""
+        buffer = event.current_buffer
+
+        async def paste():
+            image = await asyncio.to_thread(clipboard_image)
+            if image:
+                insert_chip(buffer, add_image_chip(image[1], image[0]) + " ")
+                return
+            text = await asyncio.to_thread(clipboard_text)
+            if text:
+                paste_into(buffer, text)
+            else:
+                show_toast("the clipboard is empty")
+            invalidate()
+        event.app.create_background_task(paste())
 
     chip_end = re.compile(CHIP_RE.pattern + "$")
     chip_before_cursor = Condition(lambda: st.input_box is not None and bool(
@@ -5874,6 +6351,14 @@ def build_app():
         found = chip_end.search(buffer.document.text_before_cursor[-60:])
         buffer.delete_before_cursor(len(found.group(0)))
 
+    def exit_twice(event, key):
+        """Like Claude Code: the first Ctrl+C / Ctrl+D on an empty prompt asks, the second within 2s quits."""
+        if st.exit_armed and time.time() - st.exit_armed < 2:
+            event.app.exit()
+            return
+        st.exit_armed = time.time()
+        show_toast(f"press {key} again to exit", 2)
+
     @kb.add("c-c", filter=no_dialog)
     def _(event):
         if busy():
@@ -5881,12 +6366,12 @@ def build_app():
         elif event.current_buffer.text:
             event.current_buffer.reset()
         else:
-            event.app.exit()
+            exit_twice(event, "ctrl+c")
 
     @kb.add("c-d", filter=no_dialog)
     def _(event):
         if not event.current_buffer.text:
-            event.app.exit()
+            exit_twice(event, "ctrl+d")
 
     @kb.add("enter", filter=has_completions & completion_is_selected & no_dialog)
     def _(event):
@@ -6010,6 +6495,10 @@ def build_app():
     @kb.add("up", filter=no_dialog & ~has_completions)
     def _(event):
         buff = event.current_buffer
+        if st.queue and not buff.text:          # edit the queued messages before they're sent
+            buff.text = "\n\n".join(st.queue)
+            st.queue.clear()
+            return
         if not visual_move(buff, -1):
             buff.history_backward()
 
@@ -6031,6 +6520,32 @@ def build_app():
     def _(event):
         palette()
 
+    def show_tool_output(label, text, is_error):
+        color = fg("error") if is_error else fg("muted")
+        body = "\n".join(f"     {fg('border')}│{RESET} {color}{CONTROL_RE.sub('', line)[:400]}{RESET}"
+                         for line in text.rstrip().split("\n"))
+        out(f"\n   {fg('text')}{label}{RESET} {fg('faint')}full output{RESET}\n{body}")
+        st.scroll_top = None
+
+    @kb.add("c-o", filter=no_dialog)
+    def _(event):
+        if not st.tool_log:
+            show_toast("no tool output yet")
+            return
+        items = [(label, f"{'error · ' if is_error else ''}{text.count(chr(10)) + 1} lines",
+                  lambda label=label, text=text, is_error=is_error: show_tool_output(label, text, is_error))
+                 for label, text, is_error in reversed(st.tool_log)]
+        open_dialog("Tool output", items)
+
+    @kb.add("c-end", filter=no_dialog)
+    def _(event):
+        st.scroll_top = None
+        invalidate()
+
+    @kb.add("c-home", filter=no_dialog)
+    def _(event):
+        scroll_transcript(10 ** 9)
+
     leader = {"n": run_command("/c"), "l": sessions_dialog, "m": models_dialog,
               "c": run_command("/compact"), "u": run_command("/undo"), "h": run_command("/help"),
               "q": lambda: st.app.exit()}
@@ -6045,7 +6560,7 @@ def build_app():
     @kb.add("down", filter=dialog_open)
     @kb.add("c-n", filter=dialog_open)
     def _(event):
-        st.dialog["index"] = min(len(dialog_items()) - 1, st.dialog["index"] + 1)
+        st.dialog["index"] = max(0, min(len(dialog_items()) - 1, st.dialog["index"] + 1))
 
     @kb.add("enter", filter=dialog_open)
     def _(event):
@@ -6083,8 +6598,11 @@ def build_app():
         while True:
             await asyncio.sleep(0.1)
             now = time.time()
+            if st.live_dirty and st.live_md is not None and time.monotonic() - st.live_rendered_at > 0.05:
+                render_live()
             if ((st.task and not st.task.done()) or (st.toast and time.monotonic() < st.toast[1] + 0.2)
-                    or (st.interrupt_armed and now - st.interrupt_armed < 2.2)):
+                    or (st.interrupt_armed and now - st.interrupt_armed < 2.2)
+                    or (st.exit_armed and now - st.exit_armed < 2.2)):
                 app.invalidate()
 
     app.pre_run_callables.append(lambda: app.create_background_task(ticker()))
@@ -6141,8 +6659,38 @@ def color_depth():
     return None
 
 
+def text_cells(text):
+    """How many terminal cells a text takes (CJK and most emoji take two)."""
+    return sum(char_width(ch) for ch in text)
+
+
+def clip_cells(text, width, mark="…"):
+    """The start of a text that fits in `width` cells, with … when it was cut."""
+    if text_cells(text) <= width:
+        return text
+    result, used, room = "", 0, max(0, width - len(mark))
+    for ch in text:
+        w = char_width(ch)
+        if used + w > room:
+            break
+        result += ch
+        used += w
+    return result + mark if width > 0 else ""
+
+
 def fit_left(text, width):
-    return text if len(text) <= width else "…" + text[-(width - 1):] if width > 1 else ""
+    """The end of a text that fits in `width` cells (for paths: the folder name matters most)."""
+    if text_cells(text) <= width:
+        return text
+    if width <= 1:
+        return ""
+    result, used = "", 0
+    for ch in reversed(text):
+        w = char_width(ch)
+        if used + w > width - 1:
+            break
+        result, used = ch + result, used + w
+    return "…" + result
 
 
 _branch_cache = {"at": 0.0, "value": ""}
@@ -6166,28 +6714,99 @@ def on_enter(buff):
     if ALIASES.get(text, text) == "/q":
         restart_app() if st.update_state == "installed" else st.app.exit()  # like OpenCode: /exit to restart
         return False
-    if not start_input(text):
-        return True
+    if (st.task and not st.task.done()) or st.queue:
+        st.queue.append(text)                  # like Claude Code: sent when the current reply finishes
+        if not (st.task and not st.task.done()):
+            asyncio.get_running_loop().call_soon(send_next_queued)
+        invalidate()
+        return False
+    start_input(text)
     return False
 
 
 # --- Config and setup wizard ---
 
-def load_config():
+_config_base = {}  # the config as last read from or written to disk: save_config writes only what changed since
+
+
+def read_config_file(strict=False):
+    """The config on disk ({} if there's none). With strict, None when it exists but can't be read (a typo
+    while you edit it by hand), so a save doesn't merge onto nothing and drop your other settings."""
     try:
-        return json.loads(config_file().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(config_file().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else ({} if not strict else None)
+    except FileNotFoundError:
         return {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None if strict else {}
+
+
+def load_config():
+    global _config_base
+    config = read_config_file()
+    _config_base = json.loads(json.dumps(config))
+    return config
+
+
+class config_lock:
+    """Only one nanocode at a time saves the config (others wait a moment), so none loses another's change."""
+    def __enter__(self):
+        path = config_file().with_suffix(".lock")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(path, "a+")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                for _ in range(50):
+                    try:
+                        msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                        self.locked = True
+                        break
+                    except OSError:
+                        time.sleep(0.1)
+            else:
+                import fcntl
+                fcntl.flock(self.f.fileno(), fcntl.LOCK_EX)
+        except (OSError, ImportError):
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if os.name == "nt" and getattr(self, "locked", False):
+                import msvcrt
+                self.f.seek(0)
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        self.f.close()
 
 
 def save_config():
+    """Writes this instance's changes on top of the config on disk: another nanocode running at the same time
+    (or `nanocode email` / `setup` in another terminal) may have changed other settings since we read it."""
+    global _config_base
     path = config_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(st.config, f, indent=2)
-    tmp.replace(path)
+    with config_lock():
+        merged = read_config_file(strict=True)
+        if merged is None:                         # unreadable: write everything we have, as before
+            merged = json.loads(json.dumps(st.config))
+        for key in set(st.config) | set(_config_base):
+            if key not in st.config:
+                if key in _config_base:
+                    merged.pop(key, None)                  # we removed it
+            elif key not in _config_base or json.dumps(st.config[key], sort_keys=True) != \
+                    json.dumps(_config_base[key], sort_keys=True):
+                merged[key] = st.config[key]               # we changed it
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2)
+        tmp.replace(path)
+    st.config.clear()
+    st.config.update(merged)
+    _config_base = json.loads(json.dumps(merged))
 
 
 def provider_label():

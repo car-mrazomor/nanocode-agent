@@ -108,6 +108,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/compare <prompt>` | Send one prompt to several models and see the answers side by side. `/compare models a, b, c` picks them |
 | `/email [task]` | Summarize and triage your inbox, or do an email task (set up with `nanocode email`) |
 | `/terminal-setup` | Make Shift+Enter, Cmd+Backspace and Cmd+arrows work in your terminal |
+| `/copy` | Copy the last reply to the clipboard (`/copy code`: its last code block) |
 | `/cost`, `/config`, `/help` | Usage, settings, help |
 | `/c`, `/q` | New chat, quit |
 | `# note` | Save a note to project memory |
@@ -128,8 +129,11 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | Shift+Enter, Alt+Enter, Ctrl+J | New line |
 | Ctrl+P | Command palette |
 | Ctrl+X then N / L / M / C / U / H / Q | New session / sessions / models / compact / undo / help / quit |
-| Esc Esc | Stop the reply (press twice) |
-| Ctrl+C | Stop the reply, clear the input, or quit |
+| Esc Esc | Stop the reply (press twice); Esc at a permission question denies it and stops |
+| Ctrl+C | Stop the reply, clear the input, or quit (press twice on an empty prompt) |
+| Enter while a reply runs | Queue the message: it's sent when the reply finishes (↑ edits it, Esc Esc puts it back) |
+| Ctrl+O | The full output of a recent tool call |
+| Ctrl+Home / Ctrl+End | Top / bottom of the chat |
 | Ctrl+U (Cmd+Backspace on macOS) | Delete everything before the cursor |
 | Ctrl+← →, Alt/Option+← → | Jump by word |
 | Home / End, Ctrl+A / Ctrl+E | Start / end of line |

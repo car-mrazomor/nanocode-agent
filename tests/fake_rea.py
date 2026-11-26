@@ -9,7 +9,8 @@ TOOLS = [
      "annotations": {"readOnlyHint": True}},
     {"name": "install_adb_package", "description": "Install an APK on a connected Android device.",
      "inputSchema": {"type": "object", "properties": {"apk": {"type": "string"}}}, "annotations": {}},
-    {"name": "crash_server", "description": "Makes the fake server exit.", "inputSchema": {"type": "object"}},
+    {"name": "crash_server", "description": "Makes the fake server exit.", "inputSchema": {"type": "object"},
+     "annotations": {"readOnlyHint": True}},
 ]
 
 

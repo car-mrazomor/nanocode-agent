@@ -30,6 +30,7 @@ The cost is OpenRouter's real price, "free (local)" on Ollama, and on the Claude
 | `/email [task]` | Inbox summary, or an email task |
 | `/update`, `/version` | Install an update, or check for one |
 | `/terminal-setup` | Make Shift+Enter and Cmd shortcuts work |
+| `/copy` | Copy the last reply (`/copy code`: its last code block) |
 | `/cost`, `/config`, `/help` | Usage, settings, help |
 | `/c` (`/new`, `/clear`) | New chat |
 | `/q` (`/exit`, `/quit`) | Quit |
@@ -97,15 +98,18 @@ Colors: `bg`, `panel` (your messages and the input), `panel2` (menus, dialogs), 
 | Shift+Enter, Alt+Enter, Ctrl+J | New line |
 | Ctrl+P | Command palette |
 | Ctrl+X then N / L / M / C / U / H / Q | New chat / chats / models / compact / undo / help / quit |
-| Esc Esc | Stop the reply |
-| Ctrl+C | Stop the reply, clear the input, or quit |
+| Esc Esc | Stop the reply; Esc at a permission question denies it and stops |
+| Ctrl+C | Stop the reply, clear the input, or quit (press twice on an empty prompt) |
+| Enter while a reply runs | Queue the message: it's sent when the reply finishes (↑ edits it, Esc Esc puts it back) |
+| Ctrl+O | The full output of a recent tool call |
+| Ctrl+Home / Ctrl+End | Top / bottom of the chat |
 | Ctrl+U (Cmd+Backspace on macOS) | Delete to the start of the line |
 | Ctrl+← →, Alt/Option+← → | Jump by word |
 | Home / End, Ctrl+A / Ctrl+E | Start / end of line |
 | ↑ / ↓ | History |
 | PageUp / PageDown, mouse wheel | Scroll the chat |
 | Tab | Complete |
-| Ctrl+V (Alt+V on Windows) | Paste an image from the clipboard as `[Image #N]` |
+| Ctrl+V (Alt+V on Windows) | Paste an image from the clipboard as `[Image #N]` (or its text when there's no image) |
 
 ## Mouse
 

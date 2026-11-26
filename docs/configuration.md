@@ -18,6 +18,8 @@ Settings live in `~/.nanocode/config.json` (readable only by you). Most are set 
 | `ollama_url` | URL | `http://localhost:11434` | Ollama server (or `OLLAMA_HOST`) |
 | `ollama_num_ctx` | number | 8k, 16k or 32k from your RAM | Ollama context size |
 | `context_tokens` | number | `150000` | Context size used for the "context used" meter on cloud models |
+| `auto_compact` | `true`, `false` | `true` | Summarize the chat before a message when it's over 80% of the context, instead of trimming old messages |
+| `prompt_cache` | `true`, `false` | `true` | Ask Claude models on OpenRouter to cache the prompt (much cheaper long chats) |
 | `agent_edits` | `true`, `false` | `false` | Let sub-agents edit files and run commands |
 | `auto_learn` | `true`, `false` | `false` | Review a turn and save lessons when tools failed more than once |
 | `search_engine` | `duckduckgo`, `bing`, `google`, `openrouter` | `duckduckgo` | Engine for `web_search` ([more](web.md)) |
