@@ -67,13 +67,13 @@ def test_share_redacts_the_gist_title(sandbox, monkeypatch):
 def test_export_markdown_and_json(sandbox, monkeypatch):
     make_chat(monkeypatch)
     run(nc.run_input("/export"))
-    md = next(sandbox.glob("*.md")).read_text()
+    md = next(sandbox.glob("*.md")).read_text(encoding="utf-8")
     assert md.startswith("# how do I call the API?") and "## You" in md and "## nanocode" in md
     run(nc.run_input("/export json out/chat.json"))
-    data = json.loads((sandbox / "out" / "chat.json").read_text())
+    data = json.loads((sandbox / "out" / "chat.json").read_text(encoding="utf-8"))
     assert data["id"] == nc.st.session["id"] and data["messages"][0]["content"] == "how do I call the API?"
     run(nc.run_input("/export notes.md"))
-    assert (sandbox / "notes.md").read_text().startswith("# ")
+    assert (sandbox / "notes.md").read_text(encoding="utf-8").startswith("# ")
 
 
 def test_markdown_shows_tool_calls_and_subscription_screens():
@@ -122,7 +122,7 @@ def test_share_and_unshare(sandbox, monkeypatch):
     async def fake_gh(*args, timeout=60):
         calls.append(args)
         if args[:2] == ("gist", "create"):
-            uploaded.append(Path(args[-1]).read_text())
+            uploaded.append(Path(args[-1]).read_text(encoding="utf-8"))
             return 0, "- Creating gist\nhttps://gist.github.com/me/0123456789abcdef0123\n"
         return 0, ""
 

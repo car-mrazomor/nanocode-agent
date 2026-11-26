@@ -71,6 +71,25 @@ def _absolute(pattern):
     return pattern.startswith(("/", "~", "\\")) or os.path.isabs(pattern)
 
 
+def _absolute_glob(pattern):
+    """An absolute pattern resolved like the paths it's matched against: ~ expanded, the folder before the first
+    wildcard through realpath (on Windows that also expands short names like RUNNER~1), / separators, and on
+    Windows lowercase (paths there aren't case-sensitive)."""
+    pattern = os.path.expanduser(pattern).replace("\\", "/")
+    cut = next((i for i, c in enumerate(pattern) if c in "*?["), len(pattern))
+    if cut == len(pattern):                              # no wildcard: one exact path
+        return _fold(os.path.realpath(pattern).replace("\\", "/"))
+    slash = pattern.rfind("/", 0, cut)                   # the fixed folder ends at the last / before it
+    folder, rest = pattern[:slash] or "/", pattern[slash:]
+    if len(folder) == 2 and folder[1] == ":":            # "C:" alone means the current folder on C:, not C:\\
+        folder += "/"
+    return _fold(os.path.realpath(folder).replace("\\", "/").rstrip("/") + rest)
+
+
+def _fold(text):
+    return text.lower() if os.name == "nt" else text
+
+
 def _match(rule, subjects, outside=False):
     """The action for one rule (a string, or {pattern: action}) and these subjects, or None. For a path outside
     the project, a relative pattern ("src/*", "*.py") can't allow it: only "*" and absolute patterns can."""
@@ -84,8 +103,11 @@ def _match(rule, subjects, outside=False):
             continue
         if outside and action == "allow" and pattern != "*" and not _absolute(pattern):
             continue
-        glob = os.path.expanduser(pattern) if pattern.startswith("~") else pattern
-        if action in ACTIONS and any(fnmatch.fnmatchcase(s, glob) for s in subjects):
+        if _absolute(pattern):
+            glob, candidates = _absolute_glob(pattern), [_fold(s.replace("\\", "/")) for s in subjects]
+        else:
+            glob, candidates = pattern, subjects
+        if action in ACTIONS and any(fnmatch.fnmatchcase(s, glob) for s in candidates):
             if best is None or len(pattern) > len(best[0]):
                 best = (pattern, action)
     return best and best[1]

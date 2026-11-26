@@ -83,8 +83,12 @@ def refresh():
 
 
 def split_args(arg):
+    """$1, $2…: words, with "quoted words" kept together, the same on every system. Backslashes stay as they
+    are (no escapes), so a Windows path like C:\\work\\a.txt is one argument as typed."""
+    lexer = shlex.shlex(arg, posix=True)
+    lexer.whitespace_split, lexer.escape = True, ""
     try:
-        return shlex.split(arg, posix=os.name != "nt")
+        return list(lexer)
     except ValueError:
         return arg.split()
 

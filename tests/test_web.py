@@ -29,7 +29,7 @@ def test_page_and_pwa_files_need_no_key(sandbox):
 
 
 def test_page_uses_the_theme_colors():
-    page = web.PAGE.read_text()
+    page = web.PAGE.read_text(encoding="utf-8")
     for name in ("bg", "panel", "text", "accent", "accent2", "error", "success"):
         assert nc.THEMES["opencode"][name] in page
 

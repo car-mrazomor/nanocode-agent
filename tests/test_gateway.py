@@ -156,8 +156,10 @@ def test_commands_new_status_and_read_only(sandbox, monkeypatch):
         await settle(gw)
         assert not Path("x.txt").exists() and platform.sent[-1][1] == "I can't write files here."
         first = gw.state["chats"]["telegram:100"]
+        before = len(platform.sent)
         await gw.handle(msg("/status@nanobot"))
-        assert "read-only" in platform.sent[-1][1] and "write x.txt" in platform.sent[-1][1]
+        status = "\n".join(text for _, text, _ in platform.sent[before:])  # long folder paths split it in parts
+        assert "read-only" in status and "write x.txt" in status
         await gw.handle(msg("/new"))
         assert platform.sent[-1][1] == "New chat started." and gw.state["chats"]["telegram:100"] != first
         await gw.handle(msg("/help"))
