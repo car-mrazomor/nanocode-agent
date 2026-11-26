@@ -236,3 +236,97 @@ def test_a_forked_claude_chat_sends_the_earlier_screen_with_its_first_message(sa
     notes = {}
     fork = server.api_fork("orig", notes)
     assert notes == {fork["id"]: "> hi\nearlier answer"}
+
+
+# --- Chat history for every provider, a reply that's still running, files ---
+
+def test_claude_chats_keep_their_own_copy_of_what_was_said(sandbox, monkeypatch):
+    import asyncio
+    Path("a.txt").write_text("hello\n")
+    nc.st.backend = "sdk"
+    nc.new_session()
+
+    async def fake_sdk_query(text, images=None):
+        await nc.run_tool("read", {"path": "a.txt"})
+        nc.stream_text("It says hello.")
+        nc.stream_end()
+    monkeypatch.setattr(nc, "sdk_query", fake_sdk_query)
+    asyncio.run(nc.send("what's in a.txt?", display="what's in a.txt?"))
+    data = json.loads((nc.sessions_dir() / f"{nc.st.session['id']}.json").read_text())
+    turns = web.session_turns(data)
+    assert [t["role"] for t in turns] == ["user", "tool", "tool_result", "assistant"]
+    assert turns[0]["text"] == "what's in a.txt?" and "hello" in turns[2]["text"] and turns[3]["text"] == "It says hello."
+    assert "turns" in nc.SESSION_KEYS                       # kept when the chat is opened again and continued
+    from nanokit import sessions
+    assert "It says hello." in sessions.chat_body(data)     # and /search finds it
+
+
+def test_older_claude_chats_come_from_claude_codes_transcript(sandbox, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    folder = tmp_path / "claude" / "projects" / "-somewhere"
+    folder.mkdir(parents=True)
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "fix the bug"}},
+        {"type": "user", "isMeta": True, "message": {"role": "user", "content": "<system-reminder>x"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "mcp__nano__read", "input": {"path": "a.py"}}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "print(1)"}]}]}},
+        {"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": "a sub-agent"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Fixed."}]}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Run it."}]}},
+    ]
+    (folder / "1234abcd-0000.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+    turns = web.session_turns({"backend": "sdk", "sdk_session_id": "1234abcd-0000", "messages": [], "screen": "old"})
+    assert [(t["role"], t.get("text") or t.get("name")) for t in turns] == [
+        ("user", "fix the bug"), ("tool", "read"), ("tool_result", "print(1)"), ("assistant", "Fixed.\n\nRun it.")]
+    assert web.claude_turns("../../etc/passwd") == []
+
+
+def test_a_reloaded_page_finds_the_reply_still_running(sandbox, monkeypatch):
+    import asyncio
+    release = asyncio.Event()
+
+    async def slow_send(text, display=None, images=None):
+        nc.st.session["title"] = "slow"
+        nc.stream_text("Working on it")
+        await release.wait()
+    monkeypatch.setattr(nc, "_send", slow_send)
+
+    async def test(port, api):
+        status, _, body = await request(port, "POST", "/v1/runs", {"input": "do it", "session_id": "chat-1"})
+        run = api.runs[json.loads(body)["run_id"]]
+        while run.status != "running":
+            await asyncio.sleep(0.01)
+        status, _, body = await request(port, "GET", "/v1/sessions/chat-1")   # no file yet: just the running turn
+        data = json.loads(body)
+        assert status == 200 and data["run"] == {"id": run.id, "status": "running", "prompt": "do it"}
+        release.set()
+        await run.task
+        status, _, body = await request(port, "GET", "/v1/sessions/chat-1")
+        assert "run" not in json.loads(body)
+    with_server(test)
+
+
+def test_files_are_saved_and_given_to_the_model(sandbox, monkeypatch):
+    import base64
+    requests = fake_openrouter(monkeypatch, [text_reply("Got them.")])
+    text = base64.b64encode(b"name,age\nada,36\n").decode()
+    pdf = base64.b64encode(b"%PDF-1.4\x00\x01binary").decode()
+
+    async def test(port, api):
+        status, _, body = await request(port, "POST", "/v1/runs", {"input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "read these"},
+            {"type": "input_file", "filename": "../people.csv", "file_data": "data:text/csv;base64," + text},
+            {"type": "input_file", "filename": "report.pdf", "file_data": pdf}]}]})
+        assert status == 202
+        run = api.runs[json.loads(body)["run_id"]]
+        await run.task
+        sent = json.dumps(requests[0]["messages"])
+        assert "ada,36" in sent and "report.pdf" in sent and "open it with your tools" in sent
+        saved = sorted(p.name for p in (nc.project_dir() / "uploads").iterdir())
+        assert len(saved) == 2 and saved[0].endswith("people.csv") and saved[1].endswith("report.pdf")
+        status, _, _ = await request(port, "POST", "/v1/runs", {"input": [{"role": "user", "content": [
+            {"type": "input_file", "filename": "x.txt"}]}]})
+        assert status == 400
+    with_server(test)

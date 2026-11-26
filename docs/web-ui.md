@@ -40,8 +40,10 @@ In the message box:
 - **`/` opens the command menu**: the same commands as in the terminal (`/compact`, `/init`, `/recap`, `/undo`, `/rollback`, `/think`, your skills and custom commands…), with ↑ ↓ and Tab. Their output shows in the chat, colored as in the terminal. `# note` saves to memory.
 - **Model picker** and **thinking level**, at the bottom right.
 - **Build / Plan**: in plan mode the model only reads and plans (`Shift+Tab` switches, as in the terminal).
-- **Images:** attach, paste or drop them.
+- **Files and images:** attach, paste or drop them. Images go to the model as images. Any other file is saved in the project's `.nanocode/uploads/`: a text file (code, CSV, logs…) is attached like `@file` in the terminal, and anything else (PDF, zip, spreadsheet) is there for the model to open with its tools. Up to 25 MB each.
 - The reply streams with Markdown (code blocks have a copy button); each tool call is a line you can click open; **Stop** (or Esc) stops the turn. Tokens and cost after each reply, and a browser notification when a reply finishes in a background tab.
+
+Reloading the page (or opening it on another device) keeps everything: every chat shows its whole history, on every provider, and a reply that's still being written is picked up where it is.
 
 `/undo`, `/redo` and `/rollback` ask you first in the page. Commands that need a terminal (tabs, the editor, `/terminal-setup`) or change the server itself (`/provider`, `/update`, `/auto`) aren't offered.
 

@@ -45,7 +45,7 @@ print(reply.choices[0].message.content)
 | `GET` | `/v1/capabilities` | What this server supports, for apps that check first |
 | `GET` | `/v1/tools`, `/v1/skills` | nanocode's tools and your skills |
 | `GET` | `/v1/sessions` | This folder's saved chats (id, title, dates, model), newest first |
-| `GET` | `/v1/sessions/{id}` | One saved chat: its turns (your messages, replies, tool calls and results) |
+| `GET` | `/v1/sessions/{id}` | One saved chat: its turns (your messages, replies, tool calls and results), on every provider, and `run` when a turn is still running in it (follow it with `/v1/runs/{id}/events`) |
 | `GET` | `/v1/sessions/{id}/export?format=md` | A chat as Markdown (or `json`): `{"filename", "content"}` |
 | `POST` | `/v1/sessions/{id}/fork` | A copy of a chat under a new id, to try another direction |
 | `GET` | `/v1/search?q=words` | This folder's chats that mention the words, best first, with the matching part |
@@ -86,6 +86,16 @@ Events: `run.started`, `delta` (reply text), `tool.started`, `tool.completed`, `
 
 - `"mode": "plan"` (or `"build"`) sets the mode before the turn: in plan mode the model only reads and plans.
 - `"command": true` runs `input` as a slash command, as if typed in the terminal: `{"input": "/stats", "command": true}`. What it prints comes as `output` events (with the terminal's colors as ANSI codes); a command that starts a turn (`/compact`, a skill) also streams it as usual. `/undo`, `/redo` and `/rollback <n>` need `"confirmed": true`, meaning you asked the person first. Commands that need a terminal or change the server (`/tab`, `/editor`, `/provider`, `/update`, `/auto`…) are refused with `400`; `GET /v1/workspace` lists the ones you can run. With a read-only API, only commands that change nothing are allowed.
+
+## Files
+
+Any other file goes in the same message as an `input_file` part (OpenAI's shape; `{"type": "file", "file": {...}}` works too):
+
+```json
+{"type": "input_file", "filename": "report.pdf", "file_data": "data:application/pdf;base64,..."}
+```
+
+It's saved in the project's `.nanocode/uploads/`. A text file's content is attached to the message (like `@file` in the terminal); any other file is named in the message so the model opens it with its tools. Up to 25 MB each.
 
 ## Images
 

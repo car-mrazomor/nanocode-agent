@@ -24,8 +24,10 @@ import urllib.parse
 nc = None  # the nanocode module, set by serve()
 
 API_DEFAULT_PORT = 8765
-API_MAX_BODY = 40 * 1024 * 1024  # room for a few base64 images
+API_MAX_BODY = 60 * 1024 * 1024  # room for a few base64 images and files
 API_MAX_IMAGE = 20 * 1024 * 1024
+API_MAX_FILE = 25 * 1024 * 1024
+FILE_PARTS = ("input_file", "file")
 API_MAX_STORED = 100  # responses kept for previous_response_id
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 API_MAX_QUEUED = 20  # turns waiting for the one before them; more get 429
@@ -315,7 +317,7 @@ class ApiServer:
                 {"id": c["id"], "title": c.get("title"), "created": c.get("created"), "updated": c.get("updated"),
                  "model": c.get("model")} for c in chats]})
         if method == "GET" and parts[:2] == ["v1", "sessions"] and len(parts) == 3:
-            return await write_json(writer, 200, api_session(parts[2]))
+            return await write_json(writer, 200, await self.session_with_run(parts[2]))
         if method == "GET" and parts[:2] == ["v1", "sessions"] and parts[3:] == ["export"]:
             return await write_json(writer, 200, api_export(parts[2], query.get("format", "md")))
         if method == "POST" and parts[:2] == ["v1", "sessions"] and parts[3:] == ["fork"]:
@@ -368,6 +370,21 @@ class ApiServer:
                 await self.stop(run)
                 return await write_json(writer, 200, {"run_id": run.id, "status": "stopping"})
         raise ApiError(404, f"{method} {path} isn't an endpoint (GET /v1/capabilities lists them)", "not_found")
+
+    async def session_with_run(self, session_id):
+        """A saved chat, plus the turn still running in it (so a page opened mid-reply can follow it). A new chat
+        whose first turn is still running has no file yet: it's shown with just that turn."""
+        run = next((r for r in reversed(list(self.runs.values()))
+                    if r.session_id == session_id and not r.done and not r.command), None)
+        try:
+            data = await asyncio.to_thread(api_session, session_id)   # a long Claude transcript: off the loop
+        except ApiError as e:
+            if run is None or e.status != 404:
+                raise
+            data = {"object": "nanocode.session", "id": session_id, "title": None, "turns": []}
+        if run is not None:
+            data["run"] = {"id": run.id, "status": run.status, "prompt": run.prompt}
+        return data
 
     # --- POST /v1/chat/completions ---
 
@@ -695,6 +712,41 @@ async def api_search(query):
 
 
 IMAGE_PARTS = ("image_url", "input_image", "image")
+
+
+def save_upload(part):
+    """A file sent with a message (OpenAI's input_file / file parts: a filename and base64 data). It's saved in
+    .nanocode/uploads; a text file is attached like an @mention in the terminal, any other file (PDF, zip, a
+    spreadsheet…) is named so the model can open it with its tools."""
+    source = part.get("file") if isinstance(part.get("file"), dict) else part
+    name = os.path.basename(str(source.get("filename") or "file").replace("\\", "/")).strip() or "file"
+    name = re.sub(r"[^\w.\- ]", "_", name)[:100].lstrip(".") or "file"
+    data = source.get("file_data") or source.get("data") or ""
+    if not isinstance(data, str) or not data:
+        raise ApiError(400, f"the file '{name}' has no file_data (base64, or a data: URL)")
+    if data.startswith("data:"):
+        data = data.partition(",")[2]
+    try:
+        raw = base64.b64decode(data, validate=False)
+    except (binascii.Error, ValueError):
+        raise ApiError(400, f"the file '{name}' isn't valid base64")
+    if len(raw) > API_MAX_FILE:
+        raise ApiError(413, f"the file '{name}' is over {API_MAX_FILE // (1024 * 1024)} MB")
+    nc.ensure_project_dir()
+    folder = nc.project_dir() / "uploads"
+    folder.mkdir(exist_ok=True)
+    path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{name}"
+    n = 1
+    while path.exists():
+        path, n = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-{n}-{name}", n + 1
+    path.write_bytes(raw)
+    shown = nc.display_path(path)
+    if b"\0" not in raw[:8192]:
+        try:
+            return f'<file path="{shown}">\n{nc.cap(raw.decode("utf-8"), 100_000)}\n</file>'
+        except UnicodeDecodeError:
+            pass
+    return f'<file path="{shown}" size="{len(raw)} bytes">(saved there; open it with your tools)</file>'
 IMAGE_MAGIC = [(b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"), (b"GIF87a", "image/gif"),
                (b"GIF89a", "image/gif")]
 
@@ -716,8 +768,10 @@ def content_parts(content):
             texts.append(part.get("text") or "")
         elif isinstance(part, dict) and part.get("type") in IMAGE_PARTS:
             images.append(decode_image(part))
+        elif isinstance(part, dict) and part.get("type") in FILE_PARTS:
+            texts.append(save_upload(part))
         elif isinstance(part, dict):
-            raise ApiError(400, f"'{part.get('type')}' content isn't supported: send text and images",
+            raise ApiError(400, f"'{part.get('type')}' content isn't supported: send text, images and files",
                            "unsupported_content_type")
     return "\n".join(texts), images
 

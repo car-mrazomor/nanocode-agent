@@ -65,6 +65,12 @@ def chat_turns(data):
             for call in m.get("tool_calls") or []:
                 fn = call.get("function") or {}
                 turns.append(("tool", f"{fn.get('name')} {fn.get('arguments') or ''}".strip()))
+    if not turns:                              # Claude subscription: nanocode's own copy of the chat
+        for t in data.get("turns") or []:
+            if isinstance(t, dict) and t.get("role") in ("user", "assistant") and t.get("text"):
+                turns.append((t["role"], t["text"]))
+            elif isinstance(t, dict) and t.get("role") == "tool":
+                turns.append(("tool", f"{t.get('name')} {json.dumps(t.get('arguments') or {})}"))
     if not turns and data.get("screen"):
         turns.append(("screen", screen_text(data["screen"])))
     return turns

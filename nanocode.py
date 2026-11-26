@@ -770,9 +770,33 @@ CONFIRMED = contextvars.ContextVar("confirmed", default=False)
 
 
 def emit(kind, **data):
+    record_turn(kind, data)
     sink = EVENTS.get()
     if sink is not None:
         sink(kind, data)
+
+
+def record_turn(kind, data):
+    """On the Claude subscription, Claude Code keeps the conversation and nanocode has no messages of its own. So
+    nanocode keeps its own copy of what was said (saved with the chat as "turns"), like with every other provider:
+    any chat can be shown again, in the web app or another device, even after Claude Code cleans up old ones."""
+    if st.backend != "sdk" or kind not in ("user", "delta", "tool.started", "tool.completed"):
+        return
+    turns = st.session.get("turns")
+    if not isinstance(turns, list):
+        turns = st.session["turns"] = []
+    if kind == "user":
+        turns.append({"role": "user", "text": data["text"]})
+    elif kind == "delta":
+        if turns and turns[-1]["role"] == "assistant":
+            turns[-1]["text"] += data["text"]
+        else:
+            turns.append({"role": "assistant", "text": data["text"]})
+    elif kind == "tool.started":
+        turns.append({"role": "tool", "id": data.get("id"), "name": data.get("name"), "arguments": data.get("arguments")})
+    else:
+        turns.append({"role": "tool_result", "id": data.get("id"), "text": cap(str(data.get("output") or ""), 20_000),
+                      "is_error": bool(data.get("is_error"))})
 
 
 def stream_text(chunk):
@@ -3786,7 +3810,7 @@ async def recap():
 
 # --- Sessions: .nanocode/sessions/<id>.json ---
 
-SESSION_KEYS = ("id", "title", "created", "sdk_session_id")
+SESSION_KEYS = ("id", "title", "created", "sdk_session_id", "turns")
 
 
 def make_session_id():
@@ -4700,6 +4724,8 @@ async def send(text, display=None, images=None):
 
 
 async def _send(text, display=None, images=None):
+    record_turn("user", {"text": (display if display is not None else text)
+                         + (f"\n[{len(images)} image{'s' * (len(images) > 1)}]" if images and display is None else "")})
     if display is not None and not st.headless:
         out(user_block(display))
     if not st.session.get("title"):

@@ -163,6 +163,10 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
 #chips:empty { display: none; }
 .chip { position: relative; }
 .chip img { width: 54px; height: 54px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); display: block; }
+.chip .file { height: 54px; max-width: 180px; display: flex; align-items: center; gap: 6px; padding: 0 10px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel2); color: var(--muted); font-size: 12px; }
+.chip .file span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.att { color: var(--accent2); font-size: 13px; }
 .chip button { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; padding: 0; border-radius: 50%;
   font-size: 11px; line-height: 1; }
 #bar { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px 10px; gap: 8px; }
@@ -285,9 +289,9 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
       <textarea id="input" rows="1" placeholder="Message nanocode…  (/ for commands)"></textarea>
       <div id="bar">
         <span class="l">
-          <button class="ghost icon" id="attach" title="Attach images (or paste / drop them)"><svg class="i"><use href="#i-image"/></svg></button>
+          <button class="ghost icon" id="attach" title="Attach files or images (or paste / drop them)"><svg class="i"><use href="#i-image"/></svg></button>
           <button class="ghost icon" id="slashBtn" title="Commands"><svg class="i"><use href="#i-slash"/></svg></button>
-          <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <input type="file" id="file" multiple hidden>
         </span>
         <span class="r">
           <button class="pill" id="modelBtn" title="Model"><svg class="i"><use href="#i-cpu"/></svg><span class="t" id="modelName">…</span></button>
@@ -458,9 +462,22 @@ function add(cls, html) {
   const el = document.createElement("div");
   el.className = "msg " + cls; el.innerHTML = html; chat.appendChild(el); return el;
 }
-function userMsg(text, images) {
+// A message as sent can hold attached files (<file path="…">content</file>): shown as one line each.
+function splitFiles(text) {
+  const files = [];
+  text = String(text || "").replace(/\n*<file path="([^"]*)"[^>]*>[\s\S]*?<\/file>/g, (_, p) => { files.push(p); return ""; });
+  return { text: text.trim(), files };
+}
+function userMsg(raw, images) {
+  const { text, files } = splitFiles(raw);
   const el = add("user", '<div class="bar"></div><div class="body"><div class="text"></div><div class="imgs"></div></div>');
   el.querySelector(".text").textContent = text;
+  for (const f of files) {
+    const line = document.createElement("div");
+    line.className = "att"; line.textContent = "📎 " + f.split("/").pop().replace(/^\d{8}-\d{6}-(\d+-)?/, "");
+    line.title = f;
+    el.querySelector(".body").insertBefore(line, el.querySelector(".imgs"));
+  }
   for (const src of images || []) { const img = document.createElement("img"); img.src = src; el.querySelector(".imgs").appendChild(img); }
   if (!text) el.querySelector(".text").remove();
   return el;
@@ -563,10 +580,12 @@ function showChat() {
   $("panel").hidden = true; $("chat").hidden = false;
   for (const n of document.querySelectorAll(".nav[data-panel]")) n.classList.remove("active");
 }
-async function openSession(id) {
+async function openSession(id, quiet) {
   if (state.busy) { toast("Wait for the reply to finish (or stop it)", "warning"); return; }
   let data;
-  try { data = await api("GET", "/v1/sessions/" + encodeURIComponent(id)); } catch (e) { toast(e.message, "error"); return; }
+  status("opening…", true);
+  try { data = await api("GET", "/v1/sessions/" + encodeURIComponent(id)); }
+  catch (e) { status(""); if (!quiet) toast(e.message, "error"); else store.set("nanocode.session", null); return; }
   showChat();
   state.session = id;
   store.set("nanocode.session", id);
@@ -579,11 +598,17 @@ async function openSession(id) {
     else if (t.role === "tool_result" && tools[t.id]) toolDone(tools[t.id], t.text, t.is_error);
     else if (t.role === "screen") { const el = add("screen", ""); el.innerHTML = ansi(t.text); }
   }
-  if (!chat.children.length) hero();
-  bottom();
-  setTitle(data.title);
+  setTitle(data.title || (data.run ? splitFiles(data.run.prompt).text.slice(0, 60) : ""));
   status("");
   loadSessions();
+  if (data.run) {                    // a reply still being written: show it and follow it to the end
+    userMsg(data.run.prompt);
+    bottom();
+    followRun(data.run.id, data.run.prompt);
+    return;
+  }
+  if (!chat.children.length) hero();
+  bottom();
 }
 function newChat() {
   if (state.busy) { toast("Wait for the reply to finish (or stop it)", "warning"); return; }
@@ -667,23 +692,28 @@ function thinkMenu() {
 }
 
 // --- Images ---
+// Attachments: images go to the model as images; any other file is saved on the server and given to the model
+// (a text file's content is attached, like @file in the terminal).
 function addImages(files) {
   for (const f of files) {
-    if (!/^image\/(png|jpeg|webp|gif)$/.test(f.type)) { toast(f.name + ": PNG, JPEG, WebP or GIF only", "warning"); continue; }
-    if (f.size > 20 * 1024 * 1024) { toast(f.name + " is over 20 MB", "warning"); continue; }
+    const image = /^image\/(png|jpeg|webp|gif)$/.test(f.type);
+    const limit = image ? 20 : 25;
+    if (f.size > limit * 1024 * 1024) { toast(f.name + " is over " + limit + " MB", "warning"); continue; }
     const r = new FileReader();
-    r.onload = () => { state.images.push(r.result); chips(); };
+    r.onload = () => { state.images.push({ name: f.name, image, data: r.result }); chips(); };
+    r.onerror = () => toast("Can't read " + f.name, "error");
     r.readAsDataURL(f);
   }
 }
 function chips() {
   const el = $("chips");
   el.innerHTML = "";
-  state.images.forEach((src, n) => {
+  state.images.forEach((a, n) => {
     const c = document.createElement("div");
     c.className = "chip";
-    c.innerHTML = '<img alt=""><button title="Remove">×</button>';
-    c.querySelector("img").src = src;
+    c.title = a.name;
+    c.innerHTML = (a.image ? '<img alt="">' : '<div class="file">' + icon("download") + "<span></span></div>") + '<button title="Remove">×</button>';
+    if (a.image) c.querySelector("img").src = a.data; else c.querySelector("span").textContent = a.name;
     c.querySelector("button").onclick = () => { state.images.splice(n, 1); chips(); };
     el.appendChild(c);
   });
@@ -935,26 +965,44 @@ async function submit() {
   input.value = ""; resize();
   showChat();
   try { if ("Notification" in window && Notification.permission === "default") Notification.requestPermission(); } catch (e) {}
-  const images = state.images.splice(0);
+  const attached = state.images.splice(0);
   chips();
-  userMsg(text, images); bottom();
+  const imgs = attached.filter((a) => a.image), files = attached.filter((a) => !a.image);
+  userMsg(text + files.map((f) => '\n<file path="' + f.name + '"></file>').join(""), imgs.map((a) => a.data)); bottom();
+  const body = attached.length
+    ? { input: [{ role: "user", content: [{ type: "input_text", text: text }]
+        .concat(imgs.map((a) => ({ type: "input_image", image_url: a.data })))
+        .concat(files.map((a) => ({ type: "input_file", filename: a.name, file_data: a.data }))) }] }
+    : { input: text };
+  body.session_id = state.session || undefined;
+  body.mode = state.mode;
+  setBusy(true);
+  status("sending…", true);
+  let runId;
+  try {
+    runId = (await api("POST", "/v1/runs", body)).run_id;
+  } catch (e) {
+    setBusy(false); status("");
+    if (e.message !== "unauthorized") add("error", esc("⏺ " + e.message));
+    return;
+  }
+  await followRun(runId, text);
+}
+
+// Shows a turn as it happens: the reply, tool calls, then tokens and cost. Also picks up a turn that was already
+// running (the page was reloaded mid-reply): its events so far come first.
+async function followRun(runId, text) {
   setBusy(true);
   status("thinking…", true);
   let reply = null, source = "";
   const runTools = {};
-  const body = images.length
-    ? { input: [{ role: "user", content: [{ type: "input_text", text: text }].concat(images.map((src) => ({ type: "input_image", image_url: src }))) }] }
-    : { input: text };
-  body.session_id = state.session || undefined;
-  body.mode = state.mode;
   try {
-    const started = await api("POST", "/v1/runs", body);
-    state.run = started.run_id;
-    await events("/v1/runs/" + started.run_id + "/events", (ev) => {
+    state.run = runId;
+    await events("/v1/runs/" + runId + "/events", (ev) => {
       const follow = stick();
       if (ev.event === "run.started") {
         state.session = ev.session_id; store.set("nanocode.session", ev.session_id);
-        if (!state.title) setTitle(text.slice(0, 60));
+        if (!state.title) setTitle(splitFiles(text).text.slice(0, 60));
       } else if (ev.event === "delta") {
         if (!reply) { reply = add("reply", ""); source = ""; }
         source += ev.text; reply.innerHTML = markdown(source);
@@ -1021,7 +1069,7 @@ async function connect(key) {
     hero();
     await loadSessions();
     const last = store.get("nanocode.session");
-    if (last && state.sessions.some((s) => s.id === last)) await openSession(last);
+    if (last) await openSession(last, true);
     $("input").focus();
   } catch (e) {
     if (e.message !== "unauthorized") askKey("Can't reach nanocode: " + e.message);
