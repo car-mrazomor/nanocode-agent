@@ -84,9 +84,14 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 #hero .sub { margin: 6px 0 22px; }
 #hero .tip { color: var(--faint); font-size: 12px; max-width: 460px; margin: 0 auto; }
 .msg { margin: 0 0 18px; }
-.user { background: var(--panel); border-left: 2px solid var(--accent); padding: 10px 14px; white-space: pre-wrap;
-  word-wrap: break-word; }
-.user img { display: block; max-width: 220px; max-height: 160px; border-radius: 4px; margin-top: 8px; }
+.msg.user { display: flex; justify-content: flex-end; margin: 6px 0 20px; }
+.user .bubble { max-width: min(78%, 640px); background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 14px 14px 4px 14px; padding: 10px 14px; color: var(--text); line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+.user .bubble.cmd { font-size: 13px; color: var(--cyan); background: var(--panel); }
+.user .imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; justify-content: flex-end; }
+.user .imgs:empty { display: none; }
+.user img { display: block; max-width: 200px; max-height: 150px; border-radius: 8px; border: 1px solid var(--line); }
 .reply { padding: 0 2px; word-wrap: break-word; position: relative; }
 .reply p { margin: 0 0 10px; }
 .reply h1, .reply h2, .reply h3, .reply h4 { margin: 14px 0 8px; font-size: 15px; color: var(--accent); }
@@ -205,6 +210,7 @@ details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--lin
 #login p { color: var(--muted); margin: 6px 0 0; font-size: 13px; }
 
 @media (max-width: 760px) {
+  .user .bubble { max-width: 88%; }
   #side { position: fixed; inset: 0 auto 0 0; z-index: 30; transform: translateX(-100%); transition: transform .15s;
     width: 82vw; max-width: 320px; }
   body.menu #side { transform: none; box-shadow: 0 0 40px #000; }
@@ -451,9 +457,12 @@ function add(cls, html) {
   el.className = "msg " + cls; el.innerHTML = html; chat.appendChild(el); return el;
 }
 function userMsg(text, images) {
-  const el = add("user", "");
-  el.textContent = text;
-  for (const src of images || []) { const img = document.createElement("img"); img.src = src; el.appendChild(img); }
+  const el = add("user", '<div class="bubble"><div class="text"></div><div class="imgs"></div></div>');
+  const bubble = el.firstChild;
+  bubble.querySelector(".text").textContent = text;
+  if (/^[\/#]\S/.test(text)) bubble.classList.add("cmd");
+  for (const src of images || []) { const img = document.createElement("img"); img.src = src; bubble.querySelector(".imgs").appendChild(img); }
+  if (!text) bubble.querySelector(".text").remove();
   return el;
 }
 function toolEl(name, args) {
