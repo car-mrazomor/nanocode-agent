@@ -259,6 +259,9 @@ PROVIDER_LIST = [
              ["LMSTUDIO_API_KEY"], needs_key=False, max_tokens=None, local=True),
     Provider("custom", "Custom API", "any OpenAI-compatible API (vLLM, LiteLLM, a proxy…)", "",
              ["CUSTOM_API_KEY"], needs_key=False, max_tokens=None),
+    Provider("zai", "Z.AI", "GLM models on the GLM Coding Plan, pay per month", "https://api.z.ai/api/coding/paas/v4",
+             ["ZAI_API_KEY"], "glm-5.4", ["glm-5.4", "glm-5.3", "glm-5.3-flash"], "https://z.ai/manage-apikey/apikey-list",
+             reasoning=True, max_tokens=None),
 ]
 
 for _p in PROVIDER_LIST:
