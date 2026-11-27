@@ -23,5 +23,6 @@ def sandbox(tmp_path, monkeypatch):
     nc.st.__init__()
     nc._config_base = {}
     nc.st.auto_approve = True
+    nc.SURFACE = "terminal"
     nc.apply_theme({})
     yield project

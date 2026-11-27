@@ -84,7 +84,7 @@ async def send_file(args):
 
 @on("system_prompt")
 def app_note():
-    if not nc.st.serving:
+    if nc.SURFACE != "api":
         return None
     return ("# The user's app\nThe user talks to you from an app (a browser or their phone), not this computer's "
             "terminal: they can't open files here. To give them a file or a picture, use send_file; it shows in "

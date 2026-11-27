@@ -1007,6 +1007,7 @@ async def serve(module, host=None, port=None, yes=False):
         say(f"{nc.RED}⏺ the API key must be at least 8 characters{nc.RESET}")
         return 1
     nc.st.headless = nc.st.serving = True
+    nc.SURFACE = "api"
     # Edits and commands are allowed by default only on this machine; reachable from others, they have to be
     # turned on explicitly with "permissions": "auto".
     default = "auto" if host in LOCAL_HOSTS else "read-only"

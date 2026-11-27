@@ -27,6 +27,7 @@ nanocode is a small, hackable coding agent for the terminal, in one Python file.
 | [Background shells](shells.md) | Dev servers, watchers and REPLs |
 | [Memory, skills and learning](memory-and-skills.md) | What nanocode remembers and how it improves |
 | [Reverse engineering (REA)](rea.md) | The bundled REA MCP server |
+| [Usage tracking](usage-tracking.md) | How trackers recognize nanocode: its User-Agent, and `~/.nanocode/usage.jsonl` |
 | [Safety](safety.md) | Permissions, what always asks, undo |
 | [Configuration](configuration.md) | Every setting in `config.json` and every environment variable |
 | [Development](development.md) | Running from source, tests, releases |

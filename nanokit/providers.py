@@ -104,7 +104,8 @@ class Provider:
 
     def fetch_models(self, timeout=3):
         """The API's own list (GET /models), or [] when it has none or can't be reached."""
-        resp = httpx.get(self.base() + "/models", headers=self.headers(require=False), timeout=timeout)
+        resp = httpx.get(self.base() + "/models", headers={**nc.client_headers(), **self.headers(require=False)},
+                         timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
         items = data.get("data") if isinstance(data, dict) else data

@@ -188,6 +188,19 @@ def home_dir():
     return Path(os.environ.get("NANOCODE_HOME") or Path.home() / ".nanocode")
 
 
+# Where this nanocode runs: "terminal", "api" (nanocode serve: the web and iOS apps), "gateway" (chat apps),
+# "acp" (an editor) or "headless" (-p, scripts, GitHub). Set by each entry point; the usage log records it.
+SURFACE = "terminal"
+
+
+def client_headers():
+    """How nanocode introduces itself to every model provider (OpenRouter shows the name and link; others, and
+    proxies or trackers in between, see the User-Agent). Not used for the Claude subscription: that goes
+    through Claude Code."""
+    return {"User-Agent": f"nanocode/{__version__} ({platform.system().lower()}; {SURFACE})",
+            "X-Title": "nanocode", "HTTP-Referer": f"https://github.com/{REPO}"}
+
+
 def config_file():
     return home_dir() / "config.json"
 
@@ -1454,12 +1467,39 @@ def fmt_cost(cost):
     return f"{amount} (in your plan)" if st.backend == "sdk" else amount
 
 
+def usage_log_path():
+    return home_dir() / "usage.jsonl"
+
+
+def log_usage(tokens_in, tokens_out, cost, seconds):
+    """One line per reply in ~/.nanocode/usage.jsonl, for usage trackers: which agent (nanocode), provider,
+    model, tokens, cost and where it ran. Every provider, the Claude subscription and Ollama included (on the
+    subscription, cost is what the same tokens would cost on the API). "usage_log": false in the config
+    turns it off."""
+    if st.config.get("usage_log") is False:
+        return
+    now = time.time()
+    billing = "subscription" if st.backend == "sdk" else "local" if st.backend == "ollama" else "api"
+    line = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now % 1 * 1000):03d}Z",
+            "agent": "nanocode", "version": __version__, "provider": st.provider, "billing": billing,
+            "model": st.model, "input_tokens": int(tokens_in or 0), "output_tokens": int(tokens_out or 0),
+            "cost_usd": round(float(cost or 0), 6), "duration_s": round(float(seconds or 0), 2),
+            "session": st.session.get("id"), "project": os.getcwd(), "surface": SURFACE}
+    try:
+        home_dir().mkdir(parents=True, exist_ok=True)
+        with open(usage_log_path(), "a", encoding="utf-8") as f:   # one write per line: lines never mix
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log_error(e)
+
+
 def show_usage(tokens_in, tokens_out, cost, seconds):
     """The dim line after every response: time, tokens and cost."""
     st.usage["input"] += tokens_in
     st.usage["output"] += tokens_out
     st.usage["cost"] += cost or 0
     emit("usage", input=tokens_in, output=tokens_out, cost=cost or 0, seconds=seconds)
+    log_usage(tokens_in, tokens_out, cost, seconds)
     verb = random.choice(DONE_VERBS)
     parts = [f"{verb} for {fmt_duration(seconds)}", pretty_model(st.model), f"{fmt_tokens(tokens_in)} in",
              f"{fmt_tokens(tokens_out)} out", fmt_cost(cost), time.strftime('%H:%M')]
@@ -3045,7 +3085,7 @@ def active_tools():
     has_email = email_config() is not None
     tools = [t for t in TOOLS.values() if (not t["name"].startswith("rea_") or rea_offered())
              and (not t["name"].startswith("email_") or has_email)
-             and (t["name"] != "send_file" or st.serving)] + list(MCP_TOOLS.values())   # files go to the apps
+             and (t["name"] != "send_file" or SURFACE == "api")] + list(MCP_TOOLS.values())   # files go to the apps
     allow = TOOL_FILTER.get()
     return [t for t in tools if allow(t)] if allow else tools
 
@@ -3395,11 +3435,10 @@ async def _openrouter_stream(system_prompt, messages, use_tools, reasoning):
         payload["tools"] = api_tools()
     if reasoning:
         payload["reasoning"] = reasoning
-    headers = {"Authorization": f"Bearer {st.openrouter_key}", "X-Title": "nanocode",
-               "HTTP-Referer": f"https://github.com/{REPO}"}
+    headers = {**client_headers(), "Authorization": f"Bearer {st.openrouter_key}"}
     url, api = OPENROUTER_URL, api_endpoint()
     if api:                                    # OpenAI, Gemini, DeepSeek…: their URL, key and fields
-        url, headers, payload = api.url(), api.headers(), api.prepare(payload, reasoning)
+        url, headers, payload = api.url(), {**client_headers(), **api.headers()}, api.prepare(payload, reasoning)
     timeout = httpx.Timeout(connect=20, read=300, write=60, pool=20)
     try:
         async with httpx.AsyncClient(timeout=timeout) as http:
@@ -3526,7 +3565,7 @@ def to_ollama_messages(messages):
 
 
 def ollama_models(url=None, timeout=3):
-    resp = httpx.get(f"{url or st.ollama_url}/api/tags", timeout=timeout)
+    resp = httpx.get(f"{url or st.ollama_url}/api/tags", timeout=timeout, headers=client_headers())
     resp.raise_for_status()
     models = []
     for m in resp.json().get("models", []):
@@ -3569,7 +3608,7 @@ async def _ollama_stream(system_prompt, messages, use_tools, think):
     timeout = httpx.Timeout(connect=10, read=900, write=60, pool=10)
     try:
         async with httpx.AsyncClient(timeout=timeout) as http:
-            async with http.stream("POST", f"{st.ollama_url}/api/chat", json=payload) as resp:
+            async with http.stream("POST", f"{st.ollama_url}/api/chat", json=payload, headers=client_headers()) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode(errors="replace")
                     try:
@@ -6780,7 +6819,7 @@ def doctor():
         return 1
     if st.provider == "openrouter":
         try:
-            resp = httpx.get("https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {st.openrouter_key}"},
+            resp = httpx.get("https://openrouter.ai/api/v1/key", headers={**client_headers(), "Authorization": f"Bearer {st.openrouter_key}"},
                              timeout=10)
             print(f"  {ok if resp.status_code == 200 else bad} OpenRouter key {'works' if resp.status_code == 200 else f'rejected ({resp.status_code})'}")
         except httpx.HTTPError as e:
@@ -6846,6 +6885,8 @@ def run_installer_quietly():
 
 
 async def run_headless(prompt, resume_last=False):
+    global SURFACE
+    SURFACE = "headless"
     st.headless = True
     new_session()
     if st.backend == "sdk":

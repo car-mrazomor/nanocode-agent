@@ -909,6 +909,7 @@ def run_foreground():
         return 1
     pid_file().write_text(str(os.getpid()))
     nc.st.headless = nc.st.serving = True
+    nc.SURFACE = "gateway"
     nc.st.auto_approve = settings().get("permissions", "read-only") == "auto"
     say(f"nanocode gateway {nc.__version__} · {', '.join(names)} · {nc.pretty_model(nc.st.model)} · "
         f"{nc.provider_label()} · {folder} · edits and commands "

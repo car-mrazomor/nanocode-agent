@@ -396,6 +396,7 @@ async def serve(stdin=None, stdout=None):
         stdout.flush()
 
     nc.st.headless = nc.st.serving = True
+    nc.SURFACE = "acp"
     nc.new_session()
     SERVER = server = AcpServer(write)
     threading.Thread(target=reader, daemon=True).start()

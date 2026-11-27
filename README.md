@@ -107,7 +107,7 @@ The cost is OpenRouter's real price, or "free (local)" with Ollama. With your Cl
 | `/init` | Write or refresh `AGENTS.md`: how to build, test and work on this project |
 | `/search <words>` | Search all your past chats; `/fork` copies this chat into a new tab ([more](docs/chats.md)) |
 | `/export`, `/share` | Save this chat as Markdown or JSON, or share it as a secret GitHub gist |
-| `/stats` | Usage across your chats: models, tools, tokens, cost, by day |
+| `/stats` | Usage across your chats: models, tools, tokens, cost, by day (trackers: [usage tracking](docs/usage-tracking.md)) |
 | `/permissions` | Rules like "allow `git status*`, ask for `git push*`" ([more](docs/permissions.md)) |
 | `/agents`, `/commands` | Your own agents (`@name task`) and slash commands, as Markdown files ([agents](docs/custom-agents.md), [commands](docs/custom-commands.md)) |
 | `/env` | Where commands run: here, in Docker, over SSH, or anywhere ([more](docs/environments.md)) |

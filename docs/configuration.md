@@ -24,6 +24,7 @@ Settings live in `~/.nanocode/config.json` (readable only by you). Most are set 
 | `prompt_cache` | `true`, `false` | `true` | Ask Claude models on OpenRouter to cache the prompt (much cheaper long chats) |
 | `agent_edits` | `true`, `false` | `false` | Let sub-agents edit files and run commands |
 | `auto_learn` | `true`, `false` | `false` | Review a turn and save lessons when tools failed more than once |
+| `usage_log` | `true`, `false` | `true` | Log every reply's provider, model, tokens and cost to `~/.nanocode/usage.jsonl`, for usage trackers ([more](usage-tracking.md)) |
 | `self_improve` | `true`, `false` | `false` | Quietly learn from hard turns in the background ([more](self-improve.md)) |
 | `skills_hub` | `owner/repo` | `anthropics/skills` | Where `/skills hub` finds skills ([more](skills-hub.md)) |
 | `hooks` | object | | Your shell commands before and after tools, at turn end, at startup ([more](hooks.md)) |

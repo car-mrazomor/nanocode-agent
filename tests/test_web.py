@@ -406,9 +406,10 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
 
 def test_send_file_is_offered_only_to_the_apps(sandbox):
-    nc.st.serving = False
-    assert "send_file" not in [t["name"] for t in nc.active_tools()]
-    nc.st.serving = True
+    for surface in ("terminal", "gateway", "acp", "headless"):        # chat apps and editors can't show files
+        nc.SURFACE = surface
+        assert "send_file" not in [t["name"] for t in nc.active_tools()]
+    nc.SURFACE = "api"
     assert "send_file" in [t["name"] for t in nc.active_tools()]
     assert "send_file" in nc.build_system_prompt()
 
