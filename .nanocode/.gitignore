@@ -1,0 +1,7 @@
+# nanocode: keep private stuff out of git (skills/ can be committed)
+sessions/
+memory.md
+undo/
+shells/
+images/
+api.json
