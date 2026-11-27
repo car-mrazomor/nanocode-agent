@@ -19,6 +19,7 @@ PRICES = {
     "gemini-4-argon": (2, 10), "gemini-3.8-flash": (0.83, 4.12),
     "deepseek-v4-pro": (0.67, 1.33), "deepseek-v4.1-flash": (0.05, 0.57),
     "grok-4.7": (2, 6),
+    "glm-5.3": (1.4, 4.4), "glm-5.3-flash": (0.15, 0.50), "glm-5.3-flashx": (0.37, 1.25),
 }
 CACHE_SECONDS = 600   # a provider's model list is asked for again after this long
 SKIP_MODELS = ("embed", "tts", "whisper", "dall-e", "image", "audio", "moderation", "realtime", "transcribe",
